@@ -1,0 +1,70 @@
+import Foundation
+@testable import GianCore
+
+/// Fictional backend with explicit response gates. Tests advance it without
+/// sleeps, real networking, credentials or a user's Application Support folder.
+@MainActor
+class ControlledService: GianClientServicing {
+    let base = PreviewGianClientService(script: .legacyContract)
+    var holdNextPage = false
+    var holdNextSend = false
+    var holdNextTranslation = false
+    var page: CheckedContinuation<TranscriptPageResponse, Never>?
+    var send: CheckedContinuation<CommandDispatchResponse, Never>?
+    var translation: CheckedContinuation<TranslationCommandResponse, Never>?
+    var sendRequest: SessionSendRequest?
+    var translationRequest: TranslationRequest?
+    var translationStatus: TranslationCommandResponse?
+    var translationPages: [TranslationTextPageResponse] = []
+    var transcriptPages: [TranscriptPageResponse] = []
+    var transcriptRequestCursors: [String?] = []
+
+    func startGitHubDeviceLogin(server: ServerAddress) async -> GitHubLoginStartResponse { await base.startGitHubDeviceLogin(server: server) }
+    func pollGitHubDeviceLogin(server: ServerAddress, loginID: LoginID) async -> GitHubLoginPollResponse { await base.pollGitHubDeviceLogin(server: server, loginID: loginID) }
+    func claimHostQR(server: ServerAddress, account: AccountID, qr: HostPairingQR) async -> HostPairingResponse { await base.claimHostQR(server: server, account: account, qr: qr) }
+    func refreshHostPairing(server: ServerAddress, account: AccountID, pairingID: PairingID) async -> HostPairingResponse { await base.refreshHostPairing(server: server, account: account, pairingID: pairingID) }
+    func refreshDirectory(scope: ClientScope) async -> DirectoryRefreshResponse { await base.refreshDirectory(scope: scope) }
+    func listDirectory(scope: ClientScope, request: DirectoryPageRequest) async -> DirectoryPageResponse { .unsupported }
+    func createSession(scope: ClientScope, request: SessionCreateRequest) async -> CommandDispatchResponse { await base.createSession(scope: scope, request: request) }
+    func sendMessage(scope: ClientScope, request: SessionSendRequest) async -> CommandDispatchResponse {
+        sendRequest = request
+        if holdNextSend {
+            holdNextSend = false
+            return await withCheckedContinuation { send = $0 }
+        }
+        return await base.sendMessage(scope: scope, request: request)
+    }
+    func stopSession(scope: ClientScope, request: SessionStopRequest) async -> CommandDispatchResponse { await base.stopSession(scope: scope, request: request) }
+    func queryCommand(scope: ClientScope, commandID: CommandID) async -> CommandStatusResponse { await base.queryCommand(scope: scope, commandID: commandID) }
+    func respondToInteraction(scope: ClientScope, request: InteractionRespondRequest) async -> CommandDispatchResponse { await base.respondToInteraction(scope: scope, request: request) }
+    func setAutoTranslation(scope: ClientScope, request: TranslationAutoRequest) async -> TranslationCommandResponse { await base.setAutoTranslation(scope: scope, request: request) }
+    func requestTranslation(scope: ClientScope, request: TranslationRequest) async -> TranslationCommandResponse {
+        translationRequest = request
+        if holdNextTranslation {
+            holdNextTranslation = false
+            return await withCheckedContinuation { translation = $0 }
+        }
+        return await base.requestTranslation(scope: scope, request: request)
+    }
+    func cancelTranslation(scope: ClientScope, request: TranslationCancelRequest) async -> TranslationCommandResponse { await base.cancelTranslation(scope: scope, request: request) }
+    func pageTranslationText(scope: ClientScope, request: TranslationTextPageRequest) async -> TranslationTextPageResponse {
+        if !translationPages.isEmpty { return translationPages.removeFirst() }
+        return await base.pageTranslationText(scope: scope, request: request)
+    }
+    func translationRequestStatus(scope: ClientScope, request: TranslationStatusRequest) async -> TranslationCommandResponse {
+        if let translationStatus { return translationStatus }
+        return await base.translationRequestStatus(scope: scope, request: request)
+    }
+    func uploadAttachment(scope: ClientScope, request: AttachmentUploadRequest) async -> AttachmentTransferResponse { await base.uploadAttachment(scope: scope, request: request) }
+    func downloadAttachment(scope: ClientScope, request: AttachmentDownloadRequest) async -> AttachmentTransferResponse { await base.downloadAttachment(scope: scope, request: request) }
+    func pageTranscript(scope: ClientScope, sessionID: SessionID, cursor: String?) async -> TranscriptPageResponse {
+        transcriptRequestCursors.append(cursor)
+        if holdNextPage {
+            holdNextPage = false
+            return await withCheckedContinuation { page = $0 }
+        }
+        if !transcriptPages.isEmpty { return transcriptPages.removeFirst() }
+        return await base.pageTranscript(scope: scope, sessionID: sessionID, cursor: cursor)
+    }
+    func searchSessions(scope: ClientScope, query: String) async -> SearchResponse { await base.searchSessions(scope: scope, query: query) }
+}

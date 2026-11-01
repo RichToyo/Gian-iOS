@@ -1,0 +1,405 @@
+import Foundation
+
+public enum ClientPhase: Sendable, Equatable {
+    case signedOut
+    case serverEntered
+    case awaitingGitHubDeviceLogin
+    case awaitingHostPairing
+    case ready
+}
+
+public enum AccountStatus: String, Sendable, Equatable {
+    case signedOut, pending, signedIn, denied, expired, error
+}
+
+public struct GitHubDeviceLoginState: Sendable, Equatable {
+    public var loginID: LoginID
+    public var userCode: String
+    public var verificationURI: URL
+    public var expiresAt: Date
+    public var intervalSeconds: Int
+    public var nextPollAt: Date
+
+    public init(
+        loginID: LoginID,
+        userCode: String,
+        verificationURI: URL,
+        expiresAt: Date,
+        intervalSeconds: Int,
+        nextPollAt: Date
+    ) {
+        self.loginID = loginID
+        self.userCode = userCode
+        self.verificationURI = verificationURI
+        self.expiresAt = expiresAt
+        self.intervalSeconds = intervalSeconds
+        self.nextPollAt = nextPollAt
+    }
+}
+
+public struct AccountAuthorization: Sendable, Equatable {
+    public var status: AccountStatus
+    public var accountID: AccountID?
+    public var login: String?
+    public var installationID: InstallationID?
+    public var deviceLogin: GitHubDeviceLoginState?
+
+    public init(
+        status: AccountStatus,
+        accountID: AccountID? = nil,
+        login: String? = nil,
+        installationID: InstallationID? = nil,
+        deviceLogin: GitHubDeviceLoginState? = nil
+    ) {
+        self.status = status
+        self.accountID = accountID
+        self.login = login
+        self.installationID = installationID
+        self.deviceLogin = deviceLogin
+    }
+
+    public static let signedOut = AccountAuthorization(status: .signedOut)
+}
+
+public struct PendingHostPairing: Sendable, Equatable {
+    public var pairingID: PairingID
+    public var hostID: HostID
+
+    public init(pairingID: PairingID, hostID: HostID) {
+        self.pairingID = pairingID
+        self.hostID = hostID
+    }
+}
+
+public enum ConnectionProjection: Sendable, Equatable {
+    case signedOut
+    case offline
+    case online
+    case hostOffline
+    case resyncing
+    case deviceRevoked
+    case versionMismatch(hostVersion: String)
+}
+
+public enum LocalConnectivity: Sendable, Equatable {
+    case available, unavailable
+}
+
+public enum ForegroundPresence: Sendable, Equatable {
+    case foreground, background
+}
+
+public enum DirectoryView: String, Sendable, Equatable {
+    case tasks, repos
+}
+
+public enum AppDestination: Sendable, Equatable {
+    case home
+    case newChat
+    case conversation(SessionID)
+}
+
+public struct NavigationState: Sendable, Equatable {
+    public var destination: AppDestination
+    public var directoryView: DirectoryView
+    public var settingsOpen: Bool
+
+    public init(destination: AppDestination, directoryView: DirectoryView, settingsOpen: Bool) {
+        self.destination = destination
+        self.directoryView = directoryView
+        self.settingsOpen = settingsOpen
+    }
+
+    public static let home = NavigationState(destination: .home, directoryView: .tasks, settingsOpen: false)
+}
+
+public struct DirectoryProjection: Sendable, Equatable {
+    public var authority: DirectoryAuthority
+    public var tasks: [TaskSection]
+    public var repos: [ConversationSummary]
+    public var reposSupport: SurfaceSupport
+    public var searchSupport: SurfaceSupport
+    public var searchQuery: String
+    public var searchResults: [ConversationSummary]
+    public var evaluatedAt: Date?
+    public var legacyLimitations: [LegacyLimitation]
+    public var repositories: [RepositorySection]
+    public var tasksPage: DirectoryPageStatus
+    public var reposPage: DirectoryPageStatus
+    public var searchPage: DirectoryPageStatus
+
+    public init(
+        authority: DirectoryAuthority,
+        tasks: [TaskSection],
+        repos: [ConversationSummary],
+        reposSupport: SurfaceSupport,
+        searchSupport: SurfaceSupport,
+        searchQuery: String,
+        searchResults: [ConversationSummary],
+        evaluatedAt: Date?,
+        legacyLimitations: [LegacyLimitation],
+        repositories: [RepositorySection] = [],
+        tasksPage: DirectoryPageStatus = DirectoryPageStatus(),
+        reposPage: DirectoryPageStatus = DirectoryPageStatus(),
+        searchPage: DirectoryPageStatus = DirectoryPageStatus()
+    ) {
+        self.authority = authority
+        self.tasks = tasks
+        self.repos = repos
+        self.reposSupport = reposSupport
+        self.searchSupport = searchSupport
+        self.searchQuery = searchQuery
+        self.searchResults = searchResults
+        self.evaluatedAt = evaluatedAt
+        self.legacyLimitations = legacyLimitations
+        self.repositories = repositories
+        self.tasksPage = tasksPage; self.reposPage = reposPage; self.searchPage = searchPage
+    }
+
+    public static let empty = DirectoryProjection(
+        authority: .legacyOpenDoingTasksOnly,
+        tasks: [],
+        repos: [],
+        reposSupport: .unsupported(.reposDirectory),
+        searchSupport: .unsupported(.olderSearch),
+        searchQuery: "",
+        searchResults: [],
+        evaluatedAt: nil,
+        legacyLimitations: LegacyCopy.limitations
+    )
+}
+
+public struct ConversationProjection: Sendable, Equatable {
+    public var session: SessionRecord
+    public var items: [TranscriptItem]
+    public var cursor: String?
+    public var hasOlder: Bool
+    public var hydratedFromCache: Bool
+
+    public init(
+        session: SessionRecord,
+        items: [TranscriptItem],
+        cursor: String?,
+        hasOlder: Bool,
+        hydratedFromCache: Bool
+    ) {
+        self.session = session
+        self.items = items
+        self.cursor = cursor
+        self.hasOlder = hasOlder
+        self.hydratedFromCache = hydratedFromCache
+    }
+}
+
+public struct ComposerSelection: Sendable, Equatable {
+    public var agentID: AgentID?
+    public var model: String?
+    public var workspaceID: WorkspaceID?
+    public var taskID: TaskID?
+
+    public init(agentID: AgentID? = nil, model: String? = nil, workspaceID: WorkspaceID? = nil, taskID: TaskID? = nil) {
+        self.agentID = agentID
+        self.model = model
+        self.workspaceID = workspaceID
+        self.taskID = taskID
+    }
+}
+
+public enum ComposerNotice: Sendable, Equatable {
+    case none
+    case offlineDraftRetained
+    case keptAfterUncertainOutcome
+    case translationNeedsChoice
+    case legacyTaskRequired
+}
+
+public struct ComposerProjection: Sendable, Equatable {
+    public var selection: ComposerSelection
+    public var draft: DraftDocument
+    public var send: SendPhase
+    public var notice: ComposerNotice
+
+    public init(selection: ComposerSelection, draft: DraftDocument, send: SendPhase, notice: ComposerNotice) {
+        self.selection = selection
+        self.draft = draft
+        self.send = send
+        self.notice = notice
+    }
+}
+
+public struct CapabilityProjection: Sendable, Equatable {
+    public var grants: [CapabilityGrant]
+    public var negotiatedFeatures: [KnownWireFeature]
+
+    public init(grants: [CapabilityGrant], negotiatedFeatures: [KnownWireFeature]) {
+        self.grants = grants
+        self.negotiatedFeatures = negotiatedFeatures
+    }
+
+    public static let empty = CapabilityProjection(grants: [], negotiatedFeatures: [])
+
+    public func state(of capability: BusinessCapability) -> CapabilityState {
+        grants.first { $0.capability == capability }?.state ?? .unsupported
+    }
+
+    public var translationNegotiated: Bool {
+        negotiatedFeatures.contains(.conversationTranslation)
+    }
+
+    public var directoryNegotiated: Bool {
+        negotiatedFeatures.contains(.sessionDirectoryV1)
+    }
+}
+
+public struct SyncProjection: Sendable, Equatable {
+    public var cursor: SyncCursor?
+    public var needsSnapshot: Bool
+    public var reason: SnapshotRequiredReason?
+
+    public init(cursor: SyncCursor? = nil, needsSnapshot: Bool = false, reason: SnapshotRequiredReason? = nil) {
+        self.cursor = cursor
+        self.needsSnapshot = needsSnapshot
+        self.reason = reason
+    }
+}
+
+public struct GianClientState: Sendable, Equatable {
+    /// Static, non-sensitive diagnostic. No database path or payload is exposed.
+    public var storageError: String? = nil
+    public var phase: ClientPhase
+    public var server: ServerAddress?
+    public var account: AccountAuthorization
+    public var hosts: [HostSummary]
+    public var currentHostID: HostID?
+    public var pendingPairing: PendingHostPairing?
+    public var connection: ConnectionProjection
+    public var localConnectivity: LocalConnectivity
+    public var foreground: ForegroundPresence
+    public var navigation: NavigationState
+    public var directory: DirectoryProjection
+    public var workspaces: [WorkspaceRecord]
+    public var agents: [AgentRecord]
+    public var catalogRevision: String
+    public var conversation: ConversationProjection?
+    public var drafts: [DraftDocument]
+    public var composer: ComposerProjection
+    public var interactions: [InteractionRecord]
+    public var translations: [SessionID: TranslationSessionState]
+    public var banners: [BannerItem]
+    public var capabilities: CapabilityProjection
+    public var sync: SyncProjection
+    public var pendingStop: SendPhase
+
+    public init(
+        phase: ClientPhase,
+        server: ServerAddress?,
+        account: AccountAuthorization,
+        hosts: [HostSummary],
+        currentHostID: HostID?,
+        pendingPairing: PendingHostPairing?,
+        connection: ConnectionProjection,
+        localConnectivity: LocalConnectivity,
+        foreground: ForegroundPresence,
+        navigation: NavigationState,
+        directory: DirectoryProjection,
+        workspaces: [WorkspaceRecord],
+        agents: [AgentRecord],
+        catalogRevision: String,
+        conversation: ConversationProjection?,
+        drafts: [DraftDocument],
+        composer: ComposerProjection,
+        interactions: [InteractionRecord],
+        translations: [SessionID: TranslationSessionState],
+        banners: [BannerItem],
+        capabilities: CapabilityProjection,
+        sync: SyncProjection,
+        pendingStop: SendPhase
+    ) {
+        self.phase = phase
+        self.server = server
+        self.account = account
+        self.hosts = hosts
+        self.currentHostID = currentHostID
+        self.pendingPairing = pendingPairing
+        self.connection = connection
+        self.localConnectivity = localConnectivity
+        self.foreground = foreground
+        self.navigation = navigation
+        self.directory = directory
+        self.workspaces = workspaces
+        self.agents = agents
+        self.catalogRevision = catalogRevision
+        self.conversation = conversation
+        self.drafts = drafts
+        self.composer = composer
+        self.interactions = interactions
+        self.translations = translations
+        self.banners = banners
+        self.capabilities = capabilities
+        self.sync = sync
+        self.pendingStop = pendingStop
+    }
+
+    public static func signedOut() -> GianClientState {
+        GianClientState(
+            phase: .signedOut,
+            server: nil,
+            account: .signedOut,
+            hosts: [],
+            currentHostID: nil,
+            pendingPairing: nil,
+            connection: .signedOut,
+            localConnectivity: .available,
+            foreground: .foreground,
+            navigation: .home,
+            directory: .empty,
+            workspaces: [],
+            agents: [],
+            catalogRevision: "",
+            conversation: nil,
+            drafts: [],
+            composer: ComposerProjection(
+                selection: ComposerSelection(),
+                draft: DraftDocument.placeholder(now: Date(timeIntervalSince1970: 0)),
+                send: .idle,
+                notice: .none
+            ),
+            interactions: [],
+            translations: [:],
+            banners: [],
+            capabilities: .empty,
+            sync: SyncProjection(),
+            pendingStop: .idle
+        )
+    }
+}
+
+extension CapabilityProjection: Codable {}
+extension ComposerSelection: Codable {}
+
+extension DraftDocument {
+    static func placeholder(now: Date) -> DraftDocument {
+        DraftDocument(
+            id: DraftID(rawValue: "unsigned-draft") ?? DraftID(trusted: "unsigned-draft"),
+            hostID: nil,
+            target: .newConversation,
+            text: "",
+            attachments: [],
+            updatedAt: now
+        )
+    }
+}
+
+enum LegacyCopy {
+    static let repos = "This Host only exposes sessions in open Doing tasks (projection.isRemoteSessionVisible at 0c0f2f5c). Repos is unavailable until a broader directory contract exists."
+    static let search = "Older authorized search is unavailable. The inspected Host does not expose non-Doing sessions, and this client will not invent them."
+    static let taskless = "First send requires an open Doing Task. command-adapter.createSession rejects a missing or non-open Task."
+
+    static var limitations: [LegacyLimitation] {
+        [
+            LegacyLimitation(surface: .reposDirectory, detail: repos),
+            LegacyLimitation(surface: .olderSearch, detail: search),
+            LegacyLimitation(surface: .tasklessFirstSend, detail: taskless),
+        ]
+    }
+}

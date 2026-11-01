@@ -1,0 +1,428 @@
+import Foundation
+
+/// Injected backend. A failed call must not be replaced with the preview service.
+@MainActor
+public protocol GianClientServicing: AnyObject {
+    func startGitHubDeviceLogin(server: ServerAddress) async -> GitHubLoginStartResponse
+    func pollGitHubDeviceLogin(server: ServerAddress, loginID: LoginID) async -> GitHubLoginPollResponse
+    func claimHostQR(server: ServerAddress, account: AccountID, qr: HostPairingQR) async -> HostPairingResponse
+    func refreshHostPairing(server: ServerAddress, account: AccountID, pairingID: PairingID) async -> HostPairingResponse
+    func refreshDirectory(scope: ClientScope) async -> DirectoryRefreshResponse
+    func listDirectory(scope: ClientScope, request: DirectoryPageRequest) async -> DirectoryPageResponse
+    func createSession(scope: ClientScope, request: SessionCreateRequest) async -> CommandDispatchResponse
+    func sendMessage(scope: ClientScope, request: SessionSendRequest) async -> CommandDispatchResponse
+    func stopSession(scope: ClientScope, request: SessionStopRequest) async -> CommandDispatchResponse
+    func queryCommand(scope: ClientScope, commandID: CommandID) async -> CommandStatusResponse
+    func respondToInteraction(scope: ClientScope, request: InteractionRespondRequest) async -> CommandDispatchResponse
+    func setAutoTranslation(scope: ClientScope, request: TranslationAutoRequest) async -> TranslationCommandResponse
+    func requestTranslation(scope: ClientScope, request: TranslationRequest) async -> TranslationCommandResponse
+    func cancelTranslation(scope: ClientScope, request: TranslationCancelRequest) async -> TranslationCommandResponse
+    func pageTranslationText(scope: ClientScope, request: TranslationTextPageRequest) async -> TranslationTextPageResponse
+    func translationRequestStatus(scope: ClientScope, request: TranslationStatusRequest) async -> TranslationCommandResponse
+    func uploadAttachment(scope: ClientScope, request: AttachmentUploadRequest) async -> AttachmentTransferResponse
+    func downloadAttachment(scope: ClientScope, request: AttachmentDownloadRequest) async -> AttachmentTransferResponse
+    func pageTranscript(scope: ClientScope, sessionID: SessionID, cursor: String?) async -> TranscriptPageResponse
+    func searchSessions(scope: ClientScope, query: String) async -> SearchResponse
+}
+
+extension GianClientServicing {
+    /// Existing services remain explicitly unsupported, never a fabricated page.
+    public func listDirectory(scope: ClientScope, request: DirectoryPageRequest) async -> DirectoryPageResponse { .unsupported }
+}
+
+public struct HostPairingQR: Sendable, Equatable {
+    public var grantNonce: String
+
+    public init(grantNonce: String) {
+        self.grantNonce = grantNonce
+    }
+}
+
+public struct GitHubDeviceLoginChallenge: Sendable, Equatable {
+    public var loginID: LoginID
+    public var userCode: String
+    public var verificationURI: URL
+    public var expiresAt: Date
+    public var intervalSeconds: Int
+
+    public init(loginID: LoginID, userCode: String, verificationURI: URL, expiresAt: Date, intervalSeconds: Int) {
+        self.loginID = loginID
+        self.userCode = userCode
+        self.verificationURI = verificationURI
+        self.expiresAt = expiresAt
+        self.intervalSeconds = intervalSeconds
+    }
+}
+
+public enum GitHubLoginStartResponse: Sendable, Equatable {
+    case started(GitHubDeviceLoginChallenge)
+    case failed(String)
+}
+
+public struct AccountIdentity: Sendable, Equatable {
+    public var account: AccountID
+    public var login: String
+    public var installationID: InstallationID
+
+    public init(account: AccountID, login: String, installationID: InstallationID) {
+        self.account = account
+        self.login = login
+        self.installationID = installationID
+    }
+}
+
+public enum GitHubLoginPollResponse: Sendable, Equatable {
+    case pending(intervalSeconds: Int)
+    case denied
+    case expired
+    case authorized(AccountIdentity)
+}
+
+public enum HostPairingResponse: Sendable, Equatable {
+    case confirmed(HostSummary, deviceID: DeviceID)
+    case pendingConfirmation(PairingID, HostID)
+    case rejected
+    case expired
+    case failed(String)
+}
+
+public struct DirectorySnapshotPayload: Sendable, Equatable {
+    public var authority: DirectoryAuthority
+    public var host: HostSummary
+    public var tasks: [TaskRecord]
+    public var sessions: [SessionRecord]
+    public var interactions: [InteractionRecord]
+    public var workspaces: [WorkspaceRecord]
+    public var agents: [AgentRecord]
+    public var capabilities: [CapabilityGrant]
+    public var negotiatedFeatures: [KnownWireFeature]
+    public var cursor: SyncCursor
+    public var catalogRevision: String
+    public var translations: [SessionID: TranslationSessionState]
+
+    public init(
+        authority: DirectoryAuthority,
+        host: HostSummary,
+        tasks: [TaskRecord],
+        sessions: [SessionRecord],
+        interactions: [InteractionRecord],
+        workspaces: [WorkspaceRecord],
+        agents: [AgentRecord],
+        capabilities: [CapabilityGrant],
+        negotiatedFeatures: [KnownWireFeature],
+        cursor: SyncCursor,
+        catalogRevision: String,
+        translations: [SessionID: TranslationSessionState] = [:]
+    ) {
+        self.authority = authority
+        self.host = host
+        self.tasks = tasks
+        self.sessions = sessions
+        self.interactions = interactions
+        self.workspaces = workspaces
+        self.agents = agents
+        self.capabilities = capabilities
+        self.negotiatedFeatures = negotiatedFeatures
+        self.cursor = cursor
+        self.catalogRevision = catalogRevision
+        self.translations = translations
+    }
+}
+
+public enum DirectoryRefreshResponse: Sendable, Equatable {
+    case snapshot(DirectorySnapshotPayload)
+    case failed(String)
+    case unknownOutcome
+}
+
+public struct CommandSuccess: Sendable, Equatable {
+    public var commandID: CommandID
+    public var session: SessionRecord?
+    public var deliveryID: String?
+
+    public init(commandID: CommandID, session: SessionRecord? = nil, deliveryID: String? = nil) {
+        self.commandID = commandID
+        self.session = session
+        self.deliveryID = deliveryID
+    }
+}
+
+public enum CommandDispatchResponse: Sendable, Equatable {
+    case succeeded(CommandSuccess)
+    case failed(CommandID, message: String)
+    case unknownOutcome(CommandID)
+}
+
+public enum CommandStatusResponse: Sendable, Equatable {
+    case notSeen(CommandID)
+    case accepted(CommandID)
+    case succeeded(CommandSuccess)
+    case failed(CommandID, message: String)
+    case unknownOutcome(CommandID)
+    case expired(CommandID)
+
+    public var commandID: CommandID {
+        switch self {
+        case .notSeen(let id), .accepted(let id), .failed(let id, _), .unknownOutcome(let id), .expired(let id):
+            return id
+        case .succeeded(let success):
+            return success.commandID
+        }
+    }
+}
+
+public struct SessionCreateRequest: Codable, Sendable, Equatable {
+    public var commandID: CommandID
+    public var catalogRevision: String
+    public var workspaceID: WorkspaceID
+    public var agentID: AgentID
+    public var taskID: TaskID?
+    public var model: String?
+
+    public init(
+        commandID: CommandID,
+        catalogRevision: String,
+        workspaceID: WorkspaceID,
+        agentID: AgentID,
+        taskID: TaskID?,
+        model: String?
+    ) {
+        self.commandID = commandID
+        self.catalogRevision = catalogRevision
+        self.workspaceID = workspaceID
+        self.agentID = agentID
+        self.taskID = taskID
+        self.model = model
+    }
+}
+
+public enum TranslationDispatch: Codable, Sendable, Equatable {
+    case receipt(TranslationRecordID)
+    case original
+}
+
+public enum SendBusyPolicy: String, Codable, Sendable, Equatable {
+    case queue, fail
+}
+
+public struct SessionSendRequest: Codable, Sendable, Equatable {
+    public var commandID: CommandID
+    public var sessionID: SessionID
+    public var text: String
+    public var attachmentIDs: [AttachmentID]
+    public var busy: SendBusyPolicy?
+    public var translation: TranslationDispatch?
+
+    public init(
+        commandID: CommandID,
+        sessionID: SessionID,
+        text: String,
+        attachmentIDs: [AttachmentID],
+        busy: SendBusyPolicy?,
+        translation: TranslationDispatch?
+    ) {
+        self.commandID = commandID
+        self.sessionID = sessionID
+        self.text = text
+        self.attachmentIDs = attachmentIDs
+        self.busy = busy
+        self.translation = translation
+    }
+}
+
+public struct SessionStopRequest: Sendable, Equatable {
+    public var commandID: CommandID
+    public var sessionID: SessionID
+    public var sessionRevision: String
+
+    public init(commandID: CommandID, sessionID: SessionID, sessionRevision: String) {
+        self.commandID = commandID
+        self.sessionID = sessionID
+        self.sessionRevision = sessionRevision
+    }
+}
+
+public struct InteractionRespondRequest: Sendable, Equatable {
+    public var commandID: CommandID
+    public var interactionID: InteractionID
+    public var revision: String
+    public var actionID: ActionID
+    public var values: [String: InteractionValue]
+
+    public init(
+        commandID: CommandID,
+        interactionID: InteractionID,
+        revision: String,
+        actionID: ActionID,
+        values: [String: InteractionValue]
+    ) {
+        self.commandID = commandID
+        self.interactionID = interactionID
+        self.revision = revision
+        self.actionID = actionID
+        self.values = values
+    }
+}
+
+public struct TranslationAutoRequest: Sendable, Equatable {
+    public var commandID: CommandID
+    public var sessionID: SessionID
+    public var enabled: Bool
+    public var expectedEnabled: Bool?
+    public var expectedRevision: Int?
+
+    public init(
+        commandID: CommandID,
+        sessionID: SessionID,
+        enabled: Bool,
+        expectedEnabled: Bool?,
+        expectedRevision: Int?
+    ) {
+        self.commandID = commandID
+        self.sessionID = sessionID
+        self.enabled = enabled
+        self.expectedEnabled = expectedEnabled
+        self.expectedRevision = expectedRevision
+    }
+}
+
+public enum TranslationPurpose: String, Sendable, Equatable {
+    case send, read
+}
+
+public struct TranslationRequest: Sendable, Equatable {
+    public var requestID: TranslationRequestID
+    public var sessionID: SessionID
+    public var purpose: TranslationPurpose
+    public var text: String
+    public var sourceID: String?
+
+    public init(
+        requestID: TranslationRequestID,
+        sessionID: SessionID,
+        purpose: TranslationPurpose,
+        text: String,
+        sourceID: String?
+    ) {
+        self.requestID = requestID
+        self.sessionID = sessionID
+        self.purpose = purpose
+        self.text = text
+        self.sourceID = sourceID
+    }
+}
+
+public struct TranslationCancelRequest: Sendable, Equatable {
+    public var sessionID: SessionID
+    public var requestID: TranslationRequestID
+
+    public init(sessionID: SessionID, requestID: TranslationRequestID) {
+        self.sessionID = sessionID
+        self.requestID = requestID
+    }
+}
+
+public struct TranslationTextPageRequest: Sendable, Equatable {
+    public var sessionID: SessionID
+    public var recordID: TranslationRecordID
+    public var offset: Int?
+
+    public init(sessionID: SessionID, recordID: TranslationRecordID, offset: Int?) {
+        self.sessionID = sessionID
+        self.recordID = recordID
+        self.offset = offset
+    }
+}
+
+public struct TranslationStatusRequest: Sendable, Equatable {
+    public var sessionID: SessionID
+    public var requestID: TranslationRequestID
+
+    public init(sessionID: SessionID, requestID: TranslationRequestID) {
+        self.sessionID = sessionID
+        self.requestID = requestID
+    }
+}
+
+public enum TranslationCommandResponse: Sendable, Equatable {
+    case state(TranslationSessionState)
+    case settled(TranslationRequestID, record: ReadingTranslation?, error: String?)
+    case cancelled(TranslationRequestID)
+    case unknown(TranslationRequestID)
+    case failed(String)
+    case unavailable
+}
+
+public enum TranslationTextPageResponse: Sendable, Equatable {
+    case page(text: String, nextOffset: Int?)
+    case notFound
+    case failed(String)
+    case unknown
+}
+
+public struct AttachmentUploadRequest: Sendable, Equatable {
+    public var localID: AttachmentID
+    public var sessionID: SessionID?
+    public var filename: String
+    public var mime: String
+    public var sha256: String
+    public var bytes: Data
+
+    public init(
+        localID: AttachmentID,
+        sessionID: SessionID?,
+        filename: String,
+        mime: String,
+        sha256: String,
+        bytes: Data
+    ) {
+        self.localID = localID
+        self.sessionID = sessionID
+        self.filename = filename
+        self.mime = mime
+        self.sha256 = sha256
+        self.bytes = bytes
+    }
+}
+
+public struct AttachmentDownloadRequest: Sendable, Equatable {
+    public var attachmentID: AttachmentID
+    public var sha256: String
+
+    public init(attachmentID: AttachmentID, sha256: String) {
+        self.attachmentID = attachmentID
+        self.sha256 = sha256
+    }
+}
+
+public enum AttachmentTransferResponse: Sendable, Equatable {
+    case uploaded(remoteID: AttachmentID, sha256: String)
+    case downloaded(sha256: String, bytes: Data)
+    case expired
+    case unavailable(String)
+    case failed(String)
+}
+
+public struct TranscriptPageResponse: Sendable, Equatable {
+    public var items: [TranscriptItem]
+    public var cursor: String?
+    public var hasOlder: Bool
+    public var failed: Bool
+
+    public init(items: [TranscriptItem], cursor: String?, hasOlder: Bool, failed: Bool = false) {
+        self.items = items
+        self.cursor = cursor
+        self.hasOlder = hasOlder
+        self.failed = failed
+    }
+}
+
+public struct SearchResponse: Sendable, Equatable {
+    public var supported: Bool
+    public var sessions: [SessionRecord]
+
+    public init(supported: Bool, sessions: [SessionRecord]) {
+        self.supported = supported
+        self.sessions = sessions
+    }
+}
