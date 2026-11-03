@@ -1,16 +1,21 @@
 import Foundation
 
 public enum GianClientAction: Sendable {
-    /// Sets the Remote Server and verifies its identity (pinned on first
-    /// use); Host pairing comes next. There is no account sign-in.
-    case setServerAddress(String)
+    /// Sets the Remote Server, verifies its identity (pinned on first use)
+    /// and admits this app as a controller with the enrollment token from the
+    /// Server's enrollment page; Host pairing comes next. A Server this app is
+    /// already admitted to needs no token. There is no account sign-in.
+    case setServerAddress(String, enrollmentToken: String? = nil)
     /// After the Server's identity changed (e.g. it was reinstalled): forget
-    /// the pinned identity and this app's Hosts there, then connect again.
-    case forgetServerIdentity
+    /// the pinned identity and this app's Hosts there, then connect again
+    /// (a new controller identity, so with a new enrollment token).
+    case forgetServerIdentity(enrollmentToken: String? = nil)
     case logout
     /// Pairs a Host: during setup, or later to add another Host (the current
     /// one stays open until the new one is confirmed, then becomes current).
     case beginHostPairingFromQR(String)
+    /// The Host's one-time code; the hyphen is optional.
+    case beginHostPairingWithCode(String)
     case refreshHostPairing
     /// Abandons the pairing in progress (Add Host's Cancel).
     case cancelHostPairing

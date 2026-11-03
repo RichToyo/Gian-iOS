@@ -94,7 +94,7 @@ func makeHarness(script: PreviewScript = .legacyContract) -> (GianClientStore, P
 @MainActor
 func authenticate(_ store: GianClientStore, clock: ManualGianClock) async throws {
     _ = clock
-    let connected = await store.dispatch(.setServerAddress(PreviewFixtures.server))
+    let connected = await store.dispatch(.setServerAddress(PreviewFixtures.server, enrollmentToken: PreviewFixtures.enrollmentToken))
     try #require(connected.isApplied)
     try #require(store.state.phase == .awaitingHostPairing)
 }
@@ -138,13 +138,13 @@ func prepareComposer(_ store: GianClientStore, text: String = "Check the line", 
 
 @MainActor
 final class RejectingService: GianClientServicing {
-    func connectServer(server: ServerAddress) async -> ServerConnectResponse {
-        _ = server
+    func connectServer(server: ServerAddress, enrollmentToken: String?) async -> ServerConnectResponse {
+        _ = (server, enrollmentToken)
         return .failed("unreachable")
     }
 
-    func claimHostQR(server: ServerAddress, account: AccountID, qr: HostPairingQR) async -> HostPairingResponse {
-        _ = (server, account, qr)
+    func claimHost(server: ServerAddress, account: AccountID, invitation: HostPairingInvitation) async -> HostPairingResponse {
+        _ = (server, account, invitation)
         return .failed("unreachable")
     }
 

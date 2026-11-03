@@ -10,28 +10,34 @@ final class GianUITests: XCTestCase {
     }
 
     /// Full setup flow against the scripted preview service: server address
-    /// (its identity is verified; no account sign-in) → Host pairing via
-    /// manual payload → home directory with the scripted task and conversation.
+    /// and enrollment token (no account sign-in) → Host pairing with the
+    /// one-time code → home directory with the scripted task and conversation.
     func testSetupFlowReachesHomeDirectory() throws {
         let app = XCUIApplication()
         app.launchArguments += ["-previewScript", "legacyContract"]
         app.launch()
 
-        // Server address step.
+        // Server step: address and the enrollment token (no account sign-in).
         let serverField = app.textFields.firstMatch
         XCTAssertTrue(serverField.waitForExistence(timeout: 10))
         serverField.tap()
         serverField.typeText("https://remote.example.test")
+        let token = app.textFields["Enrollment token"]
+        token.tap()
+        token.typeText("preview-enrollment-token")
         app.buttons["Continue"].tap()
 
-        // Pairing step straight away: paste the scripted QR payload manually.
-        let pairingField = app.textFields["Paste pairing link"]
-        XCTAssertTrue(pairingField.waitForExistence(timeout: 30))
+        // Pairing: QR scanning by default, the one-time code a tap away.
+        let enterCode = app.buttons["Enter one-time code"]
+        XCTAssertTrue(enterCode.waitForExistence(timeout: 30))
         XCTAssertFalse(app.buttons.matching(NSPredicate(format: "label CONTAINS[c] 'GitHub'")).firstMatch.exists,
                        "There is no GitHub sign-in")
-        pairingField.tap()
-        pairingField.typeText("https://remote.example.test/pair#nonce=abcdefghijklmnop")
-        app.buttons["Pair"].tap()
+        enterCode.tap()
+        let code = app.textFields["One-time code"]
+        XCTAssertTrue(code.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "The code field should take focus by itself")
+        // No hyphen to type; all 8 characters pair straight away.
+        code.typeText("7k3mq9tx")
 
         // Home: scripted task group and its conversation appear; the new-chat
         // entry exists. No notification bell or inbox exists anywhere.

@@ -36,7 +36,7 @@ struct RemoteMappingTests {
     @Test func retryAfterAppliesEvenToNonJSONAvailabilityResponses() async throws {
         let fixture = RemoteFixture()
         fixture.transport.handler = { _ in RemoteHTTPResponse(status: 503, body: Data("temporarily unavailable".utf8), retryAfterSeconds: 45) }
-        guard case .failed = await fixture.service.connectServer(server: fixture.server) else { Issue.record("An unavailable Server is not a connection"); return }
+        guard case .failed = await fixture.service.connectServer(server: fixture.server, enrollmentToken: "fixture-enrollment-token") else { Issue.record("An unavailable Server is not a connection"); return }
         #expect(fixture.service.lastFailure == .server(code: "HOST_OFFLINE", retryAfter: 45))
     }
 }

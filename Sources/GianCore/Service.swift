@@ -3,10 +3,12 @@ import Foundation
 /// Injected backend. A failed call must not be replaced with the preview service.
 @MainActor
 public protocol GianClientServicing: AnyObject {
-    /// Verifies the Server's identity (pinning it on first use) and prepares
-    /// this app's controller identity there. No account sign-in.
-    func connectServer(server: ServerAddress) async -> ServerConnectResponse
-    func claimHostQR(server: ServerAddress, account: AccountID, qr: HostPairingQR) async -> HostPairingResponse
+    /// Verifies the Server's identity (pinning it on first use) and admits
+    /// this app as a controller there with a single-use enrollment token.
+    /// Once admitted, reconnecting needs no token. No account sign-in.
+    func connectServer(server: ServerAddress, enrollmentToken: String?) async -> ServerConnectResponse
+    /// Claims a Host pairing as the admitted controller; the Host confirms it.
+    func claimHost(server: ServerAddress, account: AccountID, invitation: HostPairingInvitation) async -> HostPairingResponse
     func refreshHostPairing(server: ServerAddress, account: AccountID, pairingID: PairingID) async -> HostPairingResponse
     func refreshDirectory(scope: ClientScope) async -> DirectoryRefreshResponse
     func listDirectory(scope: ClientScope, request: DirectoryPageRequest) async -> DirectoryPageResponse
@@ -102,12 +104,12 @@ public enum AgentLogoResponse: Sendable, Equatable {
     case failed(String)
 }
 
-public struct HostPairingQR: Sendable, Equatable {
-    public var grantNonce: String
-
-    public init(grantNonce: String) {
-        self.grantNonce = grantNonce
-    }
+/// How the Host invited this device: its QR code (a pairing link carrying a
+/// grant nonce) or its one-time code.
+public enum HostPairingInvitation: Sendable, Equatable {
+    case grantNonce(String)
+    /// Canonical `XXXX-XXXX` (Crockford base32).
+    case code(String)
 }
 
 /// This app's controller identity on one Server.

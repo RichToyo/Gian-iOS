@@ -25,7 +25,7 @@ enum RemoteWire {
         guard knownErrors.contains(code) else { return .invalidPayload }
         switch code {
         case "DEVICE_REVOKED", "CONTROLLER_REVOKED": return .deviceRevoked
-        case "AUTH_REQUIRED", "CONTROLLER_NOT_ADMITTED": return .notAuthorized
+        case "AUTH_REQUIRED": return .notAuthorized
         case "FILE_REFERENCE_EXPIRED", "UPLOAD_EXPIRED", "COMMAND_EXPIRED", "ATTACHMENT_NOT_FOUND": return .expired
         case "REMOTE_CAPABILITY_DENIED": return .capabilityDenied
         case "PROTOCOL_VERSION_UNSUPPORTED": return .versionMismatch

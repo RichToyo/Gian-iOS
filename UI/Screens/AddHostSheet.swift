@@ -8,14 +8,15 @@ struct AddHostPresentation {
     var didPair = false
     var notice: String? = nil
     var onPairPayload: (String) -> Void = { _ in }
+    var onPairCode: (String) -> Void = { _ in }
     var onRefresh: () -> Void = {}
     /// Abandons a pairing in progress and clears the last outcome. Runs when
     /// the sheet opens (setup leaves a "paired" outcome behind) and closes.
     var onReset: () -> Void = {}
 }
 
-/// Pairs another Host while signed in: scan its QR code or paste its link,
-/// then the Host confirms this device. Once confirmed the app switches to the
+/// Pairs another Host while signed in: scan its QR code or type its one-time
+/// code, then the Host confirms this device. Once confirmed the app switches to the
 /// new Host and `addHostSheet` closes this.
 struct AddHostSheet: View {
     let pairing: AddHostPresentation
@@ -32,7 +33,8 @@ struct AddHostSheet: View {
                 HostPairingPanel(
                     isWaiting: pairing.isWaiting,
                     notice: pairing.notice,
-                    onPairPayload: pairing.onPairPayload,
+                    onScanPayload: pairing.onPairPayload,
+                    onCode: pairing.onPairCode,
                     onRefreshPairing: pairing.onRefresh
                 )
                 Spacer(minLength: 0)

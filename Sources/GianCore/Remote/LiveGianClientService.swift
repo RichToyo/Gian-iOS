@@ -25,6 +25,10 @@ public final class LiveGianClientService: GianClientLifecycle {
     var commandWaiters: [String: RemoteCommandWaiter] = [:]
     var mailboxes: [String: RemoteMailbox] = [:]
     var snapshot: WireValue?
+    /// The Host's capability states from the last snapshot on this
+    /// connection. Session events drop the snapshot until the next directory
+    /// read, but they don't change what this device may do.
+    var capabilities: WireValue?
     var stagedSnapshot: WireValue?
     var snapshotParts: RemoteSnapshotAssembly?
     var snapshotTimeout: Task<Void, Never>?
@@ -42,6 +46,7 @@ public final class LiveGianClientService: GianClientLifecycle {
     var issuedCommands: [String: String] = [:]
     var transfers: [String: RemoteTransfer] = [:]
     var deviceLeases: [ClientScope: RemoteDeviceLease] = [:]
+    var controllerLeases: [ServerAddress: RemoteControllerLease] = [:]
     var invalidAccounts: Set<DataScope> = []
     var invalidHosts: Set<ClientScope> = []
     var fileDescriptors: [AttachmentID: RemoteFileDescriptor] = [:]
@@ -252,6 +257,9 @@ struct RemoteControllerVault: Codable {
     var hosts: [String: RemoteHostCredential]
     var translationAttempts: [String: String]
     var commandAttempts: [String: String]
+    /// Admitted as a native controller (Remote 1.5 enrollment). Nil in vaults
+    /// from before admission, which then ask for an enrollment token again.
+    var admitted: Bool? = nil
 }
 struct RemoteHostCredential: Codable {
     var id: String

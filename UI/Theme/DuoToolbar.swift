@@ -29,19 +29,28 @@ extension ToolbarContent {
     }
 }
 
+extension EnvironmentValues {
+    /// The global New chat + Settings pair sits at the bottom of the bar
+    /// everywhere except the expanded portrait layout, whose bars stay
+    /// horizontal (set by `AdaptiveRoot`).
+    @Entry var globalActionsAtBottom = true
+}
+
 /// New chat and Settings are global, so every screen's bar carries them as one
-/// group, declared first so it sits right after Back/Close (on iPhone Duo, high
-/// in the vertical bar) instead of only the conversation list. Not
+/// group: pinned to the bottom of iPhone Duo's vertical bar (`.bottomBar`), or
+/// beside the other trailing items in the expanded portrait layout. Not
 /// `.topBarPinnedTrailing`: the pinned slot shows a single item and dropped
 /// Settings.
 struct GlobalToolbarActions: ToolbarContent {
     /// New chat itself omits the button; it is already the current screen.
     var showsNewChat: Bool = true
+    /// From `globalActionsAtBottom`.
+    var atBottom: Bool = true
     var onNewChat: () -> Void
     var onSettings: () -> Void
 
     var body: some ToolbarContent {
-        ToolbarItemGroup(placement: .topBarTrailing) {
+        ToolbarItemGroup(placement: atBottom ? .bottomBar : .topBarTrailing) {
             if showsNewChat {
                 Button("New chat", systemImage: "square.and.pencil", action: onNewChat)
                     .accessibilityLabel("Start a new chat")

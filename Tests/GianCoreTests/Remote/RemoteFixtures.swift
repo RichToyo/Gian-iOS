@@ -78,6 +78,12 @@ final class RemoteFixture {
     /// The Server answers with a different identity key (e.g. reinstalled).
     var serverKeyChanged = false
     var identityFailure: RemoteClientError?
+    /// Enrollment tokens the fixture Server accepts once each.
+    var enrollmentTokens: Set<String> = ["fixture-enrollment-token"]
+    var enrollmentError: String?
+    var controllerKey: RemotePublicKey?
+    var controllerToken = "fixture-controller-access"
+    var lastClaim: WireValue = .null
     var pairKey: RemotePublicKey?
     var deviceConfirmed = true
 
@@ -105,7 +111,35 @@ final class RemoteFixture {
             return try response(.object(["protocol": .string(RemoteBaseline.authProtocol),
                 "server_identity": .object(["algorithm": .string("P-256"), "public_key": key.wire, "fingerprint": .string(fingerprint)]),
                 "expires_at": .int(expires), "signature": .string(RemoteWire.base64(signature))]))
+        case "/api/v1/controller-enrollments/claim":
+            if let enrollmentError { return try response(.object(["error": .object(["code": .string(enrollmentError)])]), status: 409) }
+            guard enrollmentTokens.remove(try body.string("enrollment_token")) != nil else {
+                return try response(.object(["error": .object(["code": .string("AUTH_REQUIRED")])]), status: 401)
+            }
+            controllerKey = try RemotePublicKey(wire: body["device_public_key"])
+            let key = try RemotePublicKey(x963: (serverKeyChanged ? otherServerSigning : serverSigning).publicKey.x963Representation)
+            return try response(.object(["protocol": .string(RemoteBaseline.authProtocol), "browser_installation_id": body["browser_installation_id"],
+                "server_identity": .object(["algorithm": .string("P-256"), "public_key": key.wire,
+                    "fingerprint": .string(RemoteWire.hash(try key.wire.encoded()))])]))
+        case "/api/v1/sessions/controller-challenge":
+            guard controllerKey != nil else { return try response(.object(["error": .object(["code": .string("CONTROLLER_NOT_ADMITTED")])]), status: 401) }
+            return try response(.object(["protocol": .string(RemoteBaseline.authProtocol), "challenge_id": .string(challengeID),
+                "challenge": .string("ZmljdGlvbmFs"), "expires_at": .int(milliseconds + 600_000)]))
+        case "/api/v1/sessions/controller-login":
+            guard let controllerKey else { throw RemoteClientError.notAuthorized }
+            let signature = try P256.Signing.ECDSASignature(rawRepresentation: RemoteWire.unbase64(body.string("signature")))
+            guard try P256.Signing.PublicKey(x963Representation: controllerKey.x963()).isValidSignature(signature, for: Data(challengeID.utf8)) else {
+                throw RemoteClientError.integrity
+            }
+            return try response(.object(["protocol": .string(RemoteBaseline.authProtocol), "controller_access_token": .string(controllerToken),
+                "expires_at": .int(milliseconds + 600_000), "browser_installation_id": body["browser_installation_id"]]))
         case "/api/v1/pairings/claim":
+            // An admitted controller must claim as one, with its access token.
+            guard request.value(forHTTPHeaderField: "Authorization") == "Bearer \(controllerToken)",
+                  body["controller_admission"] == .int(1) else {
+                return try response(.object(["error": .object(["code": .string("CONTROLLER_NOT_ADMITTED")])]), status: 401)
+            }
+            lastClaim = body
             pairKey = try RemotePublicKey(wire: body["device_public_key"])
             return try response(.object(["protocol": .string(RemoteBaseline.authProtocol), "status": .string("pending_confirmation"),
                 "pairing_id": .string(pairingID), "host_id": .string(hostID), "crypto_connection_id": .string(cryptoID)]))
@@ -125,12 +159,16 @@ final class RemoteFixture {
         default: throw RemoteClientError.unsupported
         }
     }
-    func connect() async throws {
-        guard case .connected(let identity) = await service.connectServer(server: server) else { throw RemoteClientError.notAuthorized }
+    func connect(enrollmentToken: String? = "fixture-enrollment-token") async throws {
+        guard case .connected(let identity) = await service.connectServer(server: server, enrollmentToken: enrollmentToken) else {
+            throw RemoteClientError.notAuthorized
+        }
         account = identity.account
     }
-    func connectAndClaim() async throws {
+    func connectAndClaim(_ invitation: HostPairingInvitation = .grantNonce("fictional-qr-nonce")) async throws {
         try await connect()
-        guard case .pendingConfirmation = await service.claimHostQR(server: server, account: account, qr: HostPairingQR(grantNonce: "fictional-qr-nonce")) else { throw RemoteClientError.invalidPayload }
+        guard case .pendingConfirmation = await service.claimHost(server: server, account: account, invitation: invitation) else {
+            throw RemoteClientError.invalidPayload
+        }
     }
 }

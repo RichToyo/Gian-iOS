@@ -22,12 +22,12 @@ struct LiveAuthenticationTests {
         try await fixture.connect()
         #expect(fixture.account.provider == .controller)
         #expect(try fixture.secrets.read(fixture.service.pinKey(fixture.server)) != nil)
-        // Connecting again (same Server key) keeps the same controller identity.
+        // Once admitted, connecting again needs no token and keeps the identity.
         let first = fixture.account
-        try await fixture.connect()
+        try await fixture.connect(enrollmentToken: nil)
         #expect(fixture.account == first)
         let paths = fixture.transport.requests.compactMap { $0.url?.path }
-        #expect(paths == ["/api/v1/server-identity", "/api/v1/server-identity"])
+        #expect(paths == ["/api/v1/server-identity", "/api/v1/controller-enrollments/claim", "/api/v1/server-identity"])
         #expect(fixture.transport.requests.allSatisfy { $0.value(forHTTPHeaderField: "x-gian-account-token") == nil })
     }
 
@@ -40,18 +40,63 @@ struct LiveAuthenticationTests {
         #expect(try fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account) != nil)
     }
 
+    @Test func aFirstConnectionNeedsAValidSingleUseEnrollmentToken() async throws {
+        let fixture = RemoteFixture()
+        #expect(await fixture.service.connectServer(server: fixture.server, enrollmentToken: nil) == .failed(ControllerEnrollment.tokenRequired))
+        #expect(await fixture.service.connectServer(server: fixture.server, enrollmentToken: "wrong")
+            == .failed("That enrollment token isn't valid for this server."))
+        fixture.enrollmentError = "ENROLLMENT_EXPIRED"
+        #expect(await fixture.service.connectServer(server: fixture.server, enrollmentToken: "fixture-enrollment-token")
+            == .failed("That enrollment token expired. Tokens last 5 minutes; generate a new one."))
+        fixture.enrollmentError = "ENROLLMENT_CONSUMED"
+        #expect(await fixture.service.connectServer(server: fixture.server, enrollmentToken: "fixture-enrollment-token")
+            == .failed("That enrollment token was already used. Generate a new one."))
+        fixture.enrollmentError = nil
+        try await fixture.connect()
+        let claim = try #require(fixture.transport.requests.first { $0.url?.path == "/api/v1/controller-enrollments/claim" })
+        #expect(claim.value(forHTTPHeaderField: "x-gian-account-token") == nil)
+    }
+
+    @Test func hostsArePairedAsTheAdmittedControllerByQROrOneTimeCode() async throws {
+        let fixture = RemoteFixture()
+        try await fixture.connectAndClaim(.code("7k3m q9tx"))
+        #expect(fixture.lastClaim["code"] == .string("7K3M-Q9TX"))
+        #expect(fixture.lastClaim["grant_nonce"] == .null)
+        #expect(fixture.lastClaim["controller_admission"] == .int(1))
+        let claim = try #require(fixture.transport.requests.last { $0.url?.path == "/api/v1/pairings/claim" })
+        #expect(claim.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-controller-access")
+        // The controller sign-in is reused for the next claim.
+        let signIns = fixture.transport.requests.filter { $0.url?.path == "/api/v1/sessions/controller-login" }.count
+        _ = await fixture.service.claimHost(server: fixture.server, account: fixture.account, invitation: .grantNonce("another-nonce-value"))
+        #expect(fixture.lastClaim["grant_nonce"] == .string("another-nonce-value"))
+        #expect(fixture.transport.requests.filter { $0.url?.path == "/api/v1/sessions/controller-login" }.count == signIns)
+    }
+
+    @Test func pairingCodesAreNormalizedLikeTheServer() {
+        #expect(PairingCode.canonical("7K3M-Q9TX") == "7K3M-Q9TX")
+        #expect(PairingCode.canonical("7k3mq9tx") == "7K3M-Q9TX")
+        #expect(PairingCode.canonical(" 7k3m q9tx ") == "7K3M-Q9TX")
+        #expect(PairingCode.canonical("ILO0-0000") == "1100-0000")
+        #expect(PairingCode.canonical("7K3M-Q9T") == nil)
+        #expect(PairingCode.canonical("7K3M-Q9TU") == nil)
+        #expect(PairingCode.canonical("7K3M-Q9TX1") == nil)
+        #expect(PairingCode.canonical("7K3M_Q9TX") == nil)
+        #expect(PairingCode.characters(from: "7k3-m!q9tx99") == "7K3MQ9TX")
+    }
+
     @Test func aChangedServerIdentityIsRefusedUntilForgotten() async throws {
         let fixture = RemoteFixture()
         try await fixture.connectAndClaim()
         fixture.serverKeyChanged = true
-        #expect(await fixture.service.connectServer(server: fixture.server) == .identityChanged)
-        let claim = await fixture.service.claimHostQR(server: fixture.server, account: fixture.account,
-            qr: HostPairingQR(grantNonce: "fictional-qr-nonce"))
+        #expect(await fixture.service.connectServer(server: fixture.server, enrollmentToken: "fixture-enrollment-token") == .identityChanged)
+        let claim = await fixture.service.claimHost(server: fixture.server, account: fixture.account,
+            invitation: .grantNonce("fictional-qr-nonce"))
         guard case .failed = claim else { Issue.record("A changed Server must not receive a claim"); return }
 
         try await fixture.service.forgetServer(fixture.server)
         let previous = fixture.account
-        try await fixture.connect()
+        fixture.enrollmentTokens.insert("second-token")
+        try await fixture.connect(enrollmentToken: "second-token")
         #expect(fixture.account != previous, "Forgetting starts a new controller identity")
     }
 
@@ -66,7 +111,7 @@ struct LiveAuthenticationTests {
             }
             return response
         }
-        guard case .failed = await fixture.service.connectServer(server: fixture.server) else {
+        guard case .failed = await fixture.service.connectServer(server: fixture.server, enrollmentToken: "fixture-enrollment-token") else {
             Issue.record("A bad signature must not connect"); return
         }
         #expect(try fixture.secrets.read(fixture.service.pinKey(fixture.server)) == nil, "Nothing is pinned from a bad proof")
@@ -85,7 +130,7 @@ struct LiveAuthenticationTests {
         // A device access-token lease alone must not manufacture cached Host handshake evidence.
         #expect(try fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account)?.hosts.isEmpty == true)
         let paths = fixture.transport.requests.compactMap { $0.url?.path }
-        #expect(!paths.contains { $0.contains("/account/") || $0.contains("enrollment") })
+        #expect(!paths.contains { $0.contains("/account/") })
         #expect(fixture.transport.requests.allSatisfy { $0.value(forHTTPHeaderField: "x-gian-account-token") == nil })
         let claim = try #require(fixture.transport.requests.first { $0.url?.path == "/api/v1/pairings/claim" })
         #expect(claim.value(forHTTPHeaderField: "Origin") == fixture.server.absoluteString)
@@ -101,7 +146,10 @@ struct LiveAuthenticationTests {
         #expect(try fixture.service.loadCachedAuthorization(server: fixture.server, account: previous) == nil)
         // The Server pin stays; a new controller identity is created.
         #expect(try fixture.secrets.read(fixture.service.pinKey(fixture.server)) != nil)
-        try await fixture.connect()
+        // A new identity is a new controller: it needs a new enrollment token.
+        #expect(await fixture.service.connectServer(server: fixture.server, enrollmentToken: nil) == .failed(ControllerEnrollment.tokenRequired))
+        fixture.enrollmentTokens.insert("second-token")
+        try await fixture.connect(enrollmentToken: "second-token")
         #expect(fixture.account != previous)
     }
 
@@ -118,7 +166,7 @@ struct LiveAuthenticationTests {
     @Test func nonHTTPSValidatedInitializerIsStillRejectedByTransportBoundary() async {
         let fixture = RemoteFixture()
         let invalid = ServerAddress(validated: URL(string: "http://fixture.test")!)
-        guard case .failed = await fixture.service.connectServer(server: invalid) else { Issue.record("HTTPS is required"); return }
+        guard case .failed = await fixture.service.connectServer(server: invalid, enrollmentToken: "fixture-enrollment-token") else { Issue.record("HTTPS is required"); return }
         #expect(fixture.transport.requests.isEmpty)
     }
 

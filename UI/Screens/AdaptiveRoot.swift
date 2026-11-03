@@ -84,7 +84,7 @@ struct AdaptiveRoot: View {
     var onLoadNewChatOptions: () -> Void = {}
     var onReturnHome: () -> Void = {}
     var onSignOut: () -> Void = {}
-    var onChangeServer: (String) -> Void = { _ in }
+    var onChangeServer: (String, String) -> Void = { _, _ in }
     var onEvictAttachmentCache: () -> Void = {}
     var attachmentPresentation: (AttachmentID) -> AttachmentFilePresentation = { _ in .unknown }
     var onDownloadAttachment: (AttachmentID) -> Void = { _ in }
@@ -202,6 +202,8 @@ struct AdaptiveRoot: View {
                     }
                 }
         }
+        // Folded: the vertical bar pins the global pair to its bottom.
+        .environment(\.globalActionsAtBottom, true)
     }
 
     /// Landscape keeps the sidebar open beside the chat (nothing to collapse,
@@ -240,6 +242,9 @@ struct AdaptiveRoot: View {
                 }
             }
             .modifier(SplitStyleModifier(isLandscape: isLandscape))
+            // Landscape's detail column gets the vertical bar (global pair at
+            // its bottom); expanded portrait keeps horizontal bars unchanged.
+            .environment(\.globalActionsAtBottom, isLandscape)
             // Portrait overlay: show the list when nothing is open, get out of
             // the way once a conversation (or new chat) is.
             // The split view picks its own visibility on first layout, so
@@ -295,9 +300,7 @@ struct AdaptiveRoot: View {
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(GianTheme.Colors.background)
-            .toolbar {
-                GlobalToolbarActions(onNewChat: onOpenNewChat, onSettings: onOpenSettings)
-            }
+            .modifier(PlaceholderToolbar(onNewChat: onOpenNewChat, onSettings: onOpenSettings))
         }
     }
 
@@ -396,6 +399,17 @@ struct AdaptiveRoot: View {
         case .light: .light
         case .dark: .dark
         }
+    }
+}
+
+/// The detail placeholder's global pair, placed for the layout.
+private struct PlaceholderToolbar: ViewModifier {
+    @Environment(\.globalActionsAtBottom) private var atBottom
+    var onNewChat: () -> Void
+    var onSettings: () -> Void
+
+    func body(content: Content) -> some View {
+        content.toolbar { GlobalToolbarActions(atBottom: atBottom, onNewChat: onNewChat, onSettings: onSettings) }
     }
 }
 

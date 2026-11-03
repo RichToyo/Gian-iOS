@@ -16,7 +16,7 @@ private func phaseKind(_ phase: SendPhase) -> String {
 
 @MainActor
 struct ContractTests {
-    @Test func serverAddressConnectsWithoutAnyAccountSignIn() async throws {
+    @Test func serverAddressAndEnrollmentTokenConnectWithoutAnyAccount() async throws {
         #expect(GianCore.contractRevision == "0.1.0-contract.2")
         #expect(RemoteBaseline.inspectedCommit == "0c0f2f5c92bc70f78269b105e4e0b98cf99770d0")
         #expect(RemoteBaseline.serverIdentityProofType == "gian.remote.server_identity/1")
@@ -30,8 +30,14 @@ struct ContractTests {
         #expect(ServerAddress(parsing: "https://remote.example.test/")?.absoluteString == "https://remote.example.test")
         #expect(ServerAddress(parsing: "https://remote.example.test:8443")?.origin.port == 8443)
 
-        // One step: the Server proves its identity, then Host pairing.
+        // A first connection needs the Server's enrollment token.
         #expect(await store.dispatch(.setServerAddress(PreviewFixtures.server)) == .applied)
+        #expect(store.state.phase == .serverEntered)
+        #expect(store.state.account.status == .error)
+        #expect(store.state.account.failure == "Enter the enrollment token from the server's enrollment page.")
+
+        // One step: the Server proves its identity and admits this app, then Host pairing.
+        #expect(await store.dispatch(.setServerAddress(PreviewFixtures.server, enrollmentToken: PreviewFixtures.enrollmentToken)) == .applied)
         #expect(store.state.server?.absoluteString == "https://remote.example.test")
         #expect(store.state.phase == .awaitingHostPairing)
         #expect(store.state.account.status == .signedIn)
@@ -43,14 +49,15 @@ struct ContractTests {
         var script = PreviewScript.legacyContract
         script.serverIdentity = .changed
         let (store, service, _) = makeHarness(script: script)
-        #expect(await store.dispatch(.setServerAddress(PreviewFixtures.server)) == .rejected(.serverIdentityChanged))
+        #expect(await store.dispatch(.setServerAddress(PreviewFixtures.server, enrollmentToken: PreviewFixtures.enrollmentToken))
+            == .rejected(.serverIdentityChanged))
         #expect(store.state.phase == .serverEntered)
         #expect(store.state.account.status == .serverIdentityChanged)
         #expect(store.state.account.accountID == nil)
         #expect(await store.dispatch(.beginHostPairingFromQR(PreviewFixtures.qr)) == .rejected(.notAuthorized))
 
         service.script.serverIdentity = .verified
-        #expect(await store.dispatch(.forgetServerIdentity) == .applied)
+        #expect(await store.dispatch(.forgetServerIdentity(enrollmentToken: PreviewFixtures.enrollmentToken)) == .applied)
         #expect(store.state.phase == .awaitingHostPairing)
     }
 
@@ -68,6 +75,19 @@ struct ContractTests {
         #expect(store.state.directory.tasks.isEmpty)
         #expect(store.state.directory.repos.isEmpty)
         #expect(store.state.hosts.isEmpty)
+    }
+
+    @Test func oneTimeCodesPairWithoutTheHyphen() async throws {
+        let service = ControlledService()
+        let clock = ManualGianClock(instant: PreviewFixtures.instant)
+        let store = GianClientStore(service: service, clock: clock, ids: SequenceIDGenerator(), storage: InMemoryGianStorage())
+        try await authenticate(store, clock: clock)
+        #expect(await store.dispatch(.beginHostPairingWithCode("7K3M")) == .rejected(.pairingQRInvalid))
+        #expect(store.state.pairingOutcome == .invalidCode)
+        #expect(service.claimInvitations.isEmpty)
+        #expect(await store.dispatch(.beginHostPairingWithCode("7k3mq9tx")) == .applied)
+        #expect(service.claimInvitations == [.code("7K3M-Q9TX")])
+        #expect(store.state.phase == .ready)
     }
 
     @Test func qrPairsGrantNonceOnly() async throws {

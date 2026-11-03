@@ -28,8 +28,9 @@ struct SettingsScreen: View {
 
     var onBack: () -> Void = {}
     var onSignOut: () -> Void = {}
-    /// Called only after the new address is confirmed; signs out of this server.
-    var onChangeServer: (String) -> Void = { _ in }
+    /// Called only after the new address and its enrollment token are
+    /// confirmed; signs out of this server.
+    var onChangeServer: (String, String) -> Void = { _, _ in }
     var onEvictAttachmentCache: () -> Void = {}
     var addHost = AddHostPresentation()
 
@@ -63,9 +64,9 @@ struct SettingsScreen: View {
             Button("Change server…") { changesServer = true }
                 .accessibilityHint("Asks for the new address; nothing changes until you confirm")
                 .sheet(isPresented: $changesServer) {
-                    ChangeServerSheet(current: serverAddress) { address in
+                    ChangeServerSheet(current: serverAddress) { address, token in
                         changesServer = false
-                        onChangeServer(address)
+                        onChangeServer(address, token)
                     }
                 }
             Button("Sign out", role: .destructive) { confirmsSignOut = true }
@@ -74,7 +75,7 @@ struct SettingsScreen: View {
                     Button("Sign out", role: .destructive, action: onSignOut)
                     Button("Cancel", role: .cancel) {}
                 } message: {
-                    Text("This device forgets this server and its Hosts. You'll pair a Host again to reconnect.")
+                    Text("This device forgets this server and its Hosts. To reconnect, you'll need a new enrollment token and to pair a Host again.")
                 }
         }
     }
@@ -101,11 +102,14 @@ struct SettingsScreen: View {
 
     private var appearanceSection: some View {
         Section("Appearance") {
+            // Inline: the choice's checkmark sits at the end of its row.
             Picker("Theme", selection: $appearance) {
                 ForEach(Appearance.allCases, id: \.self) { option in
                     Text(option.rawValue).tag(option)
                 }
             }
+            .pickerStyle(.inline)
+            .labelsHidden()
         }
     }
 
@@ -133,13 +137,14 @@ struct SettingsScreen: View {
     }
 }
 
-/// New server address with Cancel. Switching signs out of the current server,
-/// so nothing happens until the user confirms a different address.
+/// New server address and its enrollment token, with Cancel. Switching signs
+/// out of the current server, so nothing happens until the user confirms.
 private struct ChangeServerSheet: View {
     let current: String
-    var onSwitch: (String) -> Void
+    var onSwitch: (String, String) -> Void
 
     @State private var address = ""
+    @State private var token = ""
     @Environment(\.dismiss) private var dismiss
 
     private var trimmed: String {
@@ -155,8 +160,12 @@ private struct ChangeServerSheet: View {
                         .textContentType(.URL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                    TextField("Enrollment token", text: $token)
+                        .textContentType(.oneTimeCode)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
                 } footer: {
-                    Text("Switching signs this device out of \(current). You'll pair a Host on the new server.")
+                    Text("Generate the token on the new server's /enrollment page. Switching signs this device out of \(current); you'll pair a Host on the new server.")
                 }
             }
             .navigationTitle("Change Server")
@@ -166,8 +175,8 @@ private struct ChangeServerSheet: View {
                     Button("Cancel", systemImage: "xmark") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Switch") { onSwitch(trimmed) }
-                        .disabled(trimmed.isEmpty || trimmed == current)
+                    Button("Switch") { onSwitch(trimmed, token.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                        .disabled(trimmed.isEmpty || trimmed == current || token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
         }

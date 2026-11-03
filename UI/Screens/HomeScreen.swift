@@ -35,6 +35,8 @@ struct HomeScreen: View {
     /// The Host connection is ready; an unloaded list loads then.
     var canLoad: Bool = true
 
+    @Environment(\.globalActionsAtBottom) private var globalActionsAtBottom
+
     private var currentHost: HostItem? {
         hosts.first(where: \.isCurrent)
     }
@@ -68,9 +70,11 @@ struct HomeScreen: View {
                 CurrentHostMenu(hosts: hosts, onSelect: onSelectHost, onAddHost: onAddHost, onManage: onOpenSettings)
             }
             if !isSidebar {
-                GlobalToolbarActions(onNewChat: onOpenNewChat, onSettings: onOpenSettings)
-                // Keeps the global pair and the list actions as separate groups.
-                ToolbarSpacer(.fixed, placement: .topBarTrailing)
+                GlobalToolbarActions(atBottom: globalActionsAtBottom, onNewChat: onOpenNewChat, onSettings: onOpenSettings)
+                if !globalActionsAtBottom {
+                    // Keeps the global pair and the list actions as separate groups.
+                    ToolbarSpacer(.fixed, placement: .topBarTrailing)
+                }
             }
             // List actions: they operate on this conversation list.
             ToolbarItemGroup(placement: .topBarTrailing) {

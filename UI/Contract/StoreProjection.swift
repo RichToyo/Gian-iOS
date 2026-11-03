@@ -96,7 +96,7 @@ enum StoreProjection {
     static func pairingNotice(_ outcome: HostPairingOutcome?) -> String? {
         switch outcome {
         case nil, .paired: nil
-        case .invalidCode: "That isn't a pairing link or QR code for this server."
+        case .invalidCode: "That isn't a valid pairing code or QR code for this server."
         case .rejected: "The Host declined this device."
         case .expired: "That pairing link has expired. Make a new one on the Host."
         case .failed(let message): message

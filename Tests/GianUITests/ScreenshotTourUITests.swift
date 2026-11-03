@@ -21,10 +21,21 @@ final class ScreenshotTourUITests: XCTestCase {
         snap(app, "01-setup-server", "light")
         serverField.tap()
         serverField.typeText("https://remote.example.test")
+        let token = app.textFields["Enrollment token"]
+        token.tap()
+        token.typeText("preview-enrollment-token")
+        snap(app, "02-setup-token", "light")
         app.buttons["Continue"].tap()
 
-        if app.textFields["Paste pairing link"].waitForExistence(timeout: 30) {
-            snap(app, "05-setup-pairing", "light")
+        let enterCode = app.buttons["Enter one-time code"]
+        if enterCode.waitForExistence(timeout: 30) {
+            snap(app, "05-setup-pairing-scan", "light")
+            enterCode.tap()
+            let code = app.textFields["One-time code"]
+            if code.waitForExistence(timeout: 10), app.keyboards.firstMatch.waitForExistence(timeout: 5) {
+                code.typeText("7K3M")
+                snap(app, "05-setup-pairing-code", "light")
+            }
         }
     }
 
@@ -51,10 +62,20 @@ final class ScreenshotTourUITests: XCTestCase {
                 XCTAssertTrue(app.buttons[value].exists, "\(value) missing from ⋯ in \(destination)")
             }
             XCTAssertFalse(app.staticTexts["Applies from the next turn"].exists, "⋯ needs no explanations")
+            // Approval opens a choice list (its checkmark at the end of the row).
+            app.buttons["Ask for approval"].tap(); sleep(1)
+            XCTAssertTrue(app.buttons["Approve for me"].waitForExistence(timeout: 5), "Approval choices missing")
+            snap(app, "13-approval-\(destination)", "light")
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.1)).tap()
+            XCTAssertTrue(app.buttons["Approve for me"].waitForNonExistence(timeout: 5), "Approval choices did not close")
+            sleep(1)
+            more.tap()
             if destination == "chat" {
-                // The preview Host has no translation set up: one grayed-out row.
-                XCTAssertTrue(app.buttons["Translate"].exists, "Translate missing")
-                XCTAssertFalse(app.buttons["Translate"].isEnabled, "Unavailable Translate should be grayed out")
+                // The preview Host has no translation set up: one grayed-out
+                // row, read as "Translate, Off".
+                let translate = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Translate'")).firstMatch
+                XCTAssertTrue(translate.waitForExistence(timeout: 5), "Translate missing")
+                XCTAssertFalse(translate.isEnabled, "Unavailable Translate should be grayed out")
             }
             XCTAssertFalse(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Repository'")).firstMatch.isHittable,
                            "Repository must not be in ⋯")
@@ -96,9 +117,9 @@ final class ScreenshotTourUITests: XCTestCase {
         XCTAssertTrue((typed.value as? String ?? "").contains("\n"), "Return did not insert a line break")
     }
 
-    /// Add Host explains a bad link, Cancel keeps the current Host, and a
+    /// Add Host explains a rejected code, Cancel keeps the current Host, and a
     /// confirmed pairing closes the sheet (the preview pairs Harbor again).
-    func testAddHostExplainsBadLinksAndCloses() throws {
+    func testAddHostExplainsRejectedCodesAndCloses() throws {
         let app = launch(appearance: "light", ready: true)
         let host = app.buttons["Harbor, Online"].firstMatch
         XCTAssertTrue(host.waitForExistence(timeout: 30))
@@ -107,27 +128,30 @@ final class ScreenshotTourUITests: XCTestCase {
         XCTAssertTrue(add.waitForExistence(timeout: 5))
         add.tap()
 
-        let link = app.textFields["Paste pairing link"]
-        XCTAssertTrue(link.waitForExistence(timeout: 10), "Add Host sheet missing")
-        link.tap()
-        link.typeText("not a pairing link")
-        app.buttons["Pair"].tap()
-        let notice = app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'pairing link or QR code'")).firstMatch
-        XCTAssertTrue(notice.waitForExistence(timeout: 5), "A bad link needs an explanation")
+        let enterCode = app.buttons["Enter one-time code"]
+        XCTAssertTrue(enterCode.waitForExistence(timeout: 10), "Add Host sheet missing")
+        enterCode.tap()
+        let code = app.textFields["One-time code"]
+        XCTAssertTrue(code.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "The code field should take focus by itself")
+        code.typeText("00000000")
+        let notice = app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'isn' AND label CONTAINS 'valid anymore'")).firstMatch
+        XCTAssertTrue(notice.waitForExistence(timeout: 5), "A rejected code needs an explanation")
         snap(app, "19-add-host", "light")
         app.buttons["Cancel"].tap()
-        XCTAssertTrue(link.waitForNonExistence(timeout: 5), "Cancel must close Add Host")
+        XCTAssertTrue(code.waitForNonExistence(timeout: 5), "Cancel must close Add Host")
         XCTAssertTrue(host.exists, "Cancel must keep the current Host")
 
         host.tap()
         XCTAssertTrue(add.waitForExistence(timeout: 5))
         add.tap()
-        XCTAssertTrue(link.waitForExistence(timeout: 10))
+        XCTAssertTrue(enterCode.waitForExistence(timeout: 10))
         XCTAssertFalse(notice.exists, "Cancel must clear the last notice")
-        link.tap()
-        link.typeText("https://remote.example.test/pair#nonce=abcdefghijklmnop")
-        app.buttons["Pair"].tap()
-        XCTAssertTrue(link.waitForNonExistence(timeout: 15), "A confirmed pairing must close Add Host")
+        enterCode.tap()
+        XCTAssertTrue(code.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "The code field should take focus by itself")
+        code.typeText("7K3MQ9TX")
+        XCTAssertTrue(code.waitForNonExistence(timeout: 15), "A confirmed pairing must close Add Host")
         XCTAssertTrue(host.waitForExistence(timeout: 15))
     }
 

@@ -40,14 +40,18 @@ struct CurrentHostMenu: View {
     var onAddHost: () -> Void
     var onManage: () -> Void
 
+    @State private var showsHosts = false
+
     var body: some View {
         let current = hosts.first(where: \.isCurrent)
-        Menu {
-            HostTitleMenu(hosts: hosts, onSelect: onSelect, onAddHost: onAddHost, onManage: onManage)
-        } label: {
+        Button { showsHosts = true } label: {
             HostTitleLabel(name: current?.name ?? "Conversations", isReachable: current?.isReachable)
         }
+        .buttonStyle(.plain)
         .accessibilityHint("Switch or add Hosts")
+        .popover(isPresented: $showsHosts) {
+            HostList(hosts: hosts, onSelect: onSelect, onAddHost: onAddHost, onManage: onManage)
+        }
     }
 }
 
@@ -76,52 +80,54 @@ struct HostScopedTitle: View {
     }
 }
 
-/// The Hosts menu: every paired Host with its status (selection dispatches
-/// `.selectHost`; unreachable ones are listed but disabled), Add Host, and
-/// Settings.
-struct HostTitleMenu: View {
+/// The Hosts list: every paired Host with its status and the current one
+/// checked at the end (selection dispatches `.selectHost`; unreachable Hosts
+/// are listed but disabled), then Add Host and Settings.
+struct HostList: View {
     let hosts: [HostItem]
     var onSelect: (HostID) -> Void
     var onAddHost: () -> Void
     var onManage: () -> Void
 
     var body: some View {
-        Section("Hosts") {
-            ForEach(hosts) { host in
-                Button {
-                    onSelect(host.id)
-                } label: {
-                    Label(host.name, systemImage: host.isCurrent ? "checkmark" : "laptopcomputer")
-                    Text(host.isReachable ? "Online" : "Offline")
-                }
-                .disabled(!host.isReachable && !host.isCurrent)
-            }
-        }
-        Section {
-            Button("Add Host", systemImage: "plus", action: onAddHost)
-            Button("Manage in Settings", systemImage: "gearshape", action: onManage)
-        }
+        ChoiceList(
+            header: "Hosts",
+            rows: hosts.map { host in
+                ChoiceListRow(id: host.id.rawValue, title: host.name, subtitle: host.isReachable ? "Online" : "Offline",
+                              systemImage: "laptopcomputer", isSelected: host.isCurrent,
+                              isEnabled: host.isReachable || host.isCurrent) { onSelect(host.id) }
+            },
+            actions: [
+                ChoiceListRow(id: "add", title: "Add Host", systemImage: "plus", action: onAddHost),
+                ChoiceListRow(id: "manage", title: "Manage in Settings", systemImage: "gearshape", action: onManage),
+            ]
+        )
     }
 }
 
-/// List options as one toolbar menu: grouping (Tasks / Repositories) and an
-/// explicit Refresh next to pull-to-refresh. The symbol shows the grouping.
+/// List options as one toolbar button: grouping (Tasks / Repositories, the
+/// current one checked at the end) and an explicit Refresh next to
+/// pull-to-refresh. The symbol shows the grouping.
 struct DirectoryListMenu: View {
     @Binding var selection: DirectoryView
     var onRefresh: () -> Void
 
+    @State private var showsOptions = false
+
     var body: some View {
-        Menu {
-            Picker("Group by", selection: $selection) {
-                Label("Tasks", systemImage: "checklist").tag(DirectoryView.tasks)
-                Label("Repositories", systemImage: "folder").tag(DirectoryView.repos)
-            }
-            Section {
-                Button("Refresh", systemImage: "arrow.clockwise", action: onRefresh)
-            }
-        } label: {
+        Button { showsOptions = true } label: {
             Label("List options", systemImage: selection == .tasks ? "checklist" : "folder")
         }
         .accessibilityLabel("Directory views")
+        .popover(isPresented: $showsOptions) {
+            ChoiceList(
+                header: "Group by",
+                rows: [
+                    ChoiceListRow(id: "tasks", title: "Tasks", systemImage: "checklist", isSelected: selection == .tasks) { selection = .tasks },
+                    ChoiceListRow(id: "repos", title: "Repositories", systemImage: "folder", isSelected: selection == .repos) { selection = .repos },
+                ],
+                actions: [ChoiceListRow(id: "refresh", title: "Refresh", systemImage: "arrow.clockwise", action: onRefresh)]
+            )
+        }
     }
 }

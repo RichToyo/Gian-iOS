@@ -93,13 +93,13 @@ public final class GianClientStore {
 
     private func reduceAction(_ action: GianClientAction) async -> GianDispatchResult {
         switch action {
-        case .setServerAddress(let raw):
+        case .setServerAddress(let raw, let enrollmentToken):
             let previous = state.server
             let result = setServer(raw)
             guard result.isApplied else { return result }
             if previous != state.server, let lifecycle = service as? any GianClientLifecycle { await lifecycle.disconnect() }
-            return await connectServer()
-        case .forgetServerIdentity:
+            return await connectServer(enrollmentToken: enrollmentToken)
+        case .forgetServerIdentity(let enrollmentToken):
             guard state.phase == .serverEntered, state.account.status == .serverIdentityChanged, let server = state.server else {
                 return reject(.notAuthorized)
             }
@@ -110,12 +110,13 @@ public final class GianClientStore {
                     return reject(.notAuthorized)
                 }
             }
-            return await connectServer()
+            return await connectServer(enrollmentToken: enrollmentToken)
         case .logout:
             let result = logout()
             await finishPendingRemoteLogout()
             return result
         case .beginHostPairingFromQR(let payload): return await beginQR(payload)
+        case .beginHostPairingWithCode(let code): return await beginCode(code)
         case .refreshHostPairing: return await refreshPairing()
         case .cancelHostPairing: return cancelPairing()
         case .selectHost(let id): return await selectHost(id)
@@ -605,12 +606,13 @@ public final class GianClientStore {
     /// Verifies the Server's identity (pinned on first use) and prepares this
     /// app's controller identity there. A Server already used on this device
     /// restores its paired Hosts; otherwise Host pairing comes next.
-    private func connectServer() async -> GianDispatchResult {
+    private func connectServer(enrollmentToken: String?) async -> GianDispatchResult {
         guard let server = state.server, state.phase == .serverEntered else { return reject(.notAuthorized) }
         epoch += 1
         state.account = AccountAuthorization(status: .pending)
         let token = epoch
-        let response = await service.connectServer(server: server)
+        let enrollment = enrollmentToken?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let response = await service.connectServer(server: server, enrollmentToken: enrollment?.isEmpty == false ? enrollment : nil)
         guard token == epoch, state.server == server else { return reject(.staleOperation) }
         switch response {
         case .failed(let message):
@@ -769,22 +771,35 @@ public final class GianClientStore {
     /// Setup pairs the first Host; once ready, the same flow adds another
     /// Host while the current one stays open.
     private func beginQR(_ payload: String) async -> GianDispatchResult {
+        guard let server = state.server else { return reject(.notAuthorized) }
+        switch PairingQR.parse(payload: payload, server: server) {
+        case .failure(let code):
+            state.pairingOutcome = .invalidCode
+            return reject(code)
+        case .success(let invitation):
+            return await claim(invitation)
+        }
+    }
+
+    private func beginCode(_ input: String) async -> GianDispatchResult {
+        guard let code = PairingCode.canonical(input) else {
+            state.pairingOutcome = .invalidCode
+            return reject(.pairingQRInvalid)
+        }
+        return await claim(.code(code))
+    }
+
+    private func claim(_ invitation: HostPairingInvitation) async -> GianDispatchResult {
         guard state.phase == .awaitingHostPairing || state.phase == .ready,
               let server = state.server, let account = state.account.accountID else {
             return reject(.notAuthorized)
         }
         state.pairingOutcome = nil
-        switch PairingQR.parse(payload: payload, server: server) {
-        case .failure(let code):
-            state.pairingOutcome = .invalidCode
-            return reject(code)
-        case .success(let qr):
-            let token = epoch
-            let sequence = pairingSequence
-            let response = await service.claimHostQR(server: server, account: account, qr: qr)
-            guard token == epoch, sequence == pairingSequence else { return reject(.staleOperation) }
-            return await finishPairing(response)
-        }
+        let token = epoch
+        let sequence = pairingSequence
+        let response = await service.claimHost(server: server, account: account, invitation: invitation)
+        guard token == epoch, sequence == pairingSequence else { return reject(.staleOperation) }
+        return await finishPairing(response)
     }
 
     private func refreshPairing() async -> GianDispatchResult {

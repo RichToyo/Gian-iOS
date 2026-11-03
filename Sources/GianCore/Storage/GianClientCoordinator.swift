@@ -238,7 +238,7 @@ public final class GianClientCoordinator {
         switch action {
         case .logout, .setForeground(.background), .noteLocalConnectivity(.unavailable):
             cancelNetworkEffects()
-        case .setServerAddress(let raw):
+        case .setServerAddress(let raw, _):
             if (store.state.phase == .signedOut || store.state.phase == .serverEntered), ServerAddress(parsing: raw) != nil {
                 cancelNetworkEffects()
             }

@@ -35,10 +35,14 @@ class ControlledService: GianClientServicing {
     var logos: [String: AgentLogoResponse] = [:]
     var logoRequests: [String] = []
 
-    func connectServer(server: ServerAddress) async -> ServerConnectResponse { await base.connectServer(server: server) }
-    func claimHostQR(server: ServerAddress, account: AccountID, qr: HostPairingQR) async -> HostPairingResponse {
+    func connectServer(server: ServerAddress, enrollmentToken: String?) async -> ServerConnectResponse {
+        await base.connectServer(server: server, enrollmentToken: enrollmentToken)
+    }
+    var claimInvitations: [HostPairingInvitation] = []
+    func claimHost(server: ServerAddress, account: AccountID, invitation: HostPairingInvitation) async -> HostPairingResponse {
+        claimInvitations.append(invitation)
         if !claimResponses.isEmpty { return claimResponses.removeFirst() }
-        return await base.claimHostQR(server: server, account: account, qr: qr)
+        return await base.claimHost(server: server, account: account, invitation: invitation)
     }
     func refreshHostPairing(server: ServerAddress, account: AccountID, pairingID: PairingID) async -> HostPairingResponse {
         if holdNextPairingRefresh {

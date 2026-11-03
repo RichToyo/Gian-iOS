@@ -65,6 +65,18 @@ struct LiveRelayTests {
         #expect(!socket.commands.contains("session.create"))
         await fixture.service.disconnect()
     }
+    /// A session event drops the snapshot until the next directory read; a
+    /// message sent meanwhile (a new chat's first one) still goes out.
+    @Test func sendingRightAfterASessionEventIsNotRefused() async throws {
+        let (fixture, socket) = try await connected()
+        fixture.service.invalidateDirectoryRead()
+        let command = CommandID(rawValue: fixture.service.newID())!
+        let result = await fixture.service.sendMessage(scope: fixture.scope, request: SessionSendRequest(commandID: command,
+            sessionID: SessionID(rawValue: fixture.sessionID)!, text: "fixture", attachmentIDs: [], busy: .fail, translation: nil))
+        guard case .succeeded = result else { Issue.record("Expected the send to go out, got \(result)"); await fixture.service.disconnect(); return }
+        #expect(socket.commands.contains("session.send"))
+        await fixture.service.disconnect()
+    }
     @Test func encryptedAttachmentRoundTripAndExpiredReference() async throws {
         let (fixture, socket) = try await connected()
         let bytes = Data("fixture upload".utf8)

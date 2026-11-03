@@ -1,29 +1,19 @@
 import SwiftUI
 
-/// A choice among mutually exclusive values with the current one checkmarked.
-/// The label is a symbol + title so it works as an iPhone Duo vertical-bar
-/// item (a custom icon only belongs in menus); nil choices (e.g. "No task") are allowed. Past `searchableThreshold`
-/// choices it opens a searchable list instead of a long menu.
+/// A choice among mutually exclusive values, for the New chat bar (Task,
+/// Repository, Agent). The label is a symbol + title so it works as an iPhone
+/// Duo vertical-bar item. Tapping opens a `ChoiceList` (the selection's
+/// checkmark at the end of its row); past `searchableThreshold` choices, a
+/// searchable sheet instead. Nil choices (e.g. "No task") are allowed.
 struct ChoiceMenu<ID: Hashable>: View {
-    enum TitleStyle {
-        /// "Repository": toolbar menus.
-        case name
-        /// "Ada Large": menu rows, where the icon names the setting and the
-        /// title carries the current value (nested rows have no subtitle).
-        case value
-    }
-
     let title: String
-    var systemImage: String = ""
-    /// Replaces the symbol, e.g. the Agent's logo for Model.
-    var icon: Image? = nil
+    let systemImage: String
     let choices: [(id: ID?, name: String)]
     let selected: ID?
-    var titleStyle: TitleStyle = .name
-    /// Toolbar use only: menus can't present sheets from inside another menu.
     var searchableThreshold: Int? = nil
     var onSelect: (ID?) -> Void
 
+    @State private var showsList = false
     @State private var showsPicker = false
 
     private var selectedName: String? {
@@ -35,54 +25,24 @@ struct ChoiceMenu<ID: Hashable>: View {
     }
 
     var body: some View {
-        Group {
-            if usesPicker {
-                Button {
-                    showsPicker = true
-                } label: {
-                    label
-                }
-                .sheet(isPresented: $showsPicker) {
-                    ChoicePickerSheet(title: title, choices: choices, selected: selected) { id in
-                        showsPicker = false
-                        onSelect(id)
-                    }
-                }
-            } else {
-                Menu {
-                    Section(title) {
-                        ForEach(Array(choices.enumerated()), id: \.offset) { _, choice in
-                            Button {
-                                onSelect(choice.id)
-                            } label: {
-                                if choice.id == selected {
-                                    Label(choice.name, systemImage: "checkmark")
-                                } else {
-                                    Text(choice.name)
-                                }
-                            }
-                        }
-                    }
-                } label: {
-                    label
-                }
+        Button {
+            if usesPicker { showsPicker = true } else { showsList = true }
+        } label: {
+            Label(title, systemImage: systemImage)
+        }
+        .popover(isPresented: $showsList) {
+            ChoiceList(header: title, rows: choices.enumerated().map { index, choice in
+                ChoiceListRow(id: "\(index)", title: choice.name, isSelected: choice.id == selected) { onSelect(choice.id) }
+            })
+        }
+        .sheet(isPresented: $showsPicker) {
+            ChoicePickerSheet(title: title, choices: choices, selected: selected) { id in
+                showsPicker = false
+                onSelect(id)
             }
         }
         .accessibilityLabel(title)
         .accessibilityValue(selectedName ?? "None")
-    }
-
-    private var labelText: String {
-        titleStyle == .value ? selectedName ?? title : title
-    }
-
-    @ViewBuilder
-    private var label: some View {
-        if let icon {
-            Label { Text(labelText) } icon: { icon }
-        } else {
-            Label(labelText, systemImage: systemImage)
-        }
     }
 }
 

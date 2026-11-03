@@ -51,9 +51,9 @@ private final class CoordinatedService: ControlledService, GianClientLifecycle, 
         }
         return response
     }
-    override func connectServer(server: ServerAddress) async -> ServerConnectResponse {
+    override func connectServer(server: ServerAddress, enrollmentToken: String?) async -> ServerConnectResponse {
         if holdConnect { return await withCheckedContinuation { connectResult = $0 } }
-        return await super.connectServer(server: server)
+        return await super.connectServer(server: server, enrollmentToken: enrollmentToken)
     }
 }
 
@@ -200,7 +200,7 @@ struct CoordinatorTests {
         let service = CoordinatedService()
         let store = GianClientStore(service: service, clock: clock, ids: SequenceIDGenerator(), storage: InMemoryGianStorage())
         service.holdConnect = true
-        let pending = Task { await store.dispatch(.setServerAddress(PreviewFixtures.server)) }
+        let pending = Task { await store.dispatch(.setServerAddress(PreviewFixtures.server, enrollmentToken: PreviewFixtures.enrollmentToken)) }
         for _ in 0..<100 where service.connectResult == nil { await Task.yield() }
         let completion = try #require(service.connectResult)
         service.connectResult = nil

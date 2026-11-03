@@ -53,6 +53,7 @@ struct ChatScreen: View {
     /// The current Host, shown under the title.
     var host: HostItem? = nil
 
+    @Environment(\.globalActionsAtBottom) private var globalActionsAtBottom
     @State private var previewedAttachment: (id: AttachmentID, name: String, data: Data)?
 
     var body: some View {
@@ -124,7 +125,7 @@ struct ChatScreen: View {
             ToolbarItem(placement: .principal) {
                 HostScopedTitle(title: conversation.title, host: host)
             }
-            GlobalToolbarActions(onNewChat: onOpenNewChat, onSettings: onOpenSettings)
+            GlobalToolbarActions(atBottom: globalActionsAtBottom, onNewChat: onOpenNewChat, onSettings: onOpenSettings)
         }
         .sheet(item: previewBinding) { preview in
             AttachmentPreviewSheet(

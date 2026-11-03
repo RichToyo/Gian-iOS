@@ -72,7 +72,7 @@ extension LiveGianClientService {
         for transfer in transfers.values { transfer.mailbox.fail(.disconnected) }
         commandWaiters.removeAll(); mailboxes.removeAll(); transfers.removeAll()
         snapshotTimeout?.cancel(); snapshotTimeout = nil
-        snapshotParts = nil; snapshot = nil; stagedSnapshot = nil; catalog = nil; cursor = nil
+        snapshotParts = nil; snapshot = nil; capabilities = nil; stagedSnapshot = nil; catalog = nil; cursor = nil
         pendingReadSnapshots.removeAll()
         subscribedSession = nil; desiredSession = nil; latestTranscriptTurns.removeAll()
         fileDescriptors.removeAll()
@@ -90,7 +90,7 @@ extension LiveGianClientService {
         for transfer in transfers.values { transfer.mailbox.fail(error) }
         commandWaiters.removeAll(); mailboxes.removeAll(); transfers.removeAll()
         snapshotTimeout?.cancel(); snapshotTimeout = nil
-        snapshotParts = nil; snapshot = nil; stagedSnapshot = nil; catalog = nil
+        snapshotParts = nil; snapshot = nil; capabilities = nil; stagedSnapshot = nil; catalog = nil
         pendingReadSnapshots.removeAll()
         subscribedSession = nil; fileDescriptors.removeAll()
         lastFailure = error
@@ -139,6 +139,7 @@ extension LiveGianClientService {
     /// pairing until it is removed there.
     public func logout(server: ServerAddress, account: AccountID) async throws {
         disconnectNow()
+        controllerLeases.removeValue(forKey: server)
         let loaded = Result { try loadVaultForCleanup(server: server, account: account) }
         try invalidateAccount(server: server, account: account)
         try secrets.remove(activeKey(server))

@@ -9,7 +9,9 @@ extension LiveGianClientService: GianClientServicing {
     }
     func requireCapability(_ capability: BusinessCapability, scope: ClientScope) throws {
         _ = try requireConnection(scope)
-        guard let snapshot, try snapshot["capabilities"][capability.rawValue].string("state") == "supported" else {
+        // Not the snapshot: any session event drops it, and a message sent
+        // right after one (the first message of a new chat) was refused.
+        guard let capabilities, try capabilities[capability.rawValue].string("state") == "supported" else {
             throw RemoteClientError.capabilityDenied
         }
     }

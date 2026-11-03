@@ -183,10 +183,10 @@ struct AppRootView: View {
                 onSignOut: { dispatch(.logout) },
                 // Confirmed in Settings first; then sign out and connect to
                 // the new server (Host pairing follows).
-                onChangeServer: { address in
+                onChangeServer: { address, enrollmentToken in
                     Task {
                         await store.dispatch(.logout)
-                        await store.dispatch(.setServerAddress(address))
+                        await store.dispatch(.setServerAddress(address, enrollmentToken: enrollmentToken))
                     }
                 },
                 onEvictAttachmentCache: { dispatch(.clearAttachmentCache) },
@@ -207,6 +207,7 @@ struct AppRootView: View {
                     didPair: { if case .paired = store.state.pairingOutcome { true } else { false } }(),
                     notice: StoreProjection.pairingNotice(store.state.pairingOutcome),
                     onPairPayload: { dispatch(.beginHostPairingFromQR($0)) },
+                    onPairCode: { dispatch(.beginHostPairingWithCode($0)) },
                     onRefresh: { dispatch(.refreshHostPairing) },
                     onReset: { dispatch(.cancelHostPairing) }
                 )
@@ -239,9 +240,10 @@ struct AppRootView: View {
                     server: store.state.server,
                     pendingPairing: store.state.pendingPairing,
                     pairingNotice: StoreProjection.pairingNotice(store.state.pairingOutcome),
-                    onSubmitServer: { dispatch(.setServerAddress($0)) },
-                    onTrustNewServerIdentity: { dispatch(.forgetServerIdentity) },
+                    onSubmitServer: { dispatch(.setServerAddress($0, enrollmentToken: $1)) },
+                    onTrustNewServerIdentity: { dispatch(.forgetServerIdentity(enrollmentToken: $0)) },
                     onPairPayload: { dispatch(.beginHostPairingFromQR($0)) },
+                    onPairCode: { dispatch(.beginHostPairingWithCode($0)) },
                     onRefreshPairing: { dispatch(.refreshHostPairing) },
                     onStartOver: { dispatch(.logout) }
                 )

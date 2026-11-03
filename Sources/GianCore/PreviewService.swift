@@ -4,6 +4,10 @@ public enum PreviewFixtures {
     public static let instant = Date(timeIntervalSince1970: 1_781_000_000)
     public static let server = "https://remote.example.test"
     public static let qr = "https://remote.example.test/pair#nonce=abcdefghijklmnop"
+    public static let enrollmentToken = "preview-enrollment-token"
+    public static let pairingCode = "7K3M-Q9TX"
+    /// A code the scripted Host no longer accepts.
+    public static let staleCode = "0000-0000"
     public static let account = AccountID(provider: .controller, id: "install-1")!
     public static let otherAccount = AccountID(provider: .controller, id: "install-2")!
     public static let hostID = id("host-harbor", HostID.self)
@@ -265,17 +269,21 @@ public final class PreviewGianClientService: GianClientServicing {
         self.script = script
     }
 
-    public func connectServer(server: ServerAddress) async -> ServerConnectResponse {
+    public func connectServer(server: ServerAddress, enrollmentToken: String?) async -> ServerConnectResponse {
         _ = server
         switch script.serverIdentity {
-        case .verified: return .connected(script.account)
+        case .verified:
+            // Like a first connection to a Remote 1.5 Server: admission needs a token.
+            guard enrollmentToken?.isEmpty == false else { return .failed("Enter the enrollment token from the server's enrollment page.") }
+            return .connected(script.account)
         case .changed: return .identityChanged
         case .unreachable: return .failed("The remote service is temporarily unavailable.")
         }
     }
 
-    public func claimHostQR(server: ServerAddress, account: AccountID, qr: HostPairingQR) async -> HostPairingResponse {
-        _ = (server, account, qr)
+    public func claimHost(server: ServerAddress, account: AccountID, invitation: HostPairingInvitation) async -> HostPairingResponse {
+        _ = (server, account)
+        if invitation == .code(PreviewFixtures.staleCode) { return .failed("That code isn't valid anymore. Make a new one on the Host.") }
         if script.confirmation == .onRefresh && !claimed {
             claimed = true
             return .pendingConfirmation(PreviewFixtures.id("pairing-1", PairingID.self), script.directory.host.id)

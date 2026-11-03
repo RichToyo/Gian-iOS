@@ -24,7 +24,7 @@ enum PairingQR {
         "password", "access_token", "device_code", "client_secret", "github_token",
     ]
 
-    static func parse(payload: String, server: ServerAddress) -> Result<HostPairingQR, RejectionCode> {
+    static func parse(payload: String, server: ServerAddress) -> Result<HostPairingInvitation, RejectionCode> {
         guard let components = URLComponents(string: payload),
               components.scheme?.lowercased() == "https",
               let host = components.host?.lowercased(), !host.isEmpty,
@@ -42,7 +42,7 @@ enum PairingQR {
         guard nonces.count == 1, let nonce = nonces.first,
               nonce.range(of: noncePattern, options: .regularExpression) != nil
         else { return .failure(.pairingQRInvalid) }
-        return .success(HostPairingQR(grantNonce: nonce))
+        return .success(.grantNonce(nonce))
     }
 
     private static func fragmentItems(_ fragment: String?) -> [URLQueryItem] {
@@ -56,6 +56,35 @@ enum PairingQR {
 
     private static func containsBlocked(_ items: [URLQueryItem]) -> Bool {
         items.contains { blockedNames.contains($0.name.lowercased()) }
+    }
+}
+
+/// A Host's one-time pairing code: 8 Crockford base32 characters shown as
+/// `XXXX-XXXX`. Mirrors the protocol's normalization (case-insensitive, I/L
+/// read as 1, O as 0, U refused).
+public enum PairingCode {
+    public static let length = 8
+    static let alphabet = Set("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
+
+    /// The characters a person typed, mapped and filtered (at most 8).
+    public static func characters(from input: String) -> String {
+        let mapped = input.uppercased().map { character -> Character in
+            switch character {
+            case "I", "L": "1"
+            case "O": "0"
+            default: character
+            }
+        }
+        return String(mapped.filter { alphabet.contains($0) }.prefix(length))
+    }
+
+    /// `XXXX-XXXX`, or nil unless the input is exactly one complete code.
+    public static func canonical(_ input: String) -> String? {
+        let cleaned = input.uppercased().filter { $0 != "-" && !$0.isWhitespace }
+        guard !cleaned.contains("U") else { return nil }
+        let code = characters(from: cleaned)
+        guard code.count == length, code.count == cleaned.count else { return nil }
+        return "\(code.prefix(4))-\(code.suffix(4))"
     }
 }
 

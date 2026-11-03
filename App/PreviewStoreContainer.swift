@@ -35,7 +35,7 @@ struct PreviewStoreContainer<Content: View>: View {
 
     @MainActor
     private func driveToReady() async {
-        _ = await store.dispatch(.setServerAddress(PreviewFixtures.server))
+        _ = await store.dispatch(.setServerAddress(PreviewFixtures.server, enrollmentToken: PreviewFixtures.enrollmentToken))
         _ = await store.dispatch(.beginHostPairingFromQR(PreviewFixtures.qr))
         switch GianAppComposition.previewDestination {
         case "repos": _ = await store.dispatch(.selectDirectoryView(.repos))

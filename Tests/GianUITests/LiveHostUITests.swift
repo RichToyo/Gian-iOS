@@ -1,12 +1,14 @@
 import XCTest
 
 /// Drives the real app against the local test Gian (see build/live15/README.md):
-/// server (identity verified, no account) → pairing → home → new chat with real catalog options →
-/// one message → a mid-conversation `session.update`. Skipped unless a fresh
-/// pairing link is passed:
+/// server + enrollment token (admitted as a controller, no account) → one-time
+/// code pairing → home → new chat with real catalog options → one message →
+/// a mid-conversation `session.update`. Skipped unless a fresh enrollment
+/// token and pairing code are passed:
 ///
 ///     TEST_RUNNER_GIAN_LIVE_SERVER=https://localhost:8444 \
-///     TEST_RUNNER_GIAN_LIVE_PAIRING_LINK="$(build/live15/pair-host15.sh --no-wait | tail -1)" \
+///     TEST_RUNNER_GIAN_LIVE_ENROLLMENT_TOKEN=<from build/live15/enroll-token15.sh> \
+///     TEST_RUNNER_GIAN_LIVE_PAIRING_CODE=<XXXX-XXXX from build/live15/pair-host15.sh --no-wait> \
 ///       xcodebuild … -only-testing:GianUITests/LiveHostUITests test
 @MainActor
 final class LiveHostUITests: XCTestCase {
@@ -18,24 +20,11 @@ final class LiveHostUITests: XCTestCase {
 
     func testConnectsToLocalHostAndChangesConversationSettings() throws {
         let environment = ProcessInfo.processInfo.environment
-        let link = try XCTUnwrap(environment["GIAN_LIVE_PAIRING_LINK"].flatMap { $0.isEmpty ? nil : $0 },
-                                 "Set TEST_RUNNER_GIAN_LIVE_PAIRING_LINK")
-        let server = environment["GIAN_LIVE_SERVER"] ?? "https://localhost:8444"
-
-        app = XCUIApplication()
-        app.launch()
-
-        let serverField = app.textFields.firstMatch
-        XCTAssertTrue(serverField.waitForExistence(timeout: 15))
-        serverField.tap()
-        serverField.typeText(server)
-        app.buttons["Continue"].tap()
-
-        let pairing = app.textFields["Paste pairing link"]
-        XCTAssertTrue(pairing.waitForExistence(timeout: 60), "The server was not verified")
-        pairing.tap()
-        pairing.typeText(link)
-        app.buttons["Pair"].tap()
+        let token = try XCTUnwrap(environment["GIAN_LIVE_ENROLLMENT_TOKEN"].flatMap { $0.isEmpty ? nil : $0 },
+                                  "Set TEST_RUNNER_GIAN_LIVE_ENROLLMENT_TOKEN")
+        let code = try XCTUnwrap(environment["GIAN_LIVE_PAIRING_CODE"].flatMap { $0.isEmpty ? nil : $0 },
+                                 "Set TEST_RUNNER_GIAN_LIVE_PAIRING_CODE")
+        try connect(server: environment["GIAN_LIVE_SERVER"] ?? "https://localhost:8444", enrollmentToken: token, code: code)
 
         let newChat = app.buttons["Start a new chat"]
         XCTAssertTrue(newChat.waitForExistence(timeout: 60), "Pairing did not complete")
@@ -96,18 +85,21 @@ final class LiveHostUITests: XCTestCase {
 
     /// Add Host while signed in: pair the second test Host from the Hosts
     /// menu, land on it, and switch back. Needs two Hosts on the same Server
-    /// and a link for each:
+    /// and a one-time code for each:
     ///
-    ///     TEST_RUNNER_GIAN_LIVE_PAIRING_LINK=<link for "Gian-iOS Test Host"> \
-    ///     TEST_RUNNER_GIAN_LIVE_PAIRING_LINK_2=<link for "Gian-iOS Test Host 2"> \
+    ///     TEST_RUNNER_GIAN_LIVE_ENROLLMENT_TOKEN=<token> \
+    ///     TEST_RUNNER_GIAN_LIVE_PAIRING_CODE=<code for "Gian-iOS Test Host"> \
+    ///     TEST_RUNNER_GIAN_LIVE_PAIRING_CODE_2=<code for "Gian-iOS Test Host 2"> \
     ///       xcodebuild … -only-testing:GianUITests/LiveHostUITests/testAddsASecondHost test
     func testAddsASecondHost() throws {
         let environment = ProcessInfo.processInfo.environment
-        let first = try XCTUnwrap(environment["GIAN_LIVE_PAIRING_LINK"].flatMap { $0.isEmpty ? nil : $0 },
-                                  "Set TEST_RUNNER_GIAN_LIVE_PAIRING_LINK")
-        let second = try XCTUnwrap(environment["GIAN_LIVE_PAIRING_LINK_2"].flatMap { $0.isEmpty ? nil : $0 },
-                                   "Set TEST_RUNNER_GIAN_LIVE_PAIRING_LINK_2")
-        try connect(server: environment["GIAN_LIVE_SERVER"] ?? "https://localhost:8444", pairing: first)
+        let token = try XCTUnwrap(environment["GIAN_LIVE_ENROLLMENT_TOKEN"].flatMap { $0.isEmpty ? nil : $0 },
+                                  "Set TEST_RUNNER_GIAN_LIVE_ENROLLMENT_TOKEN")
+        let first = try XCTUnwrap(environment["GIAN_LIVE_PAIRING_CODE"].flatMap { $0.isEmpty ? nil : $0 },
+                                  "Set TEST_RUNNER_GIAN_LIVE_PAIRING_CODE")
+        let second = try XCTUnwrap(environment["GIAN_LIVE_PAIRING_CODE_2"].flatMap { $0.isEmpty ? nil : $0 },
+                                   "Set TEST_RUNNER_GIAN_LIVE_PAIRING_CODE_2")
+        try connect(server: environment["GIAN_LIVE_SERVER"] ?? "https://localhost:8444", enrollmentToken: token, code: first)
 
         let hostOne = hostTitle("Gian-iOS Test Host,")
         XCTAssertTrue(hostOne.waitForExistence(timeout: 30), "First Host not current")
@@ -115,13 +107,15 @@ final class LiveHostUITests: XCTestCase {
         snap("live-10-first-host")
         hostOne.tap()
         app.buttons["Add Host"].tap()
-        let link = app.textFields["Paste pairing link"]
-        XCTAssertTrue(link.waitForExistence(timeout: 10), "Add Host sheet missing")
-        link.tap()
-        link.typeText(second)
-        app.buttons["Pair"].tap()
+        let enterCode = app.buttons["Enter one-time code"]
+        XCTAssertTrue(enterCode.waitForExistence(timeout: 10), "Add Host sheet missing")
+        enterCode.tap()
+        let codeField = app.textFields["One-time code"]
+        XCTAssertTrue(codeField.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        codeField.typeText(second.replacingOccurrences(of: "-", with: ""))
         snap("live-11-add-host-waiting")
-        XCTAssertTrue(link.waitForNonExistence(timeout: 60), "Second Host was not confirmed")
+        XCTAssertTrue(codeField.waitForNonExistence(timeout: 60), "Second Host was not confirmed")
 
         let hostTwo = hostTitle("Gian-iOS Test Host 2,")
         XCTAssertTrue(hostTwo.waitForExistence(timeout: 30), "The new Host did not become current")
@@ -140,20 +134,34 @@ final class LiveHostUITests: XCTestCase {
         snap("live-14-back-to-first")
     }
 
-    private func connect(server: String, pairing link: String) throws {
+    /// Setup: server + enrollment token, then the Host's one-time code.
+    private func connect(server: String, enrollmentToken: String, code: String) throws {
         app = XCUIApplication()
         app.launch()
         let serverField = app.textFields.firstMatch
         XCTAssertTrue(serverField.waitForExistence(timeout: 15))
-        serverField.tap()
-        serverField.typeText(server)
+        type(server, into: serverField)
+        type(enrollmentToken, into: app.textFields["Enrollment token"])
         app.buttons["Continue"].tap()
-        let pairing = app.textFields["Paste pairing link"]
-        XCTAssertTrue(pairing.waitForExistence(timeout: 60), "The server was not verified")
-        pairing.tap()
-        pairing.typeText(link)
-        app.buttons["Pair"].tap()
+        let enterCode = app.buttons["Enter one-time code"]
+        XCTAssertTrue(enterCode.waitForExistence(timeout: 60), "The server did not admit this device")
+        snap("live-00-pairing")
+        enterCode.tap()
+        let codeField = app.textFields["One-time code"]
+        XCTAssertTrue(codeField.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        codeField.typeText(code.replacingOccurrences(of: "-", with: ""))
         XCTAssertTrue(app.buttons["Start a new chat"].waitForExistence(timeout: 60), "Pairing did not complete")
+    }
+
+    /// Right after launch the first tap can land before the field is ready.
+    private func type(_ text: String, into field: XCUIElement) {
+        for _ in 0..<3 {
+            field.tap()
+            let focused = NSPredicate(format: "hasKeyboardFocus == true")
+            if XCTWaiter.wait(for: [expectation(for: focused, evaluatedWith: field)], timeout: 3) == .completed { break }
+        }
+        field.typeText(text)
     }
 
     /// The centered Host title reads "<name>, Online|Offline".

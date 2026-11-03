@@ -16,8 +16,7 @@ import GianCore
 /// Property declaration order is the synthesized memberwise argument order;
 /// call sites (AdaptiveRoot) must match it exactly.
 struct NewChatScreen: View {
-    @Environment(\.agentLogoImages) private var agentLogos
-    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.globalActionsAtBottom) private var globalActionsAtBottom
 
     let workspaces: [WorkspaceRecord]
     let agents: [AgentRecord]
@@ -83,8 +82,10 @@ struct NewChatScreen: View {
                 ToolbarItem(placement: .principal) {
                     HostScopedTitle(title: "New chat", host: host, keepsWholeTitle: true)
                 }
-                GlobalToolbarActions(showsNewChat: false, onNewChat: {}, onSettings: onOpenSettings)
-                ToolbarSpacer(.fixed, placement: .topBarTrailing)
+                GlobalToolbarActions(showsNewChat: false, atBottom: globalActionsAtBottom, onNewChat: {}, onSettings: onOpenSettings)
+                if !globalActionsAtBottom {
+                    ToolbarSpacer(.fixed, placement: .topBarTrailing)
+                }
                 // Task first: it decides what the conversation is for and is
                 // the one the Host may require. Kept visible longest when the
                 // vertical bar runs out of room (e.g. with the keyboard up).
@@ -110,12 +111,6 @@ struct NewChatScreen: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     ChoiceMenu(
                         title: "Agent", systemImage: "cpu",
-                        icon: selectedAgent.map { agent in
-                            Image(uiImage: AgentLogoArt.menuIcon(
-                                for: AgentLogo(pluginID: agent.pluginID, agentName: agent.name),
-                                name: agent.name, in: agentLogos, scheme: colorScheme
-                            ))
-                        },
                         choices: agents.map { (Optional($0.id), $0.name) },
                         selected: composer.selection.agentID,
                         searchableThreshold: 10,

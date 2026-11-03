@@ -2,10 +2,11 @@ import Foundation
 import Security
 
 extension LiveGianClientService {
-    /// Remote 1.5 needs no account: the Server proves its identity, this app
-    /// keeps a controller identity (an installation key) for it, and Hosts are
-    /// paired by key possession plus the Host's confirmation.
-    public func connectServer(server: ServerAddress) async -> ServerConnectResponse {
+    /// Remote 1.5 needs no account: the Server proves its identity (pinned on
+    /// first use), then this app's installation key is admitted as a native
+    /// controller once with a single-use enrollment token. Hosts are paired as
+    /// that controller and confirmed on the Host.
+    public func connectServer(server: ServerAddress, enrollmentToken: String?) async -> ServerConnectResponse {
         disconnectNow()
         let captured = epoch
         do {
@@ -15,12 +16,75 @@ extension LiveGianClientService {
                 throw RemoteClientError.integrity
             }
             let account = AccountID(installation: installation)
+            if try loadVault(server: server, account: account)?.admitted != true {
+                guard let enrollmentToken, !enrollmentToken.isEmpty else { return .failed(ControllerEnrollment.tokenRequired) }
+                try await admitController(server: server, identity: identity, fingerprint: fingerprint,
+                                          enrollmentToken: enrollmentToken, epoch: captured)
+            }
             try establishController(server: server, account: account, identity: identity, fingerprint: fingerprint, epoch: captured)
             lastFailure = nil
             return .connected(AccountIdentity(account: account, installationID: installation))
         } catch RemoteClientError.serverIdentityChanged {
             return .identityChanged
-        } catch { return .failed(note(error).safeDescription) }
+        } catch {
+            let safe = note(error)
+            return .failed(ControllerEnrollment.message(for: safe) ?? safe.safeDescription)
+        }
+    }
+
+    /// `POST /api/v1/controller-enrollments/claim`: the enrollment token (from
+    /// the Server's enrollment page or admin CLI) admits this installation key
+    /// as a native controller. An installation admitted earlier proves itself
+    /// with a controller sign-in instead.
+    private func admitController(server: ServerAddress, identity: RemoteSigningIdentity, fingerprint: String,
+                                 enrollmentToken: String, epoch captured: Int) async throws {
+        guard enrollmentToken.utf8.count <= 4096 else { throw RemoteClientError.invalidPayload }
+        do {
+            let result = try await http(server: server, path: "/api/v1/controller-enrollments/claim", body: .object([
+                "protocol": .string(RemoteBaseline.authProtocol), "enrollment_token": .string(enrollmentToken),
+                "browser_installation_id": .string(identity.installation),
+                "device_public_key": try identity.publicKey.wire, "platform": .string("iOS"),
+            ]))
+            try checkEpoch(captured); try validateProtocol(result)
+            try result.closed(["protocol", "browser_installation_id", "server_identity"])
+            let claimed = result["server_identity"]
+            try claimed.closed(["algorithm", "public_key", "fingerprint"])
+            guard try result.identifier("browser_installation_id") == identity.installation,
+                  try claimed.string("fingerprint") == fingerprint,
+                  RemoteWire.hash(try RemotePublicKey(wire: claimed["public_key"]).wire.encoded()) == fingerprint else {
+                throw RemoteClientError.integrity
+            }
+        } catch RemoteClientError.server(code: "CONTROLLER_ALREADY_ADMITTED", retryAfter: _) {
+            // Admitted before (e.g. the vault was lost): signing in proves it.
+            controllerLeases.removeValue(forKey: server)
+            _ = try await controllerAccessToken(server: server, identity: identity, epoch: captured)
+        }
+    }
+
+    /// A controller access token for pairing claims: `controller-challenge`
+    /// then `controller-login`, signed by the installation key. Reused until
+    /// shortly before it expires.
+    func controllerAccessToken(server: ServerAddress, identity: RemoteSigningIdentity, epoch captured: Int) async throws -> String {
+        if let lease = controllerLeases[server], lease.installation == identity.installation,
+           lease.expiresAt > clock.now().addingTimeInterval(30) { return lease.token }
+        let challenge = try await http(server: server, path: "/api/v1/sessions/controller-challenge", body: .object([
+            "protocol": .string(RemoteBaseline.authProtocol), "browser_installation_id": .string(identity.installation),
+        ]))
+        try checkEpoch(captured); try validateProtocol(challenge)
+        try challenge.closed(["protocol", "challenge_id", "challenge", "expires_at"])
+        let challengeID = try challenge.identifier("challenge_id")
+        let login = try await http(server: server, path: "/api/v1/sessions/controller-login", body: .object([
+            "protocol": .string(RemoteBaseline.authProtocol), "browser_installation_id": .string(identity.installation),
+            "challenge_id": .string(challengeID), "signature": .string(try identity.sign(Data(challengeID.utf8))),
+        ]))
+        try checkEpoch(captured); try validateProtocol(login)
+        try login.closed(["protocol", "controller_access_token", "expires_at", "browser_installation_id"])
+        guard try login.identifier("browser_installation_id") == identity.installation else { throw RemoteClientError.integrity }
+        let token = try login.string("controller_access_token")
+        let expires = Date(timeIntervalSince1970: Double(try login.integer("expires_at")) / 1000)
+        guard !token.isEmpty, expires > clock.now(), token.utf8.allSatisfy({ (33...126).contains($0) }) else { throw RemoteClientError.expired }
+        controllerLeases[server] = RemoteControllerLease(installation: identity.installation, token: token, expiresAt: expires)
+        return token
     }
 
     /// Forgets a Server's pinned identity and this app's controller identity
@@ -28,6 +92,7 @@ extension LiveGianClientService {
     /// that was reinstalled). Its paired Hosts must be paired again.
     public func forgetServer(_ server: ServerAddress) async throws {
         disconnectNow()
+        controllerLeases.removeValue(forKey: server)
         if let pointerData = try secrets.read(activeKey(server)),
            let pointer = try? JSONDecoder().decode(RemoteActiveController.self, from: pointerData),
            let account = AccountID(provider: .controller, id: pointer.account) {
@@ -83,12 +148,13 @@ extension LiveGianClientService {
         if var vault = try loadVault(server: server, account: account) {
             guard vault.fingerprint == fingerprint else { throw RemoteClientError.integrity }
             vault.lastVerifiedAt = now
+            vault.admitted = true
             try saveVault(vault, server: server, account: account, epoch: captured)
             return
         }
         let vault = RemoteControllerVault(server: server.absoluteString, account: account.id, identity: identity,
             fingerprint: fingerprint, keyFingerprint: RemoteWire.hash(try identity.publicKey.wire.encoded()),
-            createdAt: now, lastVerifiedAt: now, hosts: [:], translationAttempts: [:], commandAttempts: [:])
+            createdAt: now, lastVerifiedAt: now, hosts: [:], translationAttempts: [:], commandAttempts: [:], admitted: true)
         try saveVault(vault, server: server, account: account, epoch: captured)
         try secrets.write(JSONEncoder().encode(RemoteActiveController(account: account.id, installation: identity.installation)),
                           for: activeKey(server))
@@ -96,21 +162,31 @@ extension LiveGianClientService {
         invalidAccounts.remove(DataScope(server: server, account: account))
     }
 
-    public func claimHostQR(server: ServerAddress, account: AccountID, qr: HostPairingQR) async -> HostPairingResponse {
+    public func claimHost(server: ServerAddress, account: AccountID, invitation: HostPairingInvitation) async -> HostPairingResponse {
         let captured = epoch
         do {
-            guard !qr.grantNonce.isEmpty, qr.grantNonce.utf8.count <= 16_384 else { throw RemoteClientError.invalidPayload }
-            // As remote-web does: the Server proves its pinned identity before a claim.
+            let invite: (String, String)
+            switch invitation {
+            case .grantNonce(let nonce):
+                guard !nonce.isEmpty, nonce.utf8.count <= 16_384 else { throw RemoteClientError.invalidPayload }
+                invite = ("grant_nonce", nonce)
+            case .code(let code):
+                guard let canonical = PairingCode.canonical(code) else { throw RemoteClientError.invalidPayload }
+                invite = ("code", canonical)
+            }
+            // The Server proves its pinned identity before a claim.
             _ = try await verifyServerIdentity(server: server, epoch: captured)
             var vault = try requireVault(server: server, account: account)
+            guard vault.admitted == true else { throw RemoteClientError.notAuthorized }
+            let controllerToken = try await controllerAccessToken(server: server, identity: vault.identity, epoch: captured)
             let identity = RemoteSigningIdentity(installation: vault.identity.installation)
             let pendingKey = RemoteSecretKey(server: server, account: account, installation: identity.installation, purpose: "pending-pairing-key")
             try secrets.write(JSONEncoder().encode(identity), for: pendingKey)
             let result = try await http(server: server, path: "/api/v1/pairings/claim", body: .object([
                 "protocol": .string(RemoteBaseline.authProtocol), "browser_installation_id": .string(identity.installation),
                 "device_public_key": try identity.publicKey.wire, "platform": .string("iOS"),
-                "user_agent": .string("Gian iOS/0.1.0"), "grant_nonce": .string(qr.grantNonce),
-            ]))
+                "user_agent": .string("Gian iOS/0.1.0"), "controller_admission": .int(1), invite.0: .string(invite.1),
+            ]), bearer: controllerToken)
             try checkEpoch(captured); try validateProtocol(result)
             try result.closed(["protocol", "pairing_id", "host_id", "status", "crypto_connection_id"])
             guard try result.string("status") == "pending_confirmation" else { throw RemoteClientError.invalidPayload }
@@ -127,7 +203,18 @@ extension LiveGianClientService {
             invalidHosts.remove(ClientScope(server: server, account: account, host: host))
             try secrets.remove(pendingKey)
             return .pendingConfirmation(pairing, host)
-        } catch { return .failed(note(error).safeDescription) }
+        } catch {
+            let safe = note(error)
+            switch safe {
+            case .server(code: "CONTROLLER_NOT_ADMITTED", retryAfter: _), .deviceRevoked:
+                controllerLeases.removeValue(forKey: server)
+                return .failed("This device isn't admitted on the server anymore. Sign out and connect with a new enrollment token.")
+            case .notAuthorized:
+                return .failed("That code isn't valid anymore. Make a new one on the Host.")
+            default:
+                return .failed(safe.safeDescription)
+            }
+        }
     }
 
     public func refreshHostPairing(server: ServerAddress, account: AccountID, pairingID: PairingID) async -> HostPairingResponse {
@@ -198,6 +285,32 @@ extension LiveGianClientService {
         let lease = RemoteDeviceLease(host: host, token: token, expiresAt: expires, deviceID: device)
         deviceLeases[scope] = lease
         return lease
+    }
+}
+
+struct RemoteControllerLease {
+    let installation: String
+    let token: String
+    let expiresAt: Date
+}
+
+/// Wording for controller enrollment outcomes (the Server's codes are not
+/// shown as is).
+enum ControllerEnrollment {
+    static let tokenRequired = "Enter the enrollment token from the server's enrollment page."
+
+    static func message(for error: RemoteClientError) -> String? {
+        switch error {
+        case .server(code: "ENROLLMENT_CONSUMED", retryAfter: _):
+            "That enrollment token was already used. Generate a new one."
+        case .server(code: "ENROLLMENT_EXPIRED", retryAfter: _):
+            "That enrollment token expired. Tokens last 5 minutes; generate a new one."
+        case .notAuthorized:
+            "That enrollment token isn't valid for this server."
+        case .deviceRevoked:
+            "This device was removed from the server. Sign out and connect with a new enrollment token."
+        default: nil
+        }
     }
 }
 

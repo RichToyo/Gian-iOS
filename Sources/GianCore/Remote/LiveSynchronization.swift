@@ -35,7 +35,7 @@ extension LiveGianClientService {
                 try saveVault(vault, server: scope.server, account: scope.account, epoch: captured)
             }
             try checkDirectoryRead(read)
-            self.snapshot = state; self.catalog = catalog; self.cursor = payload.cursor
+            self.snapshot = state; self.capabilities = state["capabilities"]; self.catalog = catalog; self.cursor = payload.cursor
             lastFailure = nil
             emit(.directory(payload), scope: scope)
             try checkDirectoryRead(read)
