@@ -6,7 +6,7 @@ import Testing
 struct RemoteMappingTests {
     @Test func snapshotNextSequenceAndLiveOnlyEventsDoNotInventCanonicalGaps() async throws {
         let fixture = RemoteFixture()
-        try await fixture.loginAndClaim()
+        try await fixture.connectAndClaim()
         let socket = FixtureRelaySocket(fixture)
         fixture.transport.socket = socket
         guard case .snapshot(let payload) = await fixture.service.refreshDirectory(scope: fixture.scope) else { Issue.record("Missing snapshot"); return }
@@ -35,10 +35,8 @@ struct RemoteMappingTests {
     }
     @Test func retryAfterAppliesEvenToNonJSONAvailabilityResponses() async throws {
         let fixture = RemoteFixture()
-        guard case .started(let login) = await fixture.service.startGitHubDeviceLogin(server: fixture.server) else { Issue.record("Missing challenge"); return }
-        fixture.clock.instant = fixture.clock.instant.addingTimeInterval(5)
         fixture.transport.handler = { _ in RemoteHTTPResponse(status: 503, body: Data("temporarily unavailable".utf8), retryAfterSeconds: 45) }
-        #expect(await fixture.service.pollGitHubDeviceLogin(server: fixture.server, loginID: login.loginID) == .pending(intervalSeconds: 45))
+        guard case .failed = await fixture.service.connectServer(server: fixture.server) else { Issue.record("An unavailable Server is not a connection"); return }
         #expect(fixture.service.lastFailure == .server(code: "HOST_OFFLINE", retryAfter: 45))
     }
 }

@@ -566,8 +566,6 @@ enum StoreProjection {
     static func diagnostic(_ diagnostic: RemoteServiceDiagnostic?) -> DiagnosticPresentation {
         guard let diagnostic else { return .none }
         switch diagnostic.status {
-        case .retryingLogin(let error, let retryAt, let expiresAt):
-            return .retryingLogin(message: error.safeDescription, retryAt: retryAt, expiresAt: expiresAt)
         case .connectionClosed(let error):
             return .connectionClosed(message: error.safeDescription)
         case .resyncRequired(let reason):

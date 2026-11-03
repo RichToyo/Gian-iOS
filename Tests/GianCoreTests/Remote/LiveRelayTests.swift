@@ -6,7 +6,7 @@ import Testing
 struct LiveRelayTests {
     func connected() async throws -> (RemoteFixture, FixtureRelaySocket) {
         let fixture = RemoteFixture()
-        try await fixture.loginAndClaim()
+        try await fixture.connectAndClaim()
         let socket = FixtureRelaySocket(fixture)
         fixture.transport.socket = socket
         guard case .snapshot(let directory) = await fixture.service.refreshDirectory(scope: fixture.scope) else { throw RemoteClientError.invalidPayload }
@@ -21,7 +21,7 @@ struct LiveRelayTests {
         #expect(cached.hosts.count == 1)
         #expect(cached.hosts[0].validation == .cached)
         #expect(!cached.hosts[0].host.online)
-        #expect(cached.accountAuthorizationExpiresAt > fixture.clock.now().addingTimeInterval(600))
+        #expect(cached.identity.account.provider == .controller)
         let session = SessionID(rawValue: fixture.sessionID)!
         let page = await fixture.service.pageTranscript(scope: fixture.scope, sessionID: session, cursor: nil)
         #expect(!page.failed)
@@ -107,7 +107,7 @@ struct LiveRelayTests {
     @Test func signedButMismatchedHandshakeAndUnsupportedHelloCannotAuthorize() async throws {
         for mismatch in [true, false] {
             let fixture = RemoteFixture()
-            try await fixture.loginAndClaim()
+            try await fixture.connectAndClaim()
             let socket = FixtureRelaySocket(fixture)
             socket.tamperAcceptNonce = mismatch
             socket.helloMinor = mismatch ? 3 : 4
@@ -123,8 +123,9 @@ struct LiveRelayTests {
         let cached = try #require(try fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account))
         #expect(cached.hosts.count == 1)
         #expect(cached.hosts[0].validation == .cached)
-        fixture.clock.instant = cached.accountAuthorizationExpiresAt
-        #expect(try fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account) == nil)
+        // No account deadline either: a paired Host grant has no local expiry.
+        fixture.clock.instant = fixture.clock.instant.addingTimeInterval(30 * 86_400)
+        #expect(try fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account)?.hosts.count == 1)
         await fixture.service.disconnect()
     }
     @Test func onlyFreshHandshakeCanReturnOnlineEvidence() async throws {

@@ -15,9 +15,6 @@ public final class LiveGianClientService: GianClientLifecycle {
     let clock: any GianClock
     let ids: any GianIDGenerating
     var epoch = 0
-    var login: RemotePendingLogin?
-    var loginAttempts: [RemoteLoginAttemptKey: RemoteLoginAttempt] = [:]
-    var invalidAuthorizations: Set<RemoteSecretKey> = []
     var relay: RemoteRelay?
     var relayScope: ClientScope?
     var connecting: Task<Void, any Error>?
@@ -46,7 +43,6 @@ public final class LiveGianClientService: GianClientLifecycle {
     var transfers: [String: RemoteTransfer] = [:]
     var deviceLeases: [ClientScope: RemoteDeviceLease] = [:]
     var invalidAccounts: Set<DataScope> = []
-    var invalidServers: Set<ServerAddress> = []
     var invalidHosts: Set<ClientScope> = []
     var fileDescriptors: [AttachmentID: RemoteFileDescriptor] = [:]
     var inflightTransferBytes = 0
@@ -86,13 +82,13 @@ public final class LiveGianClientService: GianClientLifecycle {
             diagnostic(.resyncRequired(.gapEvicted), scope: scope)
         }
     }
-    func diagnostic(_ status: RemoteDiagnosticStatus, scope: ClientScope? = nil, login: RemotePendingLogin? = nil) {
-        diagnosticContinuation.yield(RemoteServiceDiagnostic(server: scope?.server ?? login?.server,
-            account: scope?.account, host: scope?.host, loginID: login?.id, epoch: epoch, status: status))
+    func diagnostic(_ status: RemoteDiagnosticStatus, scope: ClientScope? = nil) {
+        diagnosticContinuation.yield(RemoteServiceDiagnostic(server: scope?.server,
+            account: scope?.account, host: scope?.host, epoch: epoch, status: status))
     }
 
     func http(server: ServerAddress, path: String, method: String = "POST", body: WireValue? = nil,
-              accountToken: String? = nil, bearer: String? = nil) async throws -> WireValue {
+              bearer: String? = nil) async throws -> WireValue {
         let origin = try RemoteWire.origin(server)
         guard path.hasPrefix("/api/v1/"), !path.contains("?"), !path.contains("..") else { throw RemoteClientError.invalidServer }
         guard var components = URLComponents(url: origin, resolvingAgainstBaseURL: false) else { throw RemoteClientError.invalidServer }
@@ -105,11 +101,10 @@ public final class LiveGianClientService: GianClientLifecycle {
         request.setValue(origin.absoluteString, forHTTPHeaderField: "Origin")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
         if let body { request.httpBody = try body.encoded(); request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
-        for credential in [accountToken, bearer].compactMap({ $0 }) {
-            guard !credential.isEmpty, credential.utf8.count <= 16_384,
-                  credential.utf8.allSatisfy({ (33...126).contains($0) }) else { throw RemoteClientError.integrity }
+        if let bearer {
+            guard !bearer.isEmpty, bearer.utf8.count <= 16_384,
+                  bearer.utf8.allSatisfy({ (33...126).contains($0) }) else { throw RemoteClientError.integrity }
         }
-        if let accountToken { request.setValue(accountToken, forHTTPHeaderField: "x-gian-account-token") }
         if let bearer { request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization") }
         try Task.checkCancellation()
         let response = try await transport.request(request, maximumResponseBytes: 64 * 1024)
@@ -124,20 +119,20 @@ public final class LiveGianClientService: GianClientLifecycle {
         }
         return value
     }
-    func validateProtocol(_ wire: WireValue, account: Bool = false) throws {
-        guard try wire.string("protocol") == (account ? RemoteBaseline.accountProtocol : RemoteBaseline.authProtocol) else {
-            throw RemoteClientError.versionMismatch
-        }
+    func validateProtocol(_ wire: WireValue) throws {
+        guard try wire.string("protocol") == RemoteBaseline.authProtocol else { throw RemoteClientError.versionMismatch }
     }
     func installationKey(_ server: ServerAddress) -> RemoteSecretKey {
         RemoteSecretKey(server: server, account: nil, installation: "server-bootstrap", purpose: "identity")
     }
     func activeKey(_ server: ServerAddress) -> RemoteSecretKey {
-        RemoteSecretKey(server: server, account: nil, installation: "server-bootstrap", purpose: "active-account")
+        RemoteSecretKey(server: server, account: nil, installation: "server-bootstrap", purpose: "active-controller")
     }
-    func vaultKey(server: ServerAddress, account: AccountID, installation: String, authorizationID: String? = nil) -> RemoteSecretKey {
-        RemoteSecretKey(server: server, account: account, installation: installation,
-            purpose: authorizationID.map { "account-and-grants:\($0)" } ?? "account-and-grants")
+    func pinKey(_ server: ServerAddress) -> RemoteSecretKey {
+        RemoteSecretKey(server: server, account: nil, installation: "server-bootstrap", purpose: "server-fingerprint")
+    }
+    func vaultKey(server: ServerAddress, account: AccountID, installation: String) -> RemoteSecretKey {
+        RemoteSecretKey(server: server, account: account, installation: installation, purpose: "controller-and-grants")
     }
     func tombstoneKey(server: ServerAddress, account: AccountID, host: HostID? = nil) -> RemoteSecretKey {
         RemoteSecretKey(server: server, account: account, installation: "local-revocation", purpose: host.map { "host:\($0.rawValue)" } ?? "account")
@@ -163,12 +158,9 @@ public final class LiveGianClientService: GianClientLifecycle {
             throw error
         }
     }
+    /// This app's installation key for a Server: its controller identity there.
     func identity(server: ServerAddress) throws -> RemoteSigningIdentity {
         _ = try RemoteWire.origin(server)
-        guard !invalidServers.contains(server),
-              try secrets.read(RemoteSecretKey(server: server, account: nil, installation: "server-bootstrap", purpose: "server-identity-mismatch")) == nil else {
-            throw RemoteClientError.integrity
-        }
         let key = installationKey(server)
         if let data = try secrets.read(key) {
             guard data.count <= 2048 else { throw RemoteClientError.bufferLimit }
@@ -180,59 +172,42 @@ public final class LiveGianClientService: GianClientLifecycle {
         try secrets.write(JSONEncoder().encode(identity), for: key)
         return identity
     }
-    func loadVault(server: ServerAddress, account: AccountID, authorization: RemoteActiveAccount? = nil) throws -> RemoteAccountVault? {
-        try readVaultRecord(server: server, account: account, authorization: authorization, enforcingInvalidation: true)
+    func loadVault(server: ServerAddress, account: AccountID) throws -> RemoteControllerVault? {
+        try readVaultRecord(server: server, account: account, enforcingInvalidation: true)
     }
 
-    /// Cleanup only: Core has already persisted the logout barrier before
-    /// hiding data. The old token is usable solely for its explicit logout.
-    func loadVaultForLogout(server: ServerAddress, account: AccountID) throws -> RemoteAccountVault? {
-        try readVaultRecord(server: server, account: account, authorization: nil, enforcingInvalidation: false)
+    /// Cleanup only: Core has already persisted the sign-out barrier.
+    func loadVaultForCleanup(server: ServerAddress, account: AccountID) throws -> RemoteControllerVault? {
+        try readVaultRecord(server: server, account: account, enforcingInvalidation: false)
     }
 
-    private func readVaultRecord(server: ServerAddress, account: AccountID, authorization: RemoteActiveAccount?,
-                                 enforcingInvalidation: Bool) throws -> RemoteAccountVault? {
+    private func readVaultRecord(server: ServerAddress, account: AccountID, enforcingInvalidation: Bool) throws -> RemoteControllerVault? {
         _ = try RemoteWire.origin(server)
-        guard !invalidServers.contains(server),
-              try secrets.read(RemoteSecretKey(server: server, account: nil, installation: "server-bootstrap", purpose: "server-identity-mismatch")) == nil else { return nil }
         guard !invalidAccounts.contains(DataScope(server: server, account: account)),
               try secrets.read(tombstoneKey(server: server, account: account)) == nil else { return nil }
-        let pointer: RemoteActiveAccount
-        if let authorization { pointer = authorization }
-        else {
-            guard let pointerData = try secrets.read(activeKey(server)) else { return nil }
-            guard pointerData.count <= 1024 else { throw RemoteClientError.bufferLimit }
-            pointer = try JSONDecoder().decode(RemoteActiveAccount.self, from: pointerData)
-        }
+        guard let pointerData = try secrets.read(activeKey(server)) else { return nil }
+        guard pointerData.count <= 1024 else { throw RemoteClientError.bufferLimit }
+        let pointer = try JSONDecoder().decode(RemoteActiveController.self, from: pointerData)
         guard pointer.account == account.id else { return nil }
         _ = try RemoteWire.id(pointer.installation)
-        if let authorizationID = pointer.authorizationID {
-            _ = try RemoteWire.id(authorizationID)
-            let binding = RemoteLoginAuthorization(account: account, installation: pointer.installation, authorizationID: authorizationID, previous: nil)
-            let marker = cancellationKey(server: server, authorization: binding)
-            guard !invalidAuthorizations.contains(marker), try secrets.read(marker) == nil else { return nil }
-        }
-        guard let data = try secrets.read(vaultKey(server: server, account: account, installation: pointer.installation, authorizationID: pointer.authorizationID)) else {
+        guard let data = try secrets.read(vaultKey(server: server, account: account, installation: pointer.installation)) else {
             throw RemoteClientError.integrity
         }
         guard data.count <= 512 * 1024 else { throw RemoteClientError.bufferLimit }
-        let vault = try JSONDecoder().decode(RemoteAccountVault.self, from: data)
+        let vault = try JSONDecoder().decode(RemoteControllerVault.self, from: data)
         if enforcingInvalidation {
             guard try authorizationPostdatesInvalidation(vault, server: server, account: account) else { return nil }
         }
         guard vault.server == server.absoluteString, vault.account == account.id,
-              vault.authorizationID == pointer.authorizationID,
-              vault.identity.installation == pointer.installation, !vault.token.isEmpty, vault.token.count <= 256,
-              !vault.login.isEmpty, vault.fingerprint.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+              vault.identity.installation == pointer.installation,
+              vault.fingerprint.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
               vault.hosts.count <= 20 else { throw RemoteClientError.integrity }
         let publicKey = try vault.identity.publicKey
-        _ = try RemoteWire.unbase64(vault.token, maximum: 256)
         guard RemoteWire.hash(try publicKey.wire.encoded()) == vault.keyFingerprint else { throw RemoteClientError.integrity }
         guard let identityData = try secrets.read(installationKey(server)) else { return nil }
         guard identityData.count <= 2048 else { throw RemoteClientError.bufferLimit }
         let bootstrap = try JSONDecoder().decode(RemoteSigningIdentity.self, from: identityData)
-        let pinKey = RemoteSecretKey(server: server, account: nil, installation: "server-bootstrap", purpose: "server-fingerprint")
-        guard let pin = try secrets.read(pinKey), pin == Data(vault.fingerprint.utf8),
+        guard let pin = try secrets.read(pinKey(server)), pin == Data(vault.fingerprint.utf8),
               bootstrap.installation == vault.identity.installation, try bootstrap.publicKey == publicKey,
               vault.translationAttempts.count <= 2048, vault.commandAttempts.count <= 2048 else { throw RemoteClientError.integrity }
         for (hostID, host) in vault.hosts {
@@ -243,45 +218,40 @@ public final class LiveGianClientService: GianClientLifecycle {
             if let connection = host.cryptoConnection { _ = try RemoteWire.id(connection) }
             if let key = host.hostKey { _ = try RemotePublicKey(wire: key.wire) }
         }
-        return vault.expiresAt > clock.now() ? vault : nil
+        return vault
     }
-    func requireVault(server: ServerAddress, account: AccountID) throws -> RemoteAccountVault {
+    func requireVault(server: ServerAddress, account: AccountID) throws -> RemoteControllerVault {
         guard let vault = try loadVault(server: server, account: account) else { throw RemoteClientError.notAuthorized }
         return vault
     }
-    func saveVault(_ vault: RemoteAccountVault, server: ServerAddress, account: AccountID, epoch expected: Int) throws {
+    func saveVault(_ vault: RemoteControllerVault, server: ServerAddress, account: AccountID, epoch expected: Int) throws {
         try checkEpoch(expected)
         guard try authorizationPostdatesInvalidation(vault, server: server, account: account) else { throw RemoteClientError.notAuthorized }
-        if let authorizationID = vault.authorizationID {
-            let binding = RemoteLoginAuthorization(account: account, installation: vault.identity.installation, authorizationID: authorizationID, previous: nil)
-            let marker = cancellationKey(server: server, authorization: binding)
-            guard !invalidAuthorizations.contains(marker), try secrets.read(marker) == nil else { throw RemoteClientError.cancelled }
-        }
-        try secrets.write(JSONEncoder().encode(vault), for: vaultKey(server: server, account: account,
-            installation: vault.identity.installation, authorizationID: vault.authorizationID))
+        try secrets.write(JSONEncoder().encode(vault), for: vaultKey(server: server, account: account, installation: vault.identity.installation))
     }
 }
 
-struct RemoteActiveAccount: Codable, Equatable {
+/// Which controller identity is active for a Server.
+struct RemoteActiveController: Codable, Equatable {
     let account: String
     let installation: String
-    var authorizationID: String? = nil
 }
-struct RemoteAccountVault: Codable {
+/// This app's controller identity on one Server: the pinned Server identity
+/// and, per paired Host, the device key and grant. Keychain only.
+struct RemoteControllerVault: Codable {
     var server: String
     var account: String
-    var login: String
     var identity: RemoteSigningIdentity
-    var token: String
-    var expiresAt: Date
+    /// The Server identity fingerprint pinned on first use.
     var fingerprint: String
     var keyFingerprint: String
+    /// When this controller identity was set up here (the sign-out barrier's proof time).
+    var createdAt: Date
+    /// When this app last verified the Server's identity proof.
     var lastVerifiedAt: Date
     var hosts: [String: RemoteHostCredential]
     var translationAttempts: [String: String]
     var commandAttempts: [String: String]
-    var authorizationID: String? = nil
-    var authorizationCreatedAt: Date? = nil
 }
 struct RemoteHostCredential: Codable {
     var id: String
@@ -294,15 +264,4 @@ struct RemoteHostCredential: Codable {
     var version: String
     var lastVerifiedAt: Date?
     var claimedAt: Date
-}
-struct RemotePendingLogin {
-    let attempt: RemoteLoginAttempt
-    let server: ServerAddress
-    let id: LoginID
-    let identity: RemoteSigningIdentity
-    let signature: String
-    let fingerprint: String
-    let expiresAt: Date
-    var interval: Int
-    var nextPoll: Date
 }

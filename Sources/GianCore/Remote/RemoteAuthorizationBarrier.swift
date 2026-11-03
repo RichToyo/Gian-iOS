@@ -12,15 +12,14 @@ extension LiveGianClientService {
         if let firstFailure { throw firstFailure }
     }
 
-    func authorizationPostdatesInvalidation(_ vault: RemoteAccountVault, server: ServerAddress, account: AccountID) throws -> Bool {
-        let proof = vault.authorizationCreatedAt ?? vault.lastVerifiedAt
-        guard proof.timeIntervalSince1970.isFinite, vault.lastVerifiedAt.timeIntervalSince1970.isFinite,
-              proof <= vault.lastVerifiedAt, vault.lastVerifiedAt <= clock.now() else { throw RemoteClientError.integrity }
+    func authorizationPostdatesInvalidation(_ vault: RemoteControllerVault, server: ServerAddress, account: AccountID) throws -> Bool {
+        guard vault.createdAt.timeIntervalSince1970.isFinite, vault.lastVerifiedAt.timeIntervalSince1970.isFinite,
+              vault.createdAt <= vault.lastVerifiedAt, vault.lastVerifiedAt <= clock.now() else { throw RemoteClientError.integrity }
         guard let invalidatedAt = try authorizationInvalidations.authorizationInvalidatedAt(scope: DataScope(server: server, account: account)) else {
             return true
         }
-        // Revalidating an old token is not a new login. Preserve the original
-        // authorization proof time across /account/me and connection refreshes.
-        return proof > invalidatedAt
+        // Verifying the Server again is not a new controller identity: a
+        // signed-out identity stays signed out.
+        return vault.createdAt > invalidatedAt
     }
 }

@@ -4,9 +4,10 @@ import Foundation
 public enum RemoteBaseline {
     public static let inspectedCommit = "0c0f2f5c92bc70f78269b105e4e0b98cf99770d0"
     public static let authProtocol = "gian.remote.auth/1"
-    public static let accountProtocol = "gian.remote.account/1"
     public static let remoteProtocol = "gian.remote/1"
-    public static let githubDeviceVerificationURI = "https://github.com/login/device"
+    /// Remote 1.5: `POST /api/v1/server-identity` signs this payload type.
+    public static let serverIdentityProofType = "gian.remote.server_identity/1"
+    public static let serverIdentityProofLifetime: TimeInterval = 120
     public static let majorVersion = 1
     public static let minimumMinorVersion = 1
     public static let maximumMinorVersion = 3
@@ -101,7 +102,6 @@ public struct ScopedID<Kind>: Hashable, Sendable, CustomStringConvertible {
 }
 
 public enum AccountKind {}
-public enum LoginKind {}
 public enum InstallationKind {}
 public enum HostKind {}
 public enum DeviceKind {}
@@ -123,7 +123,6 @@ public enum ActionKind {}
 public enum BannerKind {}
 public enum PairingKind {}
 
-public typealias LoginID = ScopedID<LoginKind>
 public typealias InstallationID = ScopedID<InstallationKind>
 public typealias HostID = ScopedID<HostKind>
 public typealias DeviceID = ScopedID<DeviceKind>
@@ -145,8 +144,12 @@ public typealias ActionID = ScopedID<ActionKind>
 public typealias BannerID = ScopedID<BannerKind>
 public typealias PairingID = ScopedID<PairingKind>
 
+/// What scopes this app's data on a Remote Server. Remote 1.5 needs no
+/// person's account (no GitHub sign-in): the scope is this app's own
+/// controller identity on that Server, the device-key installation it pairs
+/// Hosts with.
 public enum AccountProvider: String, Sendable, Equatable {
-    case github
+    case controller
 }
 
 public struct AccountID: Hashable, Sendable {
@@ -154,10 +157,15 @@ public struct AccountID: Hashable, Sendable {
     public var id: String
 
     public init?(provider: AccountProvider, id: String) {
-        guard provider == .github else { return nil }
-        guard id.range(of: #"^[1-9][0-9]{0,19}$"#, options: .regularExpression) != nil else { return nil }
+        guard ScopedID<AccountKind>.isAcceptable(id) else { return nil }
         self.provider = provider
         self.id = id
+    }
+
+    /// The controller identity for an installation on one Server.
+    public init(installation: InstallationID) {
+        provider = .controller
+        id = installation.rawValue
     }
 }
 
@@ -214,9 +222,8 @@ public struct ClientScope: Hashable, Sendable {
 
 public enum RejectionCode: String, Sendable, Equatable, Error {
     case invalidServerAddress
-    case githubVerificationURIMismatch
-    case loginNotStarted
-    case loginPollTooSoon
+    /// The Server presented a different identity than the one pinned.
+    case serverIdentityChanged
     case notAuthorized
     case pairingQRInvalid
     case pairingServerMismatch

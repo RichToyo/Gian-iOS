@@ -10,7 +10,6 @@ import GianCore
 /// construction. Back and new-chat dismissal dispatch `.returnHome`; no device
 /// dimensions are hardcoded.
 struct AdaptiveRoot: View {
-    let accountLogin: String
     let hosts: [HostItem]
     let directory: DirectoryPresentation
     let navigation: NavigationState
@@ -143,8 +142,7 @@ struct AdaptiveRoot: View {
         ) {
             NavigationStack {
                 SettingsScreen(
-                    accountLogin: accountLogin,
-                    serverAddress: serverAddress,
+                            serverAddress: serverAddress,
                     hosts: hosts,
                     storageError: storageError,
                     serverOutcomeUnconfirmed: serverOutcomeUnconfirmed,
@@ -263,7 +261,6 @@ struct AdaptiveRoot: View {
 
     private func home(selectedConversationID: SessionID?, isSidebar: Bool, onToggleSidebar: (() -> Void)?) -> some View {
         HomeScreen(
-            accountLogin: accountLogin,
             hosts: hosts,
             directory: directory,
             selectedConversationID: selectedConversationID,

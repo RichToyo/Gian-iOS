@@ -99,48 +99,11 @@ struct AgentAvatar: View {
     }
 }
 
-/// GitHub account avatar. The contract exposes the account login only (no
-/// avatar URL), so this renders a brand-gradient identicon with the account
-/// initial plus a GitHub-source badge. Tapping opens Settings (parent's job).
-struct UserAvatar: View {
-    let login: String
-    var size: CGFloat = GianTheme.Metrics.avatarMedium
-
-    var body: some View {
-        ZStack(alignment: .bottomTrailing) {
-            identicon
-                .frame(width: size, height: size)
-                .clipShape(Circle())
-            // Tint, not `label`: a label-colored seal turns white-on-white in dark
-            // mode. Toolbar-sized avatars skip it; it would cover the initial.
-            if size >= 40 {
-                Image(systemName: "checkmark.seal.fill")
-                    .font(.system(size: size * 0.36))
-                    .foregroundStyle(.white, GianTheme.Colors.tint)
-                    .background(Circle().fill(GianTheme.Colors.card).padding(-1.5))
-                    .offset(x: size * 0.1, y: size * 0.1)
-                    .accessibilityHidden(true)
-            }
-        }
-        .accessibilityLabel("Account \(login). Opens Settings.")
-    }
-
-    private var identicon: some View {
-        ZStack {
-            GianTheme.Brand.gradient
-            Text(String(login.prefix(1)).uppercased())
-                .font(.system(size: size * 0.44, weight: .bold))
-                .foregroundStyle(.white)
-        }
-    }
-}
-
 #Preview("Avatars") {
     HStack(spacing: 16) {
         AgentAvatar(logo: .kimi, name: "Kimi")
         AgentAvatar(logo: .claude, name: "Claude")
         AgentAvatar(logo: .other, name: "Ada")
-        UserAvatar(login: "octocat")
     }
     .padding()
 }

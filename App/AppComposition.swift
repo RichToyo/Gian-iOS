@@ -123,7 +123,7 @@ enum RestorationHintStore {
         guard let serverRaw = defaults.string(forKey: serverKey),
               let server = ServerAddress(parsing: serverRaw),
               let accountRaw = defaults.string(forKey: accountKey),
-              let account = AccountID(provider: .github, id: accountRaw)
+              let account = AccountID(provider: .controller, id: accountRaw)
         else { return nil }
         let host = defaults.string(forKey: hostKey).flatMap { HostID(rawValue: $0) }
         return Hint(server: server, account: account, host: host)

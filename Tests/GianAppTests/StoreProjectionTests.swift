@@ -331,21 +331,8 @@ final class StoreProjectionTests: XCTestCase {
 
     func testDiagnosticMapping() {
         XCTAssertEqual(StoreProjection.diagnostic(nil), .none)
-        let retrying = RemoteServiceDiagnostic(
-            server: nil, account: nil, host: nil, loginID: nil, epoch: 1,
-            status: .retryingLogin(
-                error: .transport,
-                retryAt: now.addingTimeInterval(5),
-                expiresAt: now.addingTimeInterval(900)
-            )
-        )
-        guard case .retryingLogin(let message, _, _) = StoreProjection.diagnostic(retrying) else {
-            return XCTFail("expected retryingLogin")
-        }
-        XCTAssertEqual(message, RemoteClientError.transport.safeDescription)
-
         let closed = RemoteServiceDiagnostic(
-            server: nil, account: nil, host: nil, loginID: nil, epoch: 1,
+            server: nil, account: nil, host: nil, epoch: 1,
             status: .connectionClosed(.disconnected)
         )
         XCTAssertEqual(
@@ -354,13 +341,13 @@ final class StoreProjectionTests: XCTestCase {
         )
 
         let resync = RemoteServiceDiagnostic(
-            server: nil, account: nil, host: nil, loginID: nil, epoch: 1,
+            server: nil, account: nil, host: nil, epoch: 1,
             status: .resyncRequired(.gapEvicted)
         )
         XCTAssertEqual(StoreProjection.diagnostic(resync), .resyncRequired(reason: "gap_evicted"))
 
         let cleared = RemoteServiceDiagnostic(
-            server: nil, account: nil, host: nil, loginID: nil, epoch: 1,
+            server: nil, account: nil, host: nil, epoch: 1,
             status: .cleared
         )
         XCTAssertEqual(StoreProjection.diagnostic(cleared), .none)

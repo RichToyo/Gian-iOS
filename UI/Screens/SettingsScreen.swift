@@ -1,10 +1,9 @@
 import SwiftUI
 import GianCore
 
-/// Settings bound to the contract: Done, Account (login + confirmed sign out
-/// via `.logout`), Server (address; "Change server…" asks for the new address
-/// with Cancel first and only then signs out),
-/// paired Hosts list with Add Host, Appearance (UI-local preference), and the evictable
+/// Settings bound to the contract: Done, Server (address; "Change server…"
+/// asks for the new address with Cancel first and only then signs out; a
+/// confirmed Sign out via `.logout`), paired Hosts list with Add Host, Appearance (UI-local preference), and the evictable
 /// attachment cache (`.clearAttachmentCache`). There are intentionally no
 /// OS-notification entries.
 ///
@@ -18,7 +17,6 @@ struct SettingsScreen: View {
         case dark = "Dark"
     }
 
-    let accountLogin: String
     let serverAddress: String
     let hosts: [HostItem]
     /// Honest disclosures from the store (sanitized; never raw data).
@@ -41,7 +39,6 @@ struct SettingsScreen: View {
 
     var body: some View {
         List {
-            accountSection
             serverSection
             hostsSection
             appearanceSection
@@ -60,29 +57,6 @@ struct SettingsScreen: View {
         .addHostSheet(isPresented: $addsHost, pairing: addHost)
     }
 
-    private var accountSection: some View {
-        Section("Account") {
-            HStack(spacing: GianTheme.Metrics.paddingMedium) {
-                UserAvatar(login: accountLogin, size: GianTheme.Metrics.avatarLarge)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(accountLogin)
-                        .font(GianTheme.Typography.title)
-                    Text("Signed in with GitHub")
-                        .font(GianTheme.Typography.caption)
-                        .foregroundStyle(GianTheme.Colors.secondaryLabel)
-                }
-            }
-            Button("Sign out", role: .destructive) { confirmsSignOut = true }
-                .accessibilityHint("Hides this account's local data until you sign in again")
-                .confirmationDialog("Sign out of \(serverAddress)?", isPresented: $confirmsSignOut, titleVisibility: .visible) {
-                    Button("Sign out", role: .destructive, action: onSignOut)
-                    Button("Cancel", role: .cancel) {}
-                } message: {
-                    Text("You'll need to sign in with GitHub and pair a Host again.")
-                }
-        }
-    }
-
     private var serverSection: some View {
         Section("Server") {
             LabeledContent("Address", value: serverAddress)
@@ -93,6 +67,14 @@ struct SettingsScreen: View {
                         changesServer = false
                         onChangeServer(address)
                     }
+                }
+            Button("Sign out", role: .destructive) { confirmsSignOut = true }
+                .accessibilityHint("Forgets this server and its Hosts on this device")
+                .confirmationDialog("Sign out of \(serverAddress)?", isPresented: $confirmsSignOut, titleVisibility: .visible) {
+                    Button("Sign out", role: .destructive, action: onSignOut)
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("This device forgets this server and its Hosts. You'll pair a Host again to reconnect.")
                 }
         }
     }
@@ -174,7 +156,7 @@ private struct ChangeServerSheet: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                 } footer: {
-                    Text("Switching signs you out of \(current). You'll sign in with GitHub and pair a Host on the new server.")
+                    Text("Switching signs this device out of \(current). You'll pair a Host on the new server.")
                 }
             }
             .navigationTitle("Change Server")

@@ -2,60 +2,43 @@ import Foundation
 
 public enum ClientPhase: Sendable, Equatable {
     case signedOut
+    /// A Server address is set; its identity is being verified (or failed).
     case serverEntered
-    case awaitingGitHubDeviceLogin
     case awaitingHostPairing
     case ready
 }
 
 public enum AccountStatus: String, Sendable, Equatable {
-    case signedOut, pending, signedIn, denied, expired, error
+    /// No Server yet.
+    case signedOut
+    /// Verifying the Server's identity.
+    case pending
+    case signedIn
+    /// The Server couldn't be reached or answered unexpectedly.
+    case error
+    /// The Server's identity differs from the one pinned on first use.
+    case serverIdentityChanged
 }
 
-public struct GitHubDeviceLoginState: Sendable, Equatable {
-    public var loginID: LoginID
-    public var userCode: String
-    public var verificationURI: URL
-    public var expiresAt: Date
-    public var intervalSeconds: Int
-    public var nextPollAt: Date
-
-    public init(
-        loginID: LoginID,
-        userCode: String,
-        verificationURI: URL,
-        expiresAt: Date,
-        intervalSeconds: Int,
-        nextPollAt: Date
-    ) {
-        self.loginID = loginID
-        self.userCode = userCode
-        self.verificationURI = verificationURI
-        self.expiresAt = expiresAt
-        self.intervalSeconds = intervalSeconds
-        self.nextPollAt = nextPollAt
-    }
-}
-
+/// This app's standing on the current Server: its controller identity there
+/// once the Server's identity is verified and pinned. No person's account.
 public struct AccountAuthorization: Sendable, Equatable {
     public var status: AccountStatus
     public var accountID: AccountID?
-    public var login: String?
     public var installationID: InstallationID?
-    public var deviceLogin: GitHubDeviceLoginState?
+    /// Why connecting to the Server failed, for setup to show.
+    public var failure: String?
 
     public init(
         status: AccountStatus,
         accountID: AccountID? = nil,
-        login: String? = nil,
         installationID: InstallationID? = nil,
-        deviceLogin: GitHubDeviceLoginState? = nil
+        failure: String? = nil
     ) {
         self.status = status
         self.accountID = accountID
-        self.login = login
         self.installationID = installationID
-        self.deviceLogin = deviceLogin
+        self.failure = failure
     }
 
     public static let signedOut = AccountAuthorization(status: .signedOut)
@@ -331,6 +314,10 @@ public struct GianClientState: Sendable, Equatable {
     public var settingsNotice: String? = nil
     /// Agent logos fetched from the Host, keyed by plugin ID.
     public var agentLogos: [String: AgentLogoImages] = [:]
+    /// Every open Task on the Host, for New chat. Home's task sections can
+    /// omit tasks without conversations (a negotiated directory lists only
+    /// tasks it has rows for), and a fresh Host has none yet.
+    public var openTasks: [TaskRecord] = []
 
     public init(
         phase: ClientPhase,

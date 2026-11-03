@@ -498,7 +498,6 @@ extension GianClientStore {
     /// Returns only bytes in the currently authorized server/account/Host
     /// namespace. UI composition may create its own protected preview URL.
     public func attachmentData(for id: AttachmentID) -> Data? {
-        expireAuthorizationIfNeeded()
         guard let scope = readyScope() else { return nil }
         if let bytes = transcriptFileData(for: id, scope: scope) { return bytes }
         let bundle = memory.bundle(for: scope)

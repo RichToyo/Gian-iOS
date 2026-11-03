@@ -4,8 +4,8 @@ public enum PreviewFixtures {
     public static let instant = Date(timeIntervalSince1970: 1_781_000_000)
     public static let server = "https://remote.example.test"
     public static let qr = "https://remote.example.test/pair#nonce=abcdefghijklmnop"
-    public static let account = AccountID(provider: .github, id: "10001")!
-    public static let otherAccount = AccountID(provider: .github, id: "10002")!
+    public static let account = AccountID(provider: .controller, id: "install-1")!
+    public static let otherAccount = AccountID(provider: .controller, id: "install-2")!
     public static let hostID = id("host-harbor", HostID.self)
     public static let deviceID = id("device-phone", DeviceID.self)
     public static let generationID = id("generation-1", HostGenerationID.self)
@@ -40,14 +40,14 @@ public enum PreviewPairingConfirmation: Sendable, Equatable {
     case immediate, onRefresh
 }
 
-public enum PreviewPoll: Sendable, Equatable {
-    case authorized, pending, denied, expired
+/// How the scripted Server answers its identity check.
+public enum PreviewServerIdentity: Sendable, Equatable {
+    case verified, changed, unreachable
 }
 
 public struct PreviewScript: Sendable, Equatable {
     public var account: AccountIdentity
-    public var verificationURI: URL
-    public var poll: PreviewPoll
+    public var serverIdentity: PreviewServerIdentity
     public var confirmation: PreviewPairingConfirmation
     public var directory: DirectorySnapshotPayload
     public var commandBehavior: PreviewCommandBehavior
@@ -62,8 +62,7 @@ public struct PreviewScript: Sendable, Equatable {
 
     public init(
         account: AccountIdentity,
-        verificationURI: URL,
-        poll: PreviewPoll,
+        serverIdentity: PreviewServerIdentity = .verified,
         confirmation: PreviewPairingConfirmation,
         directory: DirectorySnapshotPayload,
         commandBehavior: PreviewCommandBehavior,
@@ -77,8 +76,7 @@ public struct PreviewScript: Sendable, Equatable {
         translationPageText: String = "hello"
     ) {
         self.account = account
-        self.verificationURI = verificationURI
-        self.poll = poll
+        self.serverIdentity = serverIdentity
         self.confirmation = confirmation
         self.directory = directory
         self.commandBehavior = commandBehavior
@@ -95,11 +93,8 @@ public struct PreviewScript: Sendable, Equatable {
     public static let legacyContract = PreviewScript(
         account: AccountIdentity(
             account: PreviewFixtures.account,
-            login: "harbor-user",
             installationID: PreviewFixtures.id("install-1", InstallationID.self)
         ),
-        verificationURI: URL(string: RemoteBaseline.githubDeviceVerificationURI)!,
-        poll: .authorized,
         confirmation: .immediate,
         directory: PreviewDirectory.make(authority: .legacyOpenDoingTasksOnly, extras: false),
         commandBehavior: .succeed,
@@ -110,8 +105,6 @@ public struct PreviewScript: Sendable, Equatable {
 
     public static let fullDirectory = PreviewScript(
         account: legacyContract.account,
-        verificationURI: legacyContract.verificationURI,
-        poll: .authorized,
         confirmation: .immediate,
         directory: PreviewDirectory.make(authority: .fullAuthorizedDirectory, extras: true),
         commandBehavior: .succeed,
@@ -272,24 +265,12 @@ public final class PreviewGianClientService: GianClientServicing {
         self.script = script
     }
 
-    public func startGitHubDeviceLogin(server: ServerAddress) async -> GitHubLoginStartResponse {
+    public func connectServer(server: ServerAddress) async -> ServerConnectResponse {
         _ = server
-        return .started(GitHubDeviceLoginChallenge(
-            loginID: PreviewFixtures.id("login-1", LoginID.self),
-            userCode: "ABCD-EFGH",
-            verificationURI: script.verificationURI,
-            expiresAt: PreviewFixtures.instant.addingTimeInterval(900),
-            intervalSeconds: 5
-        ))
-    }
-
-    public func pollGitHubDeviceLogin(server: ServerAddress, loginID: LoginID) async -> GitHubLoginPollResponse {
-        _ = (server, loginID)
-        switch script.poll {
-        case .authorized: return .authorized(script.account)
-        case .pending: return .pending(intervalSeconds: 5)
-        case .denied: return .denied
-        case .expired: return .expired
+        switch script.serverIdentity {
+        case .verified: return .connected(script.account)
+        case .changed: return .identityChanged
+        case .unreachable: return .failed("The remote service is temporarily unavailable.")
         }
     }
 

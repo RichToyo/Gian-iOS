@@ -81,7 +81,7 @@ struct ConnectivityBar: View {
         case .resyncing:
             row(icon: "arrow.triangle.2.circlepath", text: "Catching up…", color: GianTheme.Colors.warning)
         case .deviceRevoked:
-            row(icon: "hand.raised.fill", text: "This device's access was revoked. Sign in again.", color: GianTheme.Colors.failure)
+            row(icon: "hand.raised.fill", text: "This device's access was revoked. Pair the Host again.", color: GianTheme.Colors.failure)
         case .versionMismatch(let version):
             row(icon: "exclamationmark.triangle", text: "Host version \(version) is not supported by this app.", color: GianTheme.Colors.failure)
         }
@@ -127,8 +127,8 @@ struct TopStatusStack: View {
     }
 }
 
-/// Sanitized transient diagnostic from the service (login backoff, closed
-/// connection, resync). Never raw error text, URLs or payloads.
+/// Sanitized transient diagnostic from the service (closed connection,
+/// resync). Never raw error text, URLs or payloads.
 struct DiagnosticBar: View {
     let diagnostic: DiagnosticPresentation
 
@@ -136,12 +136,6 @@ struct DiagnosticBar: View {
         switch diagnostic {
         case .none:
             EmptyView()
-        case .retryingLogin(let message, let retryAt, _):
-            row(
-                icon: "arrow.clockwise",
-                text: "\(message) Retrying sign-in at \(retryAt.formatted(date: .omitted, time: .shortened)).",
-                color: GianTheme.Colors.warning
-            )
         case .connectionClosed(let message):
             row(icon: "wifi.exclamationmark", text: message, color: GianTheme.Colors.warning)
         case .resyncRequired(let reason):

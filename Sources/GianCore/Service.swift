@@ -3,8 +3,9 @@ import Foundation
 /// Injected backend. A failed call must not be replaced with the preview service.
 @MainActor
 public protocol GianClientServicing: AnyObject {
-    func startGitHubDeviceLogin(server: ServerAddress) async -> GitHubLoginStartResponse
-    func pollGitHubDeviceLogin(server: ServerAddress, loginID: LoginID) async -> GitHubLoginPollResponse
+    /// Verifies the Server's identity (pinning it on first use) and prepares
+    /// this app's controller identity there. No account sign-in.
+    func connectServer(server: ServerAddress) async -> ServerConnectResponse
     func claimHostQR(server: ServerAddress, account: AccountID, qr: HostPairingQR) async -> HostPairingResponse
     func refreshHostPairing(server: ServerAddress, account: AccountID, pairingID: PairingID) async -> HostPairingResponse
     func refreshDirectory(scope: ClientScope) async -> DirectoryRefreshResponse
@@ -109,44 +110,23 @@ public struct HostPairingQR: Sendable, Equatable {
     }
 }
 
-public struct GitHubDeviceLoginChallenge: Sendable, Equatable {
-    public var loginID: LoginID
-    public var userCode: String
-    public var verificationURI: URL
-    public var expiresAt: Date
-    public var intervalSeconds: Int
-
-    public init(loginID: LoginID, userCode: String, verificationURI: URL, expiresAt: Date, intervalSeconds: Int) {
-        self.loginID = loginID
-        self.userCode = userCode
-        self.verificationURI = verificationURI
-        self.expiresAt = expiresAt
-        self.intervalSeconds = intervalSeconds
-    }
-}
-
-public enum GitHubLoginStartResponse: Sendable, Equatable {
-    case started(GitHubDeviceLoginChallenge)
-    case failed(String)
-}
-
+/// This app's controller identity on one Server.
 public struct AccountIdentity: Sendable, Equatable {
     public var account: AccountID
-    public var login: String
     public var installationID: InstallationID
 
-    public init(account: AccountID, login: String, installationID: InstallationID) {
+    public init(account: AccountID, installationID: InstallationID) {
         self.account = account
-        self.login = login
         self.installationID = installationID
     }
 }
 
-public enum GitHubLoginPollResponse: Sendable, Equatable {
-    case pending(intervalSeconds: Int)
-    case denied
-    case expired
-    case authorized(AccountIdentity)
+public enum ServerConnectResponse: Sendable, Equatable {
+    /// The Server proved its identity; Host pairing can start.
+    case connected(AccountIdentity)
+    /// The Server's identity differs from the one pinned on first use.
+    case identityChanged
+    case failed(String)
 }
 
 public enum HostPairingResponse: Sendable, Equatable {

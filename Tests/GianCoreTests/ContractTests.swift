@@ -16,51 +16,45 @@ private func phaseKind(_ phase: SendPhase) -> String {
 
 @MainActor
 struct ContractTests {
-    @Test func signedOutServerAndGitHubDeviceLogin() async throws {
+    @Test func serverAddressConnectsWithoutAnyAccountSignIn() async throws {
         #expect(GianCore.contractRevision == "0.1.0-contract.2")
         #expect(RemoteBaseline.inspectedCommit == "0c0f2f5c92bc70f78269b105e4e0b98cf99770d0")
-        #expect(RemoteBaseline.githubDeviceVerificationURI == "https://github.com/login/device")
+        #expect(RemoteBaseline.serverIdentityProofType == "gian.remote.server_identity/1")
         #expect(KnownWireFeature.conversationTranslation.rawValue == "wire.conversation_translation")
 
-        let (store, _, clock) = makeHarness()
+        let (store, _, _) = makeHarness()
         #expect(store.state.phase == .signedOut)
-        #expect(store.state.account.deviceLogin == nil)
         #expect(await store.dispatch(.setServerAddress("http://remote.example.test")) == .rejected(.invalidServerAddress))
         #expect(await store.dispatch(.setServerAddress("https://user:pass@remote.example.test")) == .rejected(.invalidServerAddress))
         #expect(await store.dispatch(.setServerAddress("https://remote.example.test/pair")) == .rejected(.invalidServerAddress))
-        #expect(await store.dispatch(.setServerAddress(PreviewFixtures.server)) == .applied)
-        #expect(store.state.phase == .serverEntered)
-        #expect(store.state.server?.absoluteString == "https://remote.example.test")
         #expect(ServerAddress(parsing: "https://remote.example.test/")?.absoluteString == "https://remote.example.test")
         #expect(ServerAddress(parsing: "https://remote.example.test:8443")?.origin.port == 8443)
 
-        let started = await store.dispatch(.startGitHubDeviceLogin)
-        #expect(started.isApplied)
-        let login = try #require(store.state.account.deviceLogin)
-        #expect(login.userCode == "ABCD-EFGH")
-        #expect(login.verificationURI.absoluteString == RemoteBaseline.githubDeviceVerificationURI)
-        #expect(storedLabels(of: store.state.account) == Set(["status", "accountID", "login", "installationID", "deviceLogin"]))
-        #expect(storedLabels(of: login) == Set(["loginID", "userCode", "verificationURI", "expiresAt", "intervalSeconds", "nextPollAt"]))
-        #expect(await store.dispatch(.pollGitHubDeviceLogin) == .rejected(.loginPollTooSoon))
-        clock.instant = clock.instant.addingTimeInterval(5)
-        #expect((await store.dispatch(.pollGitHubDeviceLogin)).isApplied)
+        // One step: the Server proves its identity, then Host pairing.
+        #expect(await store.dispatch(.setServerAddress(PreviewFixtures.server)) == .applied)
+        #expect(store.state.server?.absoluteString == "https://remote.example.test")
         #expect(store.state.phase == .awaitingHostPairing)
+        #expect(store.state.account.status == .signedIn)
         #expect(store.state.account.accountID == PreviewFixtures.account)
-        #expect(store.state.account.login == "harbor-user")
-        #expect(store.state.account.deviceLogin == nil)
+        #expect(storedLabels(of: store.state.account) == Set(["status", "accountID", "installationID", "failure"]))
     }
 
-    @Test func wrongVerificationURIIsNotStored() async {
+    @Test func aChangedServerIdentityStopsSetupUntilForgotten() async {
         var script = PreviewScript.legacyContract
-        script.verificationURI = URL(string: "https://example.test/login/device")!
-        let (store, _, _) = makeHarness(script: script)
-        #expect((await store.dispatch(.setServerAddress(PreviewFixtures.server))).isApplied)
-        #expect(await store.dispatch(.startGitHubDeviceLogin) == .rejected(.githubVerificationURIMismatch))
+        script.serverIdentity = .changed
+        let (store, service, _) = makeHarness(script: script)
+        #expect(await store.dispatch(.setServerAddress(PreviewFixtures.server)) == .rejected(.serverIdentityChanged))
         #expect(store.state.phase == .serverEntered)
-        #expect(store.state.account.deviceLogin == nil)
+        #expect(store.state.account.status == .serverIdentityChanged)
+        #expect(store.state.account.accountID == nil)
+        #expect(await store.dispatch(.beginHostPairingFromQR(PreviewFixtures.qr)) == .rejected(.notAuthorized))
+
+        service.script.serverIdentity = .verified
+        #expect(await store.dispatch(.forgetServerIdentity) == .applied)
+        #expect(store.state.phase == .awaitingHostPairing)
     }
 
-    @Test func failedLoginDoesNotUsePreviewFixtures() async {
+    @Test func unreachableServerDoesNotUsePreviewFixtures() async {
         let store = GianClientStore(
             service: RejectingService(),
             clock: ManualGianClock(instant: PreviewFixtures.instant),
@@ -68,10 +62,9 @@ struct ContractTests {
             storage: InMemoryGianStorage()
         )
         #expect((await store.dispatch(.setServerAddress(PreviewFixtures.server))).isApplied)
-        #expect((await store.dispatch(.startGitHubDeviceLogin)).isApplied)
         #expect(store.state.phase == .serverEntered)
         #expect(store.state.account.status == .error)
-        #expect(store.state.account.deviceLogin == nil)
+        #expect(store.state.account.failure == "unreachable")
         #expect(store.state.directory.tasks.isEmpty)
         #expect(store.state.directory.repos.isEmpty)
         #expect(store.state.hosts.isEmpty)
@@ -179,7 +172,6 @@ struct ContractTests {
         #expect((await store.dispatch(.logout)).isApplied)
         service.script.account = AccountIdentity(
             account: PreviewFixtures.otherAccount,
-            login: "other-user",
             installationID: PreviewFixtures.id("install-2", InstallationID.self)
         )
         _ = try await signIn(store, clock: clock)

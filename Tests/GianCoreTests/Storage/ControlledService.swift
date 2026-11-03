@@ -29,12 +29,13 @@ class ControlledService: GianClientServicing {
     var pairingRefresh: CheckedContinuation<HostPairingResponse, Never>?
     /// Further Hosts; each answers with an empty directory under its own summary.
     var extraHosts: [HostSummary] = []
+    /// Tasks added to every snapshot (e.g. open tasks with no conversations).
+    var extraTasks: [TaskRecord] = []
     /// `proxy.logo` replies by plugin ID (default: none); reads are recorded.
     var logos: [String: AgentLogoResponse] = [:]
     var logoRequests: [String] = []
 
-    func startGitHubDeviceLogin(server: ServerAddress) async -> GitHubLoginStartResponse { await base.startGitHubDeviceLogin(server: server) }
-    func pollGitHubDeviceLogin(server: ServerAddress, loginID: LoginID) async -> GitHubLoginPollResponse { await base.pollGitHubDeviceLogin(server: server, loginID: loginID) }
+    func connectServer(server: ServerAddress) async -> ServerConnectResponse { await base.connectServer(server: server) }
     func claimHostQR(server: ServerAddress, account: AccountID, qr: HostPairingQR) async -> HostPairingResponse {
         if !claimResponses.isEmpty { return claimResponses.removeFirst() }
         return await base.claimHostQR(server: server, account: account, qr: qr)
@@ -54,7 +55,9 @@ class ControlledService: GianClientServicing {
             payload.tasks = []; payload.sessions = []; payload.interactions = []; payload.workspaces = []; payload.agents = []
             return .snapshot(payload)
         }
-        return await base.refreshDirectory(scope: scope)
+        guard case .snapshot(var payload) = await base.refreshDirectory(scope: scope) else { return await base.refreshDirectory(scope: scope) }
+        payload.tasks += extraTasks
+        return .snapshot(payload)
     }
     func agentLogo(scope: ClientScope, pluginID: String, variant: AgentLogoVariant) async -> AgentLogoResponse {
         logoRequests.append("\(pluginID)/\(variant.rawValue)")

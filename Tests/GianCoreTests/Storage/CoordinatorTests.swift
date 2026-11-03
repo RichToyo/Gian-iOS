@@ -16,12 +16,11 @@ private final class CoordinatedService: ControlledService, GianClientLifecycle, 
     var logoutCalls = 0
     var holdDirectory = false
     var holdLogout = false
-    var holdPoll = false
-    var holdCancellation = false
-    var cancellationResult: CheckedContinuation<Void, Never>?
+    var holdConnect = false
+    var forgotServers: [ServerAddress] = []
     var directoryResult: CheckedContinuation<DirectoryRefreshResponse, Never>?
     var logoutResult: CheckedContinuation<Void, any Error>?
-    var pollResult: CheckedContinuation<GitHubLoginPollResponse, Never>?
+    var connectResult: CheckedContinuation<ServerConnectResponse, Never>?
 
     override init() {
         let events = AsyncStream<InboundEnvelope>.makeStream(bufferingPolicy: .bufferingNewest(32))
@@ -35,11 +34,7 @@ private final class CoordinatedService: ControlledService, GianClientLifecycle, 
         eventEpoch += 1; connections += 1; connected = scope; acceptedDirectory = nil
     }
     func disconnect() async { eventEpoch += 1; connected = nil; acceptedDirectory = nil }
-    func cancelLogin(server: ServerAddress, loginID: LoginID) async throws {
-        await disconnect()
-        if holdCancellation { await withCheckedContinuation { cancellationResult = $0 } }
-        throw RemoteClientError.unsupported
-    }
+    func forgetServer(_ server: ServerAddress) async throws { forgotServers.append(server) }
     func logout(server: ServerAddress, account: AccountID) async throws {
         logoutCalls += 1
         await disconnect()
@@ -56,35 +51,14 @@ private final class CoordinatedService: ControlledService, GianClientLifecycle, 
         }
         return response
     }
-    override func pollGitHubDeviceLogin(server: ServerAddress, loginID: LoginID) async -> GitHubLoginPollResponse {
-        if holdPoll { return await withCheckedContinuation { pollResult = $0 } }
-        return await super.pollGitHubDeviceLogin(server: server, loginID: loginID)
+    override func connectServer(server: ServerAddress) async -> ServerConnectResponse {
+        if holdConnect { return await withCheckedContinuation { connectResult = $0 } }
+        return await super.connectServer(server: server)
     }
 }
 
 @MainActor
 struct CoordinatorTests {
-    @Test func lateCancelledLoginDoesNotDisconnectANewerLogin() async throws {
-        let service = CoordinatedService()
-        let clock = ManualGianClock(instant: PreviewFixtures.instant)
-        let store = GianClientStore(service: service, clock: clock, storage: InMemoryGianStorage())
-        _ = await store.dispatch(.setServerAddress(PreviewFixtures.server))
-        _ = await store.dispatch(.startGitHubDeviceLogin)
-        service.holdCancellation = true
-        let cancelled = Task { await store.dispatch(.cancelGitHubDeviceLogin) }
-        for _ in 0..<100 where service.cancellationResult == nil { await Task.yield() }
-        let completion = try #require(service.cancellationResult)
-        service.cancellationResult = nil
-        #expect(store.state.phase == .serverEntered)
-        #expect((await store.dispatch(.startGitHubDeviceLogin)).isApplied)
-        let newEpoch = service.eventEpoch
-        completion.resume()
-        #expect((await cancelled.value).isApplied)
-        #expect(service.eventEpoch == newEpoch)
-        #expect(store.state.phase == .awaitingGitHubDeviceLogin)
-        #expect(store.state.account.deviceLogin != nil)
-    }
-
     @Test func newSameEpochResyncIsNotIgnoredAndOldClearedCannotEraseIt() async throws {
         let clock = ManualGianClock(instant: PreviewFixtures.instant)
         let service = CoordinatedService()
@@ -99,9 +73,9 @@ struct CoordinatorTests {
         service.acceptedDirectory = nil
         #expect(!store.mutationsReady)
         service.diagnosticSink.yield(RemoteServiceDiagnostic(server: scope.server, account: scope.account,
-            host: scope.host, loginID: nil, epoch: service.eventEpoch, status: .resyncRequired(.gapEvicted)))
+            host: scope.host, epoch: service.eventEpoch, status: .resyncRequired(.gapEvicted)))
         service.diagnosticSink.yield(RemoteServiceDiagnostic(server: scope.server, account: scope.account,
-            host: scope.host, loginID: nil, epoch: service.eventEpoch, status: .cleared))
+            host: scope.host, epoch: service.eventEpoch, status: .cleared))
         for _ in 0..<100 where service.directoryResult == nil { await Task.yield() }
         let completion = try #require(service.directoryResult)
         service.directoryResult = nil
@@ -221,51 +195,21 @@ struct CoordinatorTests {
         await coordinator.stop()
     }
 
-    @Test func transientLoginDiagnosticRetainsChallengeAndBackoffWithoutClaimingDenial() async throws {
+    @Test func backgroundingFencesALateServerConnection() async throws {
         let clock = ManualGianClock(instant: PreviewFixtures.instant)
         let service = CoordinatedService()
         let store = GianClientStore(service: service, clock: clock, ids: SequenceIDGenerator(), storage: InMemoryGianStorage())
-        let coordinator = try GianClientCoordinator(store: store, runtime: service, events: service.events,
-            diagnostics: service.diagnostics, loadAuthorization: { _, _ in fictionalAuthorization(clock: clock) })
-        coordinator.start()
-        _ = await store.dispatch(.setServerAddress(PreviewFixtures.server))
-        _ = await store.dispatch(.startGitHubDeviceLogin)
-        let login = try #require(store.state.account.deviceLogin)
-        let retry = clock.now().addingTimeInterval(20)
-        service.diagnosticSink.yield(RemoteServiceDiagnostic(server: store.state.server, account: nil, host: nil,
-            loginID: login.loginID, epoch: service.eventEpoch,
-            status: .retryingLogin(error: .transport, retryAt: retry, expiresAt: login.expiresAt)))
-        for _ in 0..<100 where store.serviceDiagnostic == nil { await Task.yield() }
-        #expect(store.state.phase == .awaitingGitHubDeviceLogin)
+        service.holdConnect = true
+        let pending = Task { await store.dispatch(.setServerAddress(PreviewFixtures.server)) }
+        for _ in 0..<100 where service.connectResult == nil { await Task.yield() }
+        let completion = try #require(service.connectResult)
+        service.connectResult = nil
         #expect(store.state.account.status == .pending)
-        #expect(store.state.account.deviceLogin?.loginID == login.loginID)
-        #expect(store.state.account.deviceLogin?.nextPollAt == retry)
-        #expect((await store.dispatch(.cancelGitHubDeviceLogin)).isApplied)
-        #expect(store.state.phase == .serverEntered)
-        #expect(store.serverOutcomeUnconfirmed)
-        #expect(store.state.account.deviceLogin == nil)
-        await coordinator.stop()
-    }
-
-    @Test func backgroundDisconnectFencesPollWithoutExpiringTheStillValidChallenge() async throws {
-        let clock = ManualGianClock(instant: PreviewFixtures.instant)
-        let service = CoordinatedService()
-        let store = GianClientStore(service: service, clock: clock, ids: SequenceIDGenerator(), storage: InMemoryGianStorage())
-        _ = await store.dispatch(.setServerAddress(PreviewFixtures.server))
-        _ = await store.dispatch(.startGitHubDeviceLogin)
-        let challenge = try #require(store.state.account.deviceLogin)
-        clock.instant = clock.instant.addingTimeInterval(5)
-        service.holdPoll = true
-        let pending = Task { await store.dispatch(.pollGitHubDeviceLogin) }
-        for _ in 0..<100 where service.pollResult == nil { await Task.yield() }
-        let completion = try #require(service.pollResult)
-        service.pollResult = nil
         _ = await store.dispatch(.setForeground(.background))
-        completion.resume(returning: .expired)
+        completion.resume(returning: .connected(PreviewScript.legacyContract.account))
         #expect(await pending.value == .rejected(.staleOperation))
-        #expect(store.state.phase == .awaitingGitHubDeviceLogin)
-        #expect(store.state.account.status == .pending)
-        #expect(store.state.account.deviceLogin?.loginID == challenge.loginID)
+        #expect(store.state.phase == .serverEntered)
+        #expect(store.state.account.status == .error)
         #expect(store.state.account.accountID == nil)
     }
 
@@ -281,9 +225,9 @@ struct CoordinatorTests {
         let before = service.directoryReads
         let scope = try clientScope(store)
         service.diagnosticSink.yield(RemoteServiceDiagnostic(server: scope.server, account: scope.account,
-            host: scope.host, loginID: nil, epoch: service.eventEpoch, status: .cleared))
+            host: scope.host, epoch: service.eventEpoch, status: .cleared))
         service.diagnosticSink.yield(RemoteServiceDiagnostic(server: scope.server, account: scope.account,
-            host: scope.host, loginID: nil, epoch: service.eventEpoch, status: .resyncRequired(.cryptoResumed)))
+            host: scope.host, epoch: service.eventEpoch, status: .resyncRequired(.cryptoResumed)))
         for _ in 0..<50 { await Task.yield() }
         #expect(store.state.connection == .online)
         #expect(!store.state.sync.needsSnapshot)

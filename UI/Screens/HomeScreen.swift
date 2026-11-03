@@ -11,7 +11,6 @@ import GianCore
 /// centered, Search + List options on the right; the global group lives in
 /// the detail column's bar instead.
 struct HomeScreen: View {
-    let accountLogin: String
     let hosts: [HostItem]
     let directory: DirectoryPresentation
     /// Highlighted row in the wide layout; nil on compact screens.

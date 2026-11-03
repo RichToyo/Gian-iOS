@@ -23,7 +23,7 @@ func wireDirectoryPage(_ fixture: RemoteFixture, view: String = "repos", state: 
 struct RemoteDirectoryTests {
     private func connected(enabled: Bool = true) async throws -> (RemoteFixture, FixtureRelaySocket) {
         let fixture = RemoteFixture()
-        try await fixture.loginAndClaim()
+        try await fixture.connectAndClaim()
         let socket = FixtureRelaySocket(fixture); socket.directoryEnabled = enabled
         fixture.transport.socket = socket
         guard case .snapshot = await fixture.service.refreshDirectory(scope: fixture.scope) else { throw RemoteClientError.invalidPayload }

@@ -23,14 +23,6 @@ final class ScreenshotTourUITests: XCTestCase {
         serverField.typeText("https://remote.example.test")
         app.buttons["Continue"].tap()
 
-        let signIn = app.buttons["Continue with GitHub"]
-        XCTAssertTrue(signIn.waitForExistence(timeout: 10))
-        snap(app, "03-setup-github", "light")
-        signIn.tap()
-        let code = app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'ABCD-EFGH'")).firstMatch
-        if code.waitForExistence(timeout: 10) {
-            snap(app, "04-setup-device-code", "light")
-        }
         if app.textFields["Paste pairing link"].waitForExistence(timeout: 30) {
             snap(app, "05-setup-pairing", "light")
         }

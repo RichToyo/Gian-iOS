@@ -1,10 +1,12 @@
 import Foundation
 
 public enum GianClientAction: Sendable {
+    /// Sets the Remote Server and verifies its identity (pinned on first
+    /// use); Host pairing comes next. There is no account sign-in.
     case setServerAddress(String)
-    case startGitHubDeviceLogin
-    case pollGitHubDeviceLogin
-    case cancelGitHubDeviceLogin
+    /// After the Server's identity changed (e.g. it was reinstalled): forget
+    /// the pinned identity and this app's Hosts there, then connect again.
+    case forgetServerIdentity
     case logout
     /// Pairs a Host: during setup, or later to add another Host (the current
     /// one stays open until the new one is confirmed, then becomes current).

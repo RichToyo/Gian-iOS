@@ -5,8 +5,8 @@ import Foundation
 public protocol GianClientLifecycle: AnyObject {
     func connect(scope: ClientScope) async throws
     func disconnect() async
-    func cancelLogin(server: ServerAddress, loginID: LoginID) async throws
     func logout(server: ServerAddress, account: AccountID) async throws
+    func forgetServer(_ server: ServerAddress) async throws
     func revoke(scope: ClientScope) async throws
 }
 
@@ -17,7 +17,6 @@ public protocol GianClientEventSource: AnyObject {
 }
 
 public enum RemoteDiagnosticStatus: Sendable, Equatable {
-    case retryingLogin(error: RemoteClientError, retryAt: Date, expiresAt: Date)
     case connectionClosed(RemoteClientError)
     case resyncRequired(SnapshotRequiredReason)
     case cleared
@@ -27,7 +26,6 @@ public struct RemoteServiceDiagnostic: Sendable, Equatable {
     public let server: ServerAddress?
     public let account: AccountID?
     public let host: HostID?
-    public let loginID: LoginID?
     public let epoch: Int
     public let status: RemoteDiagnosticStatus
 }
@@ -37,15 +35,18 @@ public enum RemoteClientError: Error, Sendable, Equatable {
     case invalidServer, invalidPayload, integrity, versionMismatch, capabilityDenied
     case notAuthorized, deviceRevoked, expired, cancelled, disconnected, timeout, bufferLimit
     case unsupported, transport, deliveryNotStarted, server(code: String, retryAfter: Int?)
+    /// The Server's identity proof doesn't match the identity pinned on first use.
+    case serverIdentityChanged
 
     public var safeDescription: String {
         switch self {
         case .invalidServer: "A valid HTTPS server origin is required."
+        case .serverIdentityChanged: "This server's identity changed since this device last connected."
         case .invalidPayload: "The Host returned an invalid response."
         case .integrity: "Remote content integrity verification failed."
         case .versionMismatch: "The Host protocol is not compatible."
         case .capabilityDenied: "The Host has not granted this capability."
-        case .notAuthorized: "Account or device authorization is required."
+        case .notAuthorized: "This device isn't authorized on the Server or Host."
         case .deviceRevoked: "The Host device grant was revoked."
         case .expired: "The remote reference has expired."
         case .cancelled: "The operation was cancelled."

@@ -27,11 +27,11 @@ struct RemoteBarrierBridgeTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let storage = try SQLiteGianStorage(directory: directory)
         let fixture = RemoteFixture(invalidations: storage)
-        try await fixture.loginAndClaim()
+        try await fixture.connectAndClaim()
         fixture.secrets.mutationFailure = { _, _ in .transport }
         do { try await fixture.service.logout(server: fixture.server, account: fixture.account); Issue.record("Secure cleanup must throw") }
         catch { #expect(error as? RemoteClientError == .transport) }
-        #expect(try fixture.service.activeAuthorization(server: fixture.server) != nil)
+        #expect(fixture.secrets.records[fixture.service.activeKey(fixture.server)] != nil)
         let reopened = try SQLiteGianStorage(directory: directory)
         #expect(try reopened.authorizationInvalidatedAt(scope: fixture.scope.data) != nil)
         let restarted = LiveGianClientService(transport: fixture.transport, secrets: fixture.secrets,
@@ -39,51 +39,27 @@ struct RemoteBarrierBridgeTests {
         #expect(try restarted.loadCachedAuthorization(server: fixture.server, account: fixture.account) == nil)
     }
 
-    @Test func coreBarrierPrecedesHidingButDoesNotPreventExplicitRemoteLogoutCleanup() async throws {
+    @Test func coreBarrierPrecedesHidingAndSignOutIsConfirmedLocally() async throws {
         let directory = try temporaryStorageDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let storage = try SQLiteGianStorage(directory: directory)
         let fixture = RemoteFixture(invalidations: storage)
-        try await fixture.loginAndClaim()
+        try await fixture.connectAndClaim()
         let evidence = try #require(try fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account))
         let store = GianClientStore(service: fixture.service, clock: fixture.clock, storage: storage)
         #expect(store.restoreAuthorizedSession(authorization: evidence).isApplied)
         #expect((await store.dispatch(.logout)).isApplied)
         #expect(store.state.phase == .signedOut)
         #expect(!store.authorizationInvalidationUnconfirmed)
-        // The fictional endpoint loses its response. Local cleanup and remote
-        // acknowledgement are deliberately separate outcomes.
-        #expect(store.serverOutcomeUnconfirmed)
-        #expect(fixture.transport.requests.contains { $0.url?.path == "/api/v1/account/logout" })
-    }
-
-    @Test func cancellationNeverRollsBackToAnExplicitlySignedOutPreviousAccount() async throws {
-        let directory = try temporaryStorageDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let storage = try SQLiteGianStorage(directory: directory)
-        let fixture = RemoteFixture(invalidations: storage)
-        try await fixture.loginAndClaim()
-        fixture.loginID = "00000000-0000-7000-8000-000000000090"
-        fixture.differentAccount = true
-        guard case .started(let challenge) = await fixture.service.startGitHubDeviceLogin(server: fixture.server) else {
-            Issue.record("Missing fictional login"); return
-        }
-        fixture.clock.instant = fixture.clock.instant.addingTimeInterval(5)
-        guard case .authorized = await fixture.service.pollGitHubDeviceLogin(server: fixture.server, loginID: challenge.loginID) else {
-            Issue.record("Missing fictional authorization"); return
-        }
-        // Simulate the independent Core logout barrier even when old secure
-        // records remain readable. Attempt rollback must consult the same loader.
-        try storage.invalidateAuthorization(scope: fixture.scope.data, at: fixture.clock.now())
-        do { try await fixture.service.cancelLogin(server: fixture.server, loginID: challenge.loginID) }
-        catch { #expect(error as? RemoteClientError == .unsupported) }
-        #expect(try fixture.service.activeAuthorization(server: fixture.server) == nil)
+        // Signing out is local (no account): its cleanup is the whole outcome.
+        #expect(!store.serverOutcomeUnconfirmed)
+        #expect(!fixture.transport.requests.contains { $0.url?.path.contains("/account/") == true })
         #expect(try fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account) == nil)
     }
 
     @Test func laterVerificationTimestampIsNotANewAuthorizationProof() async throws {
         let fixture = RemoteFixture()
-        try await fixture.loginAndClaim()
+        try await fixture.connectAndClaim()
         var old = try fixture.service.requireVault(server: fixture.server, account: fixture.account)
         fixture.clock.instant = fixture.clock.instant.addingTimeInterval(1)
         try fixture.invalidations.invalidateAuthorization(scope: fixture.scope.data, at: fixture.clock.now())
@@ -97,7 +73,7 @@ struct RemoteBarrierBridgeTests {
     @Test func totalDurableWriteFailureIsExplicitlyUnconfirmedNotRestartSafety() async throws {
         let storage = FailingBarrierStorage()
         let fixture = RemoteFixture(invalidations: storage)
-        try await fixture.loginAndClaim()
+        try await fixture.connectAndClaim()
         let evidence = try #require(try fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account))
         let store = GianClientStore(service: fixture.service, clock: fixture.clock, storage: storage)
         #expect(store.restoreAuthorizedSession(authorization: evidence).isApplied)

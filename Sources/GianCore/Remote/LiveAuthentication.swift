@@ -1,159 +1,108 @@
 import Foundation
+import Security
 
 extension LiveGianClientService {
-    public func startGitHubDeviceLogin(server: ServerAddress) async -> GitHubLoginStartResponse {
+    /// Remote 1.5 needs no account: the Server proves its identity, this app
+    /// keeps a controller identity (an installation key) for it, and Hosts are
+    /// paired by key possession plus the Host's confirmation.
+    public func connectServer(server: ServerAddress) async -> ServerConnectResponse {
         disconnectNow()
-        login = nil
         let captured = epoch
         do {
-            guard loginAttempts.count < 64 else { throw RemoteClientError.bufferLimit }
             let identity = try identity(server: server)
-            let peer = WireValue.object(["role": .string("controller"), "installation_id": .string(identity.installation),
-                                         "public_key": try identity.publicKey.wire])
-            let response = try await http(server: server, path: "/api/v1/account/start",
-                body: .object(["protocol": .string(RemoteBaseline.accountProtocol), "peer": peer]))
-            try checkEpoch(captured)
-            try validateProtocol(response, account: true)
-            try response.closed(["protocol", "login_id", "challenge", "user_code", "verification_uri", "expires_at", "interval_seconds"])
-            let challenge = response["challenge"]
-            try challenge.closed(["type", "challenge_id", "nonce", "server_identity_fingerprint", "peer", "expires_at"])
-            guard try challenge.string("type") == "gian.remote.account_challenge/1", challenge["peer"] == peer,
-                  try response.string("verification_uri") == RemoteBaseline.githubDeviceVerificationURI else { throw RemoteClientError.integrity }
-            _ = try challenge.identifier("challenge_id")
-            _ = try RemoteWire.unbase64(challenge.string("nonce", maximum: 256))
-            let expires = Date(timeIntervalSince1970: Double(try response.integer("expires_at")) / 1000)
-            let challengeExpires = Date(timeIntervalSince1970: Double(try challenge.integer("expires_at")) / 1000)
-            guard expires > clock.now(), expires <= challengeExpires else { throw RemoteClientError.expired }
-            let fingerprint = try challenge.string("server_identity_fingerprint")
-            guard fingerprint.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else { throw RemoteClientError.invalidPayload }
-            let pinKey = RemoteSecretKey(server: server, account: nil, installation: "server-bootstrap", purpose: "server-fingerprint")
-            if let pin = try secrets.read(pinKey) {
-                guard pin == Data(fingerprint.utf8) else {
-                    invalidServers.insert(server)
-                    try secrets.write(Data([1]), for: RemoteSecretKey(server: server, account: nil, installation: "server-bootstrap", purpose: "server-identity-mismatch"))
-                    throw RemoteClientError.integrity
-                }
-            } else { try secrets.write(Data(fingerprint.utf8), for: pinKey) }
-            let id: LoginID = try response.scoped("login_id")
-            let interval = try response.integer("interval_seconds", range: 5...60)
-            let userCode = try response.string("user_code", maximum: 64)
-            guard !userCode.isEmpty else { throw RemoteClientError.invalidPayload }
-            let attemptKey = RemoteLoginAttemptKey(server: server, loginID: id)
-            guard loginAttempts[attemptKey] == nil else { throw RemoteClientError.integrity }
-            let attempt = RemoteLoginAttempt(server: server, loginID: id, installation: identity.installation, authorizationID: newID())
-            loginAttempts[attemptKey] = attempt
-            login = RemotePendingLogin(attempt: attempt, server: server, id: id, identity: identity, signature: try identity.sign(challenge),
-                fingerprint: fingerprint, expiresAt: expires, interval: interval, nextPoll: clock.now().addingTimeInterval(Double(interval)))
+            let fingerprint = try await verifyServerIdentity(server: server, epoch: captured)
+            guard let installation = InstallationID(rawValue: try RemoteWire.id(identity.installation)) else {
+                throw RemoteClientError.integrity
+            }
+            let account = AccountID(installation: installation)
+            try establishController(server: server, account: account, identity: identity, fingerprint: fingerprint, epoch: captured)
             lastFailure = nil
-            return .started(GitHubDeviceLoginChallenge(loginID: id, userCode: userCode,
-                verificationURI: URL(string: RemoteBaseline.githubDeviceVerificationURI)!, expiresAt: expires, intervalSeconds: interval))
+            return .connected(AccountIdentity(account: account, installationID: installation))
+        } catch RemoteClientError.serverIdentityChanged {
+            return .identityChanged
         } catch { return .failed(note(error).safeDescription) }
     }
 
-    public func pollGitHubDeviceLogin(server: ServerAddress, loginID: LoginID) async -> GitHubLoginPollResponse {
-        guard var pending = login, pending.server == server, pending.id == loginID else { return .expired }
-        guard pending.expiresAt > clock.now() else { login = nil; return .expired }
-        guard pending.nextPoll <= clock.now() else { return .pending(intervalSeconds: pending.interval) }
-        let captured = epoch
-        pending.nextPoll = clock.now().addingTimeInterval(Double(pending.interval)); login = pending
-        do {
-            let response = try await http(server: server, path: "/api/v1/account/poll", body: .object([
-                "protocol": .string(RemoteBaseline.accountProtocol), "login_id": .string(loginID.rawValue), "signature": .string(pending.signature),
-            ]))
-            try checkLoginAttempt(pending.attempt, epoch: captured)
-            guard login?.id == loginID, pending.expiresAt > clock.now() else { return .expired }
-            try validateProtocol(response, account: true)
-            switch try response.string("status") {
-            case "pending":
-                try response.closed(["protocol", "status", "interval_seconds"])
-                pending.interval = try response.integer("interval_seconds", range: 5...60)
-                pending.nextPoll = clock.now().addingTimeInterval(Double(pending.interval)); login = pending
-                lastFailure = nil; diagnostic(.cleared, login: pending)
-                return .pending(intervalSeconds: pending.interval)
-            case "denied": try response.closed(["protocol", "status"]); login = nil; return .denied
-            case "expired": try response.closed(["protocol", "status"]); login = nil; return .expired
-            case "authorized":
-                try response.closed(["protocol", "status", "account", "account_token", "installation_id", "role", "expires_at"])
-                let identity = try accountIdentity(response, expectedInstallation: pending.identity.installation)
-                let token = try response.string("account_token", maximum: 256)
-                guard !token.isEmpty else { throw RemoteClientError.notAuthorized }
-                _ = try RemoteWire.unbase64(token, maximum: 256)
-                let expires = Date(timeIntervalSince1970: Double(try response.integer("expires_at")) / 1000)
-                guard expires > clock.now() else { throw RemoteClientError.expired }
-                let previous = try loadVault(server: server, account: identity.account)
-                // One instant for both: the invalidation barrier requires
-                // authorizationCreatedAt <= lastVerifiedAt, and two reads of a
-                // real clock put creation a few microseconds later.
-                let verifiedAt = clock.now()
-                let vault = RemoteAccountVault(server: server.absoluteString, account: identity.account.id, login: identity.login,
-                    identity: pending.identity, token: token, expiresAt: expires, fingerprint: pending.fingerprint,
-                    keyFingerprint: RemoteWire.hash(try pending.identity.publicKey.wire.encoded()), lastVerifiedAt: verifiedAt,
-                    hosts: previous?.identity.installation == identity.installationID.rawValue ? previous?.hosts ?? [:] : [:],
-                    translationAttempts: previous?.translationAttempts ?? [:], commandAttempts: previous?.commandAttempts ?? [:],
-                    authorizationID: pending.attempt.authorizationID, authorizationCreatedAt: verifiedAt)
-                try persistLogin(vault, account: identity.account, attempt: pending.attempt, epoch: captured)
-                login = nil; lastFailure = nil; diagnostic(.cleared, login: pending)
-                return .authorized(identity)
-            default: throw RemoteClientError.invalidPayload
-            }
-        } catch {
-            let safe = note(error)
-            if case .cancelled = pending.attempt.phase { return .expired }
-            guard captured == epoch, login?.id == loginID else { return .expired }
-            if safe == .notAuthorized { login = nil; return .denied }
-            if safe == .expired { login = nil; return .expired }
-            // The shared enum has no failed/transient case. Preserve pending and expose lastFailure.
-            // In particular cancellation, HTTP 503 and TLS failures are never authorization success.
-            let retryAfter: Int
-            if case .server(_, let retry) = safe { retryAfter = retry ?? 5 } else { retryAfter = 5 }
-            pending.interval = min(60, max(retryAfter, pending.interval * 2))
-            pending.nextPoll = clock.now().addingTimeInterval(Double(pending.interval)); login = pending
-            diagnostic(.retryingLogin(error: safe, retryAt: min(pending.nextPoll, pending.expiresAt), expiresAt: pending.expiresAt), login: pending)
-            return .pending(intervalSeconds: pending.interval)
+    /// Forgets a Server's pinned identity and this app's controller identity
+    /// there, so the next connection trusts the Server afresh (for a Server
+    /// that was reinstalled). Its paired Hosts must be paired again.
+    public func forgetServer(_ server: ServerAddress) async throws {
+        disconnectNow()
+        if let pointerData = try secrets.read(activeKey(server)),
+           let pointer = try? JSONDecoder().decode(RemoteActiveController.self, from: pointerData),
+           let account = AccountID(provider: .controller, id: pointer.account) {
+            try secrets.remove(vaultKey(server: server, account: account, installation: pointer.installation))
+            try secrets.remove(RemoteSecretKey(server: server, account: account, installation: pointer.installation, purpose: "pending-pairing-key"))
         }
+        try secrets.remove(activeKey(server))
+        try secrets.remove(installationKey(server))
+        try secrets.remove(pinKey(server))
     }
 
-    func accountIdentity(_ response: WireValue, expectedInstallation: String) throws -> AccountIdentity {
-        guard try response.string("role") == "controller", try response.identifier("installation_id") == expectedInstallation,
-              try response["account"].string("provider") == "github",
-              let account = AccountID(provider: .github, id: try response["account"].string("id")),
-              let installation = InstallationID(rawValue: expectedInstallation) else { throw RemoteClientError.integrity }
-        try response["account"].closed(["provider", "id", "login"])
-        return AccountIdentity(account: account, login: try response["account"].string("login", maximum: 256), installationID: installation)
-    }
-
-    func verifyAccount(server: ServerAddress, account: AccountID, epoch captured: Int) async throws -> RemoteAccountVault {
-        do { return try await performAccountVerification(server: server, account: account, epoch: captured) }
-        catch {
-            if captured == epoch, let failure = error as? RemoteClientError, failure == .notAuthorized || failure == .integrity {
-                try invalidateAccount(server: server, account: account)
-            }
-            throw error
+    /// `POST /api/v1/server-identity`: the Server signs a fresh nonce with its
+    /// identity key. The first fingerprint seen is pinned; a different one is
+    /// refused. Like remote-web, this rides on TLS rather than replacing it.
+    func verifyServerIdentity(server: ServerAddress, epoch captured: Int) async throws -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else { throw RemoteClientError.integrity }
+        let nonce = RemoteWire.base64(Data(bytes))
+        let response = try await http(server: server, path: "/api/v1/server-identity", body: .object([
+            "protocol": .string(RemoteBaseline.authProtocol), "nonce": .string(nonce),
+        ]))
+        try checkEpoch(captured); try validateProtocol(response)
+        try response.closed(["protocol", "server_identity", "expires_at", "signature"])
+        let identity = response["server_identity"]
+        try identity.closed(["algorithm", "public_key", "fingerprint"])
+        guard try identity.string("algorithm") == "P-256" else { throw RemoteClientError.integrity }
+        let key = try RemotePublicKey(wire: identity["public_key"])
+        let fingerprint = RemoteWire.hash(try key.wire.encoded())
+        guard try identity.string("fingerprint") == fingerprint else { throw RemoteClientError.integrity }
+        let expiresAt = try response.integer("expires_at")
+        // The nonce binds freshness; the expiry check only tolerates clock skew.
+        let skew: TimeInterval = 60
+        let expires = Date(timeIntervalSince1970: Double(expiresAt) / 1000)
+        guard expires > clock.now().addingTimeInterval(-skew),
+              expires <= clock.now().addingTimeInterval(RemoteBaseline.serverIdentityProofLifetime + skew) else { throw RemoteClientError.expired }
+        try key.verify(signature: try response.string("signature", maximum: 256), payload: .object([
+            "type": .string(RemoteBaseline.serverIdentityProofType), "nonce": .string(nonce),
+            "fingerprint": .string(fingerprint), "expires_at": .int(expiresAt),
+        ]))
+        if let pin = try secrets.read(pinKey(server)) {
+            guard pin == Data(fingerprint.utf8) else { throw RemoteClientError.serverIdentityChanged }
+        } else {
+            try secrets.write(Data(fingerprint.utf8), for: pinKey(server))
         }
+        return fingerprint
     }
 
-    private func performAccountVerification(server: ServerAddress, account: AccountID, epoch captured: Int) async throws -> RemoteAccountVault {
-        var vault = try requireVault(server: server, account: account)
-        let result = try await http(server: server, path: "/api/v1/account/me", method: "GET", bearer: vault.token)
-        try checkEpoch(captured)
-        try validateProtocol(result, account: true)
-        try result.closed(["protocol", "installation_id", "role", "account", "expires_at"])
-        let identity = try accountIdentity(result, expectedInstallation: vault.identity.installation)
-        guard identity.account == account else { throw RemoteClientError.integrity }
-        let expires = Date(timeIntervalSince1970: Double(try result.integer("expires_at")) / 1000)
-        guard expires > clock.now() else { throw RemoteClientError.expired }
-        vault = try requireVault(server: server, account: account)
-        if vault.authorizationCreatedAt == nil { vault.authorizationCreatedAt = vault.lastVerifiedAt }
-        vault.lastVerifiedAt = clock.now(); vault.expiresAt = min(vault.expiresAt, expires); vault.login = identity.login
+    /// Creates this app's controller vault for a Server on first use (or after
+    /// sign-out), otherwise records the fresh Server verification.
+    private func establishController(server: ServerAddress, account: AccountID, identity: RemoteSigningIdentity,
+                                     fingerprint: String, epoch captured: Int) throws {
+        let now = clock.now()
+        if var vault = try loadVault(server: server, account: account) {
+            guard vault.fingerprint == fingerprint else { throw RemoteClientError.integrity }
+            vault.lastVerifiedAt = now
+            try saveVault(vault, server: server, account: account, epoch: captured)
+            return
+        }
+        let vault = RemoteControllerVault(server: server.absoluteString, account: account.id, identity: identity,
+            fingerprint: fingerprint, keyFingerprint: RemoteWire.hash(try identity.publicKey.wire.encoded()),
+            createdAt: now, lastVerifiedAt: now, hosts: [:], translationAttempts: [:], commandAttempts: [:])
         try saveVault(vault, server: server, account: account, epoch: captured)
-        return vault
+        try secrets.write(JSONEncoder().encode(RemoteActiveController(account: account.id, installation: identity.installation)),
+                          for: activeKey(server))
+        try secrets.remove(tombstoneKey(server: server, account: account))
+        invalidAccounts.remove(DataScope(server: server, account: account))
     }
 
     public func claimHostQR(server: ServerAddress, account: AccountID, qr: HostPairingQR) async -> HostPairingResponse {
         let captured = epoch
         do {
             guard !qr.grantNonce.isEmpty, qr.grantNonce.utf8.count <= 16_384 else { throw RemoteClientError.invalidPayload }
-            var vault = try await verifyAccount(server: server, account: account, epoch: captured)
+            // As remote-web does: the Server proves its pinned identity before a claim.
+            _ = try await verifyServerIdentity(server: server, epoch: captured)
+            var vault = try requireVault(server: server, account: account)
             let identity = RemoteSigningIdentity(installation: vault.identity.installation)
             let pendingKey = RemoteSecretKey(server: server, account: account, installation: identity.installation, purpose: "pending-pairing-key")
             try secrets.write(JSONEncoder().encode(identity), for: pendingKey)
@@ -161,7 +110,7 @@ extension LiveGianClientService {
                 "protocol": .string(RemoteBaseline.authProtocol), "browser_installation_id": .string(identity.installation),
                 "device_public_key": try identity.publicKey.wire, "platform": .string("iOS"),
                 "user_agent": .string("Gian iOS/0.1.0"), "grant_nonce": .string(qr.grantNonce),
-            ]), accountToken: vault.token)
+            ]))
             try checkEpoch(captured); try validateProtocol(result)
             try result.closed(["protocol", "pairing_id", "host_id", "status", "crypto_connection_id"])
             guard try result.string("status") == "pending_confirmation" else { throw RemoteClientError.invalidPayload }
@@ -216,11 +165,11 @@ extension LiveGianClientService {
 
     private func performDeviceAuthentication(scope: ClientScope, epoch captured: Int) async throws -> RemoteDeviceLease {
         guard try !hostIsInvalid(scope) else { throw RemoteClientError.notAuthorized }
-        var vault = try await verifyAccount(server: scope.server, account: scope.account, epoch: captured)
+        var vault = try requireVault(server: scope.server, account: scope.account)
         guard var host = vault.hosts[scope.host.rawValue] else { throw RemoteClientError.notAuthorized }
         let challenge = try await http(server: scope.server, path: "/api/v1/sessions/device-challenge", body: .object([
             "protocol": .string(RemoteBaseline.authProtocol), "browser_installation_id": .string(host.identity.installation), "host_id": .string(host.id),
-        ]), accountToken: vault.token)
+        ]))
         try checkEpoch(captured); try validateProtocol(challenge)
         try challenge.closed(["protocol", "challenge_id", "challenge", "expires_at"])
         let challengeID = try challenge.identifier("challenge_id")
@@ -229,7 +178,7 @@ extension LiveGianClientService {
         let response = try await http(server: scope.server, path: "/api/v1/sessions/device-login", body: .object([
             "protocol": .string(RemoteBaseline.authProtocol), "browser_installation_id": .string(host.identity.installation),
             "host_id": .string(host.id), "challenge_id": .string(challengeID), "signature": .string(try host.identity.sign(Data(challengeID.utf8))),
-        ]), accountToken: vault.token)
+        ]))
         try checkEpoch(captured); try validateProtocol(response)
         try response.closed(["protocol", "access_token", "expires_at", "device_id", "host_id", "crypto_connection_id", "host_public_key"])
         let device = try response.identifier("device_id")

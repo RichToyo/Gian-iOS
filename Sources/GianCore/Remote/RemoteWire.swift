@@ -14,15 +14,18 @@ enum RemoteWire {
         "PRECONDITION_FAILED", "COMMAND_EXPIRED", "SNAPSHOT_REQUIRED", "INVALID_FRAME",
         "FRAME_TOO_LARGE", "RATE_LIMITED", "ATTACHMENT_NOT_FOUND", "ATTACHMENT_HASH_MISMATCH",
         "UPLOAD_EXPIRED", "TRANSFER_CONFLICT", "FILE_REFERENCE_EXPIRED", "FILE_TOO_LARGE",
-        "RESOURCE_NOT_FOUND", "UNKNOWN_OUTCOME",
+        "RESOURCE_NOT_FOUND", "UNKNOWN_OUTCOME", "IDEMPOTENCY_CONFLICT",
+        // Remote 1.5 controller admission.
+        "CONTROLLER_REVOKED", "CONTROLLER_NOT_ADMITTED", "CONTROLLER_ALREADY_ADMITTED",
+        "ENROLLMENT_CONSUMED", "ENROLLMENT_EXPIRED", "MIGRATION_CHALLENGE_EXPIRED",
     ]
 
     static func error(_ value: WireValue, retryAfter: Int? = nil) -> RemoteClientError {
         let code = (try? value.string("code")) ?? "UNKNOWN_OUTCOME"
         guard knownErrors.contains(code) else { return .invalidPayload }
         switch code {
-        case "DEVICE_REVOKED": return .deviceRevoked
-        case "AUTH_REQUIRED": return .notAuthorized
+        case "DEVICE_REVOKED", "CONTROLLER_REVOKED": return .deviceRevoked
+        case "AUTH_REQUIRED", "CONTROLLER_NOT_ADMITTED": return .notAuthorized
         case "FILE_REFERENCE_EXPIRED", "UPLOAD_EXPIRED", "COMMAND_EXPIRED", "ATTACHMENT_NOT_FOUND": return .expired
         case "REMOTE_CAPABILITY_DENIED": return .capabilityDenied
         case "PROTOCOL_VERSION_UNSUPPORTED": return .versionMismatch

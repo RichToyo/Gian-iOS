@@ -22,12 +22,10 @@ public final class GianClientCoordinator {
     private var refreshTask: Task<GianDispatchResult, Never>?
     private var reconciliationTask: Task<Void, Never>?
     private var directoryTask: Task<Void, Never>?
-    private var loginTask: Task<Void, Never>?
     private var invalidationTask: Task<Void, Never>?
     private var refreshID = 0
     private var reconciliationID = 0
     private var directoryID = 0
-    private var loginID = 0
     private var stopped = false
 
     public convenience init(store: GianClientStore, service: LiveGianClientService) throws {
@@ -55,7 +53,6 @@ public final class GianClientCoordinator {
         refreshTask?.cancel()
         reconciliationTask?.cancel()
         directoryTask?.cancel()
-        loginTask?.cancel()
         invalidationTask?.cancel()
     }
 
@@ -93,7 +90,6 @@ public final class GianClientCoordinator {
             store.markConnectionNotReady(.resyncing, reason: .cryptoResumed)
             queueRefreshIfNeeded()
         }
-        ensureLoginPolling()
     }
 
     /// Final disposal, not a background/foreground toggle. A stopped service's
@@ -103,7 +99,6 @@ public final class GianClientCoordinator {
         stopped = true
         isRunning = false
         cancelNetworkEffects()
-        cancelLoginPolling()
         eventTask?.cancel(); eventTask = nil
         diagnosticTask?.cancel(); diagnosticTask = nil
         _ = store.flushStorage()
@@ -116,7 +111,7 @@ public final class GianClientCoordinator {
         let scope = store.readyScope()
         await stop()
         store.serviceDiagnostic = RemoteServiceDiagnostic(server: scope?.server, account: scope?.account,
-            host: scope?.host, loginID: nil, epoch: runtime.eventEpoch, status: .connectionClosed(.disconnected))
+            host: scope?.host, epoch: runtime.eventEpoch, status: .connectionClosed(.disconnected))
     }
 
     @discardableResult
@@ -126,7 +121,6 @@ public final class GianClientCoordinator {
         guard !stopped else { return .rejected(.mutationsDisabled) }
         start()
         cancelNetworkEffects()
-        cancelLoginPolling()
         await store.finishPendingRemoteLogout()
         if let previous = store.accountScope(), previous != DataScope(server: server, account: account) {
             _ = await store.dispatch(.logout)
@@ -149,7 +143,7 @@ public final class GianClientCoordinator {
             store.hideAuthorizationFromService()
             _ = await store.dispatch(.setServerAddress(server.absoluteString))
             store.serviceDiagnostic = RemoteServiceDiagnostic(server: server, account: account, host: selectedHost,
-                loginID: nil, epoch: runtime.eventEpoch, status: .connectionClosed(.integrity))
+                epoch: runtime.eventEpoch, status: .connectionClosed(.integrity))
             return .rejected(.notAuthorized)
         }
     }
@@ -221,18 +215,19 @@ public final class GianClientCoordinator {
     func didDispatch(_ action: GianClientAction, result: GianDispatchResult) {
         guard isRunning else { return }
         switch action {
-        case .logout, .cancelGitHubDeviceLogin, .setServerAddress:
+        case .logout:
             cancelNetworkEffects()
+        case .setServerAddress:
+            // Reconnecting to a Server already used here restores its Hosts.
+            if result.isApplied, store.readyScope() != nil { queueReconciliation() } else { cancelNetworkEffects() }
         case .setForeground(.background), .noteLocalConnectivity(.unavailable):
             cancelNetworkEffects()
         case .setForeground(.foreground), .noteLocalConnectivity(.available):
-            if result.isApplied { queueRefreshIfNeeded(); ensureLoginPolling() }
-        case .startGitHubDeviceLogin:
-            if result.isApplied { ensureLoginPolling() }
+            if result.isApplied { queueRefreshIfNeeded() }
         case .refreshDirectory:
             if result.isApplied { queueReconciliation(); queueDirectoryRefresh() }
             else if result == .rejected(.staleOperation) { queueRefreshIfNeeded() }
-        case .selectConversation, .openBanner, .selectHost, .refreshHostPairing, .beginHostPairingFromQR, .pollGitHubDeviceLogin:
+        case .selectConversation, .openBanner, .selectHost, .refreshHostPairing, .beginHostPairingFromQR:
             if result.isApplied { queueReconciliation() }
         default: break
         }
@@ -243,16 +238,9 @@ public final class GianClientCoordinator {
         switch action {
         case .logout, .setForeground(.background), .noteLocalConnectivity(.unavailable):
             cancelNetworkEffects()
-            cancelLoginPolling()
-        case .startGitHubDeviceLogin:
-            cancelLoginPolling()
-        case .cancelGitHubDeviceLogin:
-            if store.state.phase == .awaitingGitHubDeviceLogin || store.state.account.status == .pending {
-                cancelNetworkEffects(); cancelLoginPolling()
-            }
         case .setServerAddress(let raw):
             if (store.state.phase == .signedOut || store.state.phase == .serverEntered), ServerAddress(parsing: raw) != nil {
-                cancelNetworkEffects(); cancelLoginPolling()
+                cancelNetworkEffects()
             }
         case .selectHost(let host):
             if store.state.phase == .ready, store.state.hosts.contains(where: { $0.id == host }) { cancelNetworkEffects() }
@@ -291,41 +279,12 @@ public final class GianClientCoordinator {
         reconciliationTask?.cancel(); reconciliationTask = nil
     }
 
-    private func cancelLoginPolling() {
-        loginID += 1
-        loginTask?.cancel()
-        loginTask = nil
-    }
-
     private func queuePendingInvalidation() {
         guard invalidationTask == nil, store.pendingRemoteLogout != nil else { return }
         invalidationTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.invalidationTask = nil }
             await self.store.finishPendingRemoteLogout()
-        }
-    }
-
-    private func ensureLoginPolling() {
-        guard isRunning, !stopped, loginTask == nil, store.state.phase == .awaitingGitHubDeviceLogin,
-              store.state.foreground == .foreground, store.state.localConnectivity == .available,
-              let server = store.state.server, let challenge = store.state.account.deviceLogin else { return }
-        loginID += 1
-        let request = loginID
-        loginTask = Task { @MainActor [weak self] in
-            defer { if let self, request == self.loginID { self.loginTask = nil } }
-            while !Task.isCancelled {
-                guard let store = self?.store, store.state.phase == .awaitingGitHubDeviceLogin, store.state.server == server,
-                      store.state.foreground == .foreground, store.state.localConnectivity == .available,
-                      let current = store.state.account.deviceLogin, current.loginID == challenge.loginID else { return }
-                let now = store.clock.now()
-                let delay = max(0, min(current.nextPollAt, current.expiresAt).timeIntervalSince(now))
-                if delay > 0 {
-                    do { try await Task.sleep(for: .seconds(min(60, delay))) } catch { return }
-                } else {
-                    _ = await store.dispatch(.pollGitHubDeviceLogin)
-                }
-            }
         }
     }
 
@@ -401,18 +360,7 @@ public final class GianClientCoordinator {
               diagnostic.server.map({ $0 == store.state.server }) ?? true,
               diagnostic.account.map({ $0 == store.state.account.accountID }) ?? true,
               diagnostic.host.map({ $0 == store.state.currentHostID }) ?? true else { return }
-        if let login = diagnostic.loginID, store.state.account.deviceLogin?.loginID != login {
-            if case .cleared = diagnostic.status, store.serviceDiagnostic?.loginID == login { store.serviceDiagnostic = nil }
-            return
-        }
         switch diagnostic.status {
-        case .retryingLogin(_, let retryAt, let expiresAt):
-            guard store.state.phase == .awaitingGitHubDeviceLogin else { return }
-            store.serviceDiagnostic = diagnostic
-            store.state.account.status = .pending
-            if let previous = store.state.account.deviceLogin?.nextPollAt {
-                store.state.account.deviceLogin?.nextPollAt = min(expiresAt, max(previous, retryAt))
-            }
         case .connectionClosed(let error):
             store.serviceDiagnostic = diagnostic
             cancelNetworkEffects()
@@ -422,7 +370,7 @@ public final class GianClientCoordinator {
             }
             if error == .notAuthorized {
                 store.hideAuthorizationFromService()
-                store.serviceDiagnostic = RemoteServiceDiagnostic(server: nil, account: nil, host: nil, loginID: nil,
+                store.serviceDiagnostic = RemoteServiceDiagnostic(server: nil, account: nil, host: nil,
                     epoch: diagnostic.epoch, status: .connectionClosed(.notAuthorized))
             }
             else if error == .deviceRevoked, let scope = store.readyScope() { store.hideHost(scope) }
@@ -441,11 +389,11 @@ public final class GianClientCoordinator {
             queueRefreshIfNeeded()
         case .cleared:
             if let previous = store.serviceDiagnostic, case .resyncRequired = previous.status, store.state.sync.needsSnapshot {
-                // Socket/login success is not directory freshness evidence.
+                // Socket success is not directory freshness evidence.
             } else { store.serviceDiagnostic = nil }
             guard diagnostic.host != nil, let scope = store.readyScope() else { return }
             do {
-                guard let evidence = try loadAuthorization(scope.server, scope.account), store.renewAuthorizationDeadline(evidence) else {
+                guard let evidence = try loadAuthorization(scope.server, scope.account), store.acceptsRevalidation(evidence) else {
                     store.hideAuthorizationFromService()
                     return
                 }

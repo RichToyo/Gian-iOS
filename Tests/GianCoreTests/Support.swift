@@ -93,13 +93,9 @@ func makeHarness(script: PreviewScript = .legacyContract) -> (GianClientStore, P
 
 @MainActor
 func authenticate(_ store: GianClientStore, clock: ManualGianClock) async throws {
-    let entered = await store.dispatch(.setServerAddress(PreviewFixtures.server))
-    try #require(entered.isApplied)
-    let started = await store.dispatch(.startGitHubDeviceLogin)
-    try #require(started.isApplied)
-    clock.instant = clock.instant.addingTimeInterval(5)
-    let polled = await store.dispatch(.pollGitHubDeviceLogin)
-    try #require(polled.isApplied)
+    _ = clock
+    let connected = await store.dispatch(.setServerAddress(PreviewFixtures.server))
+    try #require(connected.isApplied)
     try #require(store.state.phase == .awaitingHostPairing)
 }
 
@@ -142,14 +138,9 @@ func prepareComposer(_ store: GianClientStore, text: String = "Check the line", 
 
 @MainActor
 final class RejectingService: GianClientServicing {
-    func startGitHubDeviceLogin(server: ServerAddress) async -> GitHubLoginStartResponse {
+    func connectServer(server: ServerAddress) async -> ServerConnectResponse {
         _ = server
         return .failed("unreachable")
-    }
-
-    func pollGitHubDeviceLogin(server: ServerAddress, loginID: LoginID) async -> GitHubLoginPollResponse {
-        _ = (server, loginID)
-        return .denied
     }
 
     func claimHostQR(server: ServerAddress, account: AccountID, qr: HostPairingQR) async -> HostPairingResponse {

@@ -56,10 +56,10 @@ final class FixtureTransport: RemoteTransport {
 final class RemoteFixture {
     static let now = Date(timeIntervalSince1970: 1_790_000_000)
     let server = ServerAddress(parsing: "https://remote.fixture.test")!
-    let account = AccountID(provider: .github, id: "31415")!
+    /// This app's controller identity on the fixture Server; known once connected.
+    var account = AccountID(provider: .controller, id: "not-connected")!
     let hostID = "00000000-0000-7000-8000-000000000011"
     let pairingID = "00000000-0000-7000-8000-000000000012"
-    var loginID = "00000000-0000-7000-8000-000000000013"
     let challengeID = "00000000-0000-7000-8000-000000000014"
     let cryptoID = "00000000-0000-7000-8000-000000000015"
     let generation = "00000000-0000-7000-8000-000000000016"
@@ -73,13 +73,12 @@ final class RemoteFixture {
     let clock = ManualGianClock(instant: RemoteFixture.now)
     let service: LiveGianClientService
     let hostSigning = try! P256.Signing.PrivateKey(rawRepresentation: Data(repeating: 0, count: 31) + Data([1]))
-    var peer: WireValue = .null
-    var loginChallenge: WireValue = .null
+    let serverSigning = try! P256.Signing.PrivateKey(rawRepresentation: Data(repeating: 0, count: 31) + Data([2]))
+    let otherServerSigning = try! P256.Signing.PrivateKey(rawRepresentation: Data(repeating: 0, count: 31) + Data([3]))
+    /// The Server answers with a different identity key (e.g. reinstalled).
+    var serverKeyChanged = false
+    var identityFailure: RemoteClientError?
     var pairKey: RemotePublicKey?
-    var pollFailure: RemoteClientError?
-    var differentAccount = false
-    var invalidRole = false
-    var pollStatus = "authorized"
     var deviceConfirmed = true
 
     init(invalidations: any AuthorizationInvalidationStoring = InMemoryGianStorage()) {
@@ -94,26 +93,18 @@ final class RemoteFixture {
     func respond(_ request: URLRequest) async throws -> RemoteHTTPResponse {
         let body = try request.httpBody.map { try WireValue.decode($0) } ?? .null
         switch request.url?.path {
-        case "/api/v1/account/start":
-            peer = body["peer"]
-            loginChallenge = .object(["type": .string("gian.remote.account_challenge/1"), "challenge_id": .string(challengeID), "nonce": .string("ZmljdGlvbmFs"),
-                "server_identity_fingerprint": .string(String(repeating: "a", count: 64)), "peer": peer, "expires_at": .int(milliseconds + 600_000)])
-            return try response(.object([
-                "protocol": .string(RemoteBaseline.accountProtocol), "login_id": .string(loginID), "user_code": .string("TEST-CODE"),
-                "verification_uri": .string(RemoteBaseline.githubDeviceVerificationURI), "expires_at": .int(milliseconds + 600_000), "interval_seconds": .int(5),
-                "challenge": loginChallenge,
-            ]))
-        case "/api/v1/account/poll":
-            if let pollFailure { throw pollFailure }
-            if pollStatus == "pending" { return try response(.object(["protocol": .string(RemoteBaseline.accountProtocol), "status": .string("pending"), "interval_seconds": .int(5)])) }
-            if pollStatus != "authorized" { return try response(.object(["protocol": .string(RemoteBaseline.accountProtocol), "status": .string(pollStatus)])) }
-            try RemotePublicKey(wire: peer["public_key"]).verify(signature: body.string("signature"), payload: loginChallenge)
-            return try response(.object(["protocol": .string(RemoteBaseline.accountProtocol), "status": .string("authorized"),
-                "account": accountWire, "account_token": .string("ZmljdGlvbmFsLWFjY291bnQtdG9rZW4"), "installation_id": peer["installation_id"],
-                "role": .string(invalidRole ? "host" : "controller"), "expires_at": .int(milliseconds + 86_400_000)]))
-        case "/api/v1/account/me":
-            return try response(.object(["protocol": .string(RemoteBaseline.accountProtocol), "account": accountWire,
-                "installation_id": peer["installation_id"], "role": .string(invalidRole ? "host" : "controller"), "expires_at": .int(milliseconds + 86_400_000)]))
+        case "/api/v1/server-identity":
+            if let identityFailure { throw identityFailure }
+            let signing = serverKeyChanged ? otherServerSigning : serverSigning
+            let key = try RemotePublicKey(x963: signing.publicKey.x963Representation)
+            let fingerprint = RemoteWire.hash(try key.wire.encoded())
+            let expires = milliseconds + 120_000
+            let payload = WireValue.object(["type": .string(RemoteBaseline.serverIdentityProofType), "nonce": body["nonce"],
+                "fingerprint": .string(fingerprint), "expires_at": .int(expires)])
+            let signature = try signing.signature(for: payload.encoded()).rawRepresentation
+            return try response(.object(["protocol": .string(RemoteBaseline.authProtocol),
+                "server_identity": .object(["algorithm": .string("P-256"), "public_key": key.wire, "fingerprint": .string(fingerprint)]),
+                "expires_at": .int(expires), "signature": .string(RemoteWire.base64(signature))]))
         case "/api/v1/pairings/claim":
             pairKey = try RemotePublicKey(wire: body["device_public_key"])
             return try response(.object(["protocol": .string(RemoteBaseline.authProtocol), "status": .string("pending_confirmation"),
@@ -131,15 +122,15 @@ final class RemoteFixture {
                 "expires_at": .int(milliseconds + 600_000), "device_id": .string(pairingID), "host_id": .string(hostID),
                 "crypto_connection_id": .string(cryptoID), "host_public_key": try RemotePublicKey(x963: hostSigning.publicKey.x963Representation).wire]))
         case "/api/v1/ws-tickets": return try response(.object(["protocol": .string(RemoteBaseline.authProtocol), "ticket": .string("fixture-ticket"), "expires_at": .int(milliseconds + 60_000)]))
-        case "/api/v1/account/logout": throw RemoteClientError.transport
         default: throw RemoteClientError.unsupported
         }
     }
-    var accountWire: WireValue { .object(["provider": .string("github"), "id": .string(differentAccount ? "27182" : account.id), "login": .string("fixture-user")]) }
-    func loginAndClaim() async throws {
-        guard case .started(let challenge) = await service.startGitHubDeviceLogin(server: server) else { throw RemoteClientError.invalidPayload }
-        clock.instant = clock.instant.addingTimeInterval(5)
-        guard case .authorized = await service.pollGitHubDeviceLogin(server: server, loginID: challenge.loginID) else { throw RemoteClientError.notAuthorized }
+    func connect() async throws {
+        guard case .connected(let identity) = await service.connectServer(server: server) else { throw RemoteClientError.notAuthorized }
+        account = identity.account
+    }
+    func connectAndClaim() async throws {
+        try await connect()
         guard case .pendingConfirmation = await service.claimHostQR(server: server, account: account, qr: HostPairingQR(grantNonce: "fictional-qr-nonce")) else { throw RemoteClientError.invalidPayload }
     }
 }

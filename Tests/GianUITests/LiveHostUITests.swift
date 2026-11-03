@@ -1,11 +1,12 @@
 import XCTest
 
-/// Drives the real app against the local test Gian (see build/live/README-live.md):
-/// server → login → pairing → home → new chat with real catalog options →
+/// Drives the real app against the local test Gian (see build/live15/README.md):
+/// server (identity verified, no account) → pairing → home → new chat with real catalog options →
 /// one message → a mid-conversation `session.update`. Skipped unless a fresh
 /// pairing link is passed:
 ///
-///     TEST_RUNNER_GIAN_LIVE_PAIRING_LINK="$(build/live/pair-host.sh --no-wait | tail -1)" \
+///     TEST_RUNNER_GIAN_LIVE_SERVER=https://localhost:8444 \
+///     TEST_RUNNER_GIAN_LIVE_PAIRING_LINK="$(build/live15/pair-host15.sh --no-wait | tail -1)" \
 ///       xcodebuild … -only-testing:GianUITests/LiveHostUITests test
 @MainActor
 final class LiveHostUITests: XCTestCase {
@@ -19,7 +20,7 @@ final class LiveHostUITests: XCTestCase {
         let environment = ProcessInfo.processInfo.environment
         let link = try XCTUnwrap(environment["GIAN_LIVE_PAIRING_LINK"].flatMap { $0.isEmpty ? nil : $0 },
                                  "Set TEST_RUNNER_GIAN_LIVE_PAIRING_LINK")
-        let server = environment["GIAN_LIVE_SERVER"] ?? "https://localhost:8443"
+        let server = environment["GIAN_LIVE_SERVER"] ?? "https://localhost:8444"
 
         app = XCUIApplication()
         app.launch()
@@ -30,12 +31,8 @@ final class LiveHostUITests: XCTestCase {
         serverField.typeText(server)
         app.buttons["Continue"].tap()
 
-        let signIn = app.buttons["Continue with GitHub"]
-        XCTAssertTrue(signIn.waitForExistence(timeout: 15))
-        signIn.tap()
-
         let pairing = app.textFields["Paste pairing link"]
-        XCTAssertTrue(pairing.waitForExistence(timeout: 60), "Login did not complete")
+        XCTAssertTrue(pairing.waitForExistence(timeout: 60), "The server was not verified")
         pairing.tap()
         pairing.typeText(link)
         app.buttons["Pair"].tap()
@@ -80,23 +77,29 @@ final class LiveHostUITests: XCTestCase {
         sleep(3)
         snap("live-04-conversation")
         app.buttons["More options"].tap(); sleep(1)
-        app.buttons["Ask for approval"].tap(); sleep(1)
+        // The Approval row shows its current value; switch to the other one.
+        let ask = app.buttons["Ask for approval"], auto = app.buttons["Approve for me"]
+        let current = ask.waitForExistence(timeout: 20) ? ask : auto
+        XCTAssertTrue(current.exists, "Approval missing from ⋯ in the conversation")
+        let target = current == ask ? "Approve for me" : "Ask for approval"
+        current.tap(); sleep(1)
         snap("live-05-approval-choices")
-        let auto = app.buttons["Approve for me"]
-        XCTAssertTrue(auto.waitForExistence(timeout: 5))
-        auto.tap()
+        let choice = app.buttons[target]
+        XCTAssertTrue(choice.waitForExistence(timeout: 5))
+        choice.tap()
         sleep(3)
         app.buttons["More options"].tap(); sleep(1)
         snap("live-06-after-update")
-        XCTAssertTrue(app.buttons["Approve for me"].exists, "Host did not confirm the approval change")
+        XCTAssertTrue(app.buttons[target].waitForExistence(timeout: 10), "Host did not confirm the approval change")
         dismissMenu()
     }
 
     /// Add Host while signed in: pair the second test Host from the Hosts
-    /// menu, land on it, and switch back. Needs a link for each Host:
+    /// menu, land on it, and switch back. Needs two Hosts on the same Server
+    /// and a link for each:
     ///
-    ///     TEST_RUNNER_GIAN_LIVE_PAIRING_LINK="$(build/live/pair-host.sh --no-wait | tail -1)" \
-    ///     TEST_RUNNER_GIAN_LIVE_PAIRING_LINK_2="$(build/live/pair-host2.sh --no-wait | tail -1)" \
+    ///     TEST_RUNNER_GIAN_LIVE_PAIRING_LINK=<link for "Gian-iOS Test Host"> \
+    ///     TEST_RUNNER_GIAN_LIVE_PAIRING_LINK_2=<link for "Gian-iOS Test Host 2"> \
     ///       xcodebuild … -only-testing:GianUITests/LiveHostUITests/testAddsASecondHost test
     func testAddsASecondHost() throws {
         let environment = ProcessInfo.processInfo.environment
@@ -104,7 +107,7 @@ final class LiveHostUITests: XCTestCase {
                                   "Set TEST_RUNNER_GIAN_LIVE_PAIRING_LINK")
         let second = try XCTUnwrap(environment["GIAN_LIVE_PAIRING_LINK_2"].flatMap { $0.isEmpty ? nil : $0 },
                                    "Set TEST_RUNNER_GIAN_LIVE_PAIRING_LINK_2")
-        try signIn(server: environment["GIAN_LIVE_SERVER"] ?? "https://localhost:8443", pairing: first)
+        try connect(server: environment["GIAN_LIVE_SERVER"] ?? "https://localhost:8444", pairing: first)
 
         let hostOne = hostTitle("Gian-iOS Test Host,")
         XCTAssertTrue(hostOne.waitForExistence(timeout: 30), "First Host not current")
@@ -137,7 +140,7 @@ final class LiveHostUITests: XCTestCase {
         snap("live-14-back-to-first")
     }
 
-    private func signIn(server: String, pairing link: String) throws {
+    private func connect(server: String, pairing link: String) throws {
         app = XCUIApplication()
         app.launch()
         let serverField = app.textFields.firstMatch
@@ -145,11 +148,8 @@ final class LiveHostUITests: XCTestCase {
         serverField.tap()
         serverField.typeText(server)
         app.buttons["Continue"].tap()
-        let signIn = app.buttons["Continue with GitHub"]
-        XCTAssertTrue(signIn.waitForExistence(timeout: 15))
-        signIn.tap()
         let pairing = app.textFields["Paste pairing link"]
-        XCTAssertTrue(pairing.waitForExistence(timeout: 60), "Login did not complete")
+        XCTAssertTrue(pairing.waitForExistence(timeout: 60), "The server was not verified")
         pairing.tap()
         pairing.typeText(link)
         app.buttons["Pair"].tap()

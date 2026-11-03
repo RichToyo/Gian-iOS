@@ -1,11 +1,10 @@
 import SwiftUI
 import GianCore
 
-/// Phase-driven setup flow bound to `GianClientState.phase`:
-/// manual server address → GitHub device login (user code + safe OS browser
-/// opening of the core-validated verification URI) → Host pairing (QR scan or
-/// manual payload; QR pairs Hosts only). The app never collects a GitHub
-/// password and never invents an OAuth redirect.
+/// Phase-driven setup bound to `GianClientState.phase`, two steps: the
+/// Remote Server (its identity is verified and pinned on first use; there is
+/// no account sign-in), then Host pairing (QR scan or pairing link; QR pairs
+/// Hosts only, and the Host confirms the device).
 struct SetupFlowView: View {
     let phase: ClientPhase
     let account: AccountAuthorization
@@ -15,15 +14,15 @@ struct SetupFlowView: View {
     var pairingNotice: String? = nil
 
     var onSubmitServer: (String) -> Void = { _ in }
-    var onStartGitHubLogin: () -> Void = {}
-    var onCancelGitHubLogin: () -> Void = {}
-    var onOpenVerificationURL: (URL) -> Void = { _ in }
+    /// Trusts a Server whose identity changed (e.g. it was reinstalled).
+    var onTrustNewServerIdentity: () -> Void = {}
     var onPairPayload: (String) -> Void = { _ in }
     var onRefreshPairing: () -> Void = {}
-    /// Leaves pairing (signs out) so this step is never a dead end.
+    /// Leaves pairing for the Server step, so this step is never a dead end.
     var onStartOver: () -> Void = {}
 
     @State private var serverAddress = ""
+    @State private var confirmsTrust = false
 
     var body: some View {
         // A plain stack, not a ScrollView: inside a scroll view that re-centers
@@ -54,7 +53,7 @@ struct SetupFlowView: View {
                 .font(.title2.weight(.bold))
                 .foregroundStyle(GianTheme.Colors.label)
             if let step {
-                Text("Step \(step) of 3")
+                Text("Step \(step) of 2")
                     .font(GianTheme.Typography.caption)
                     .foregroundStyle(GianTheme.Colors.secondaryLabel)
             }
@@ -65,8 +64,7 @@ struct SetupFlowView: View {
     private var step: Int? {
         switch phase {
         case .signedOut, .serverEntered: 1
-        case .awaitingGitHubDeviceLogin: 2
-        case .awaitingHostPairing: 3
+        case .awaitingHostPairing: 2
         case .ready: nil
         }
     }
@@ -75,9 +73,7 @@ struct SetupFlowView: View {
     private var stepContent: some View {
         switch phase {
         case .signedOut, .serverEntered:
-            serverAndSignInStep
-        case .awaitingGitHubDeviceLogin:
-            deviceLoginStep
+            serverStep
         case .awaitingHostPairing:
             pairingStep
         case .ready:
@@ -85,23 +81,19 @@ struct SetupFlowView: View {
         }
     }
 
-    // MARK: - Server address + sign-in
+    // MARK: - Server
 
-    /// The address field stays editable after Continue (Core accepts a new
-    /// address until sign-in starts), so a typo is fixed in place.
-    private var serverChanged: Bool {
-        let typed = serverAddress.trimmingCharacters(in: .whitespacesAndNewlines)
-        return server == nil || typed != server?.absoluteString
+    private var isConnecting: Bool { account.status == .pending }
+
+    private var canSubmit: Bool {
+        !isConnecting && !serverAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    @ViewBuilder
-    private var serverAndSignInStep: some View {
+    private var serverStep: some View {
         VStack(spacing: GianTheme.Metrics.paddingMedium) {
             Text("Connect to your Gian server")
                 .font(GianTheme.Typography.title)
                 .foregroundStyle(GianTheme.Colors.label)
-
-            accountStatusMessage
 
             TextField("https://server.example.com", text: $serverAddress)
                 .keyboardType(.URL)
@@ -109,11 +101,8 @@ struct SetupFlowView: View {
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .submitLabel(.continue)
-                .onSubmit {
-                    if serverChanged, !serverAddress.trimmingCharacters(in: .whitespaces).isEmpty {
-                        onSubmitServer(serverAddress)
-                    }
-                }
+                .onSubmit { if canSubmit { onSubmitServer(serverAddress) } }
+                .disabled(isConnecting)
                 .font(GianTheme.Typography.body)
                 .padding(GianTheme.Metrics.paddingMedium)
                 .background(
@@ -131,36 +120,43 @@ struct SetupFlowView: View {
                     .stroke(GianTheme.Colors.separator, lineWidth: 0.5)
                 )
 
-            if serverChanged {
-                Button("Continue") {
-                    onSubmitServer(serverAddress)
-                }
+            connectionStatus
+
+            Button("Continue") { onSubmitServer(serverAddress) }
                 .buttonStyle(GianPrimaryButtonStyle())
-                .disabled(serverAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            } else {
-                Button(action: onStartGitHubLogin) {
-                    Label("Continue with GitHub", systemImage: "person.crop.circle.badge.checkmark")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(GianPrimaryButtonStyle())
-                Text("The server checks account admission and device grants. Gian never asks for your GitHub password.")
-                    .font(GianTheme.Typography.caption)
-                    .foregroundStyle(GianTheme.Colors.secondaryLabel)
-                    .multilineTextAlignment(.center)
-            }
+                .disabled(!canSubmit)
         }
     }
 
     @ViewBuilder
-    private var accountStatusMessage: some View {
+    private var connectionStatus: some View {
         switch account.status {
-        case .denied:
-            statusMessage("Sign-in was denied. Check your GitHub account and try again.", color: GianTheme.Colors.failure)
-        case .expired:
-            statusMessage("The sign-in code expired. Start again.", color: GianTheme.Colors.warning)
+        case .pending:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Checking the server…")
+                    .font(GianTheme.Typography.caption)
+                    .foregroundStyle(GianTheme.Colors.secondaryLabel)
+            }
         case .error:
-            statusMessage("Sign-in failed. Check the server address and try again.", color: GianTheme.Colors.failure)
-        case .signedOut, .pending, .signedIn:
+            statusMessage("Couldn't connect. \(account.failure ?? "Check the server address and try again.")",
+                          color: GianTheme.Colors.failure)
+        case .serverIdentityChanged:
+            VStack(spacing: GianTheme.Metrics.paddingSmall) {
+                statusMessage("This server's identity changed since this device last connected. Only continue if you reinstalled or reset the server.",
+                              color: GianTheme.Colors.warning)
+                Button("Trust new identity", role: .destructive) { confirmsTrust = true }
+                    .font(GianTheme.Typography.caption.weight(.semibold))
+                    .buttonStyle(.plain)
+                    .frame(minHeight: GianTheme.Metrics.minHitTarget)
+                    .confirmationDialog("Trust this server's new identity?", isPresented: $confirmsTrust, titleVisibility: .visible) {
+                        Button("Trust new identity", role: .destructive, action: onTrustNewServerIdentity)
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("Hosts paired with this server on this device must be paired again.")
+                    }
+            }
+        case .signedOut, .signedIn:
             EmptyView()
         }
     }
@@ -170,68 +166,6 @@ struct SetupFlowView: View {
             .font(GianTheme.Typography.caption)
             .foregroundStyle(color)
             .multilineTextAlignment(.center)
-    }
-
-    // MARK: - GitHub device login
-
-    private var deviceLoginStep: some View {
-        VStack(spacing: GianTheme.Metrics.paddingMedium) {
-            Text("Authorize this device")
-                .font(GianTheme.Typography.title)
-                .foregroundStyle(GianTheme.Colors.label)
-
-            if let login = account.deviceLogin {
-                Text(login.userCode)
-                    .font(.system(.title2, design: .monospaced).weight(.semibold))
-                    .foregroundStyle(GianTheme.Colors.label)
-                    .textSelection(.enabled)
-                    .padding(GianTheme.Metrics.paddingMedium)
-                    .background(
-                        GianTheme.Colors.card,
-                        in: RoundedRectangle(
-                            cornerRadius: GianTheme.Metrics.cornerRadiusMedium,
-                            style: .continuous
-                        )
-                    )
-                    .accessibilityLabel("GitHub device code \(login.userCode)")
-
-                Button {
-                    UIPasteboard.general.string = login.userCode
-                } label: {
-                    Label("Copy code", systemImage: "doc.on.doc")
-                        .font(GianTheme.Typography.caption.weight(.semibold))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(GianTheme.Colors.tint)
-                .frame(minHeight: GianTheme.Metrics.minHitTarget)
-
-                Text("Enter this code on GitHub. The code expires \(login.expiresAt.formatted(date: .omitted, time: .shortened)).")
-                    .font(GianTheme.Typography.caption)
-                    .foregroundStyle(GianTheme.Colors.secondaryLabel)
-                    .multilineTextAlignment(.center)
-
-                Button {
-                    onOpenVerificationURL(login.verificationURI)
-                } label: {
-                    Label("Open GitHub", systemImage: "safari")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(GianPrimaryButtonStyle())
-
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text("Waiting for authorization…")
-                        .font(GianTheme.Typography.caption)
-                        .foregroundStyle(GianTheme.Colors.secondaryLabel)
-                }
-            }
-
-            Button("Cancel", action: onCancelGitHubLogin)
-                .font(GianTheme.Typography.body)
-                .foregroundStyle(GianTheme.Colors.secondaryLabel)
-                .buttonStyle(.plain)
-                .frame(minHeight: GianTheme.Metrics.minHitTarget)
-        }
     }
 
     // MARK: - Host pairing
@@ -249,7 +183,7 @@ struct SetupFlowView: View {
                 onRefreshPairing: onRefreshPairing
             )
 
-            Button("Sign out and start over", action: onStartOver)
+            Button("Use a different server", action: onStartOver)
                 .font(GianTheme.Typography.caption)
                 .foregroundStyle(GianTheme.Colors.secondaryLabel)
                 .buttonStyle(.plain)
@@ -371,20 +305,10 @@ struct QRPairingEntry: View {
     )
 }
 
-#Preview("Setup · device login") {
+#Preview("Setup · identity changed") {
     SetupFlowView(
-        phase: .awaitingGitHubDeviceLogin,
-        account: AccountAuthorization(
-            status: .pending,
-            deviceLogin: GitHubDeviceLoginState(
-                loginID: LoginID(rawValue: "login-1")!,
-                userCode: "ABCD-EFGH",
-                verificationURI: URL(string: "https://github.com/login/device")!,
-                expiresAt: .now.addingTimeInterval(900),
-                intervalSeconds: 5,
-                nextPollAt: .now
-            )
-        ),
+        phase: .serverEntered,
+        account: AccountAuthorization(status: .serverIdentityChanged),
         server: ServerAddress(parsing: "https://remote.example.test"),
         pendingPairing: nil
     )

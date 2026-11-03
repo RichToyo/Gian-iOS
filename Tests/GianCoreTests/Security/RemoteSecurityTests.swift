@@ -22,7 +22,7 @@ struct RemoteSecurityTests {
         let b = try RemoteCryptoChannel.nonce(connection: "fixture", direction: "host_to_device", sequence: 0)
         #expect(Data(a) != Data(b))
         let server = try #require(ServerAddress(parsing: "https://fixture.example.test"))
-        let account = try #require(AccountID(provider: .github, id: "123"))
+        let account = try #require(AccountID(provider: .controller, id: "123"))
         let first = RemoteSecretKey(server: server, account: account, installation: "install-a", purpose: "vault")
         let second = RemoteSecretKey(server: server, account: account, installation: "install-b", purpose: "vault")
         #expect(first.storageName != second.storageName)

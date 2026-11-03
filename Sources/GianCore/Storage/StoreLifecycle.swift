@@ -33,7 +33,7 @@ extension GianClientStore {
         if readyServiceEpoch != current { readyServiceEpoch = nil }
         eventCoordinator?.didChangeServiceEpoch()
         guard previous != nil else { return }
-        if state.phase == .awaitingGitHubDeviceLogin || (state.phase == .serverEntered && state.account.status == .pending) {
+        if state.phase == .serverEntered && state.account.status == .pending {
             epoch += 1
             serviceDiagnostic = nil
             return
@@ -161,16 +161,14 @@ extension GianClientStore {
         directoryRefreshPending = false
     }
 
-    func renewAuthorizationDeadline(_ authorization: AuthorizedSessionRestoration) -> Bool {
+    /// Revalidation evidence must match the current Server pin, controller
+    /// and Host; there is no account deadline to extend.
+    func acceptsRevalidation(_ authorization: AuthorizedSessionRestoration) -> Bool {
         guard let scope = readyScope(), authorization.server == scope.server,
               authorization.identity.account == scope.account,
               authorization.identity.installationID == state.account.installationID,
-              authorization.accountAuthorizationExpiresAt > clock.now(),
               authorization.hosts.contains(where: { $0.host.id == scope.host }),
               serverPins[scope.server].map({ $0 == authorization.serverIdentityFingerprint }) ?? true else { return false }
-        authorizationExpiresAt = min(authorizationExpiresAt ?? authorization.accountAuthorizationExpiresAt,
-                                     authorization.accountAuthorizationExpiresAt)
-        scheduleAuthorizationExpiry()
         return true
     }
 }

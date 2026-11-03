@@ -9,8 +9,7 @@ final class RestorationHintSelectionTests: XCTestCase {
         state.server = ServerAddress(parsing: "https://one.example.test")
         state.account = AccountAuthorization(
             status: .signedIn,
-            accountID: AccountID(provider: .github, id: "10001"),
-            login: "fixture-user"
+            accountID: AccountID(provider: .controller, id: "10001")
         )
         state.currentHostID = HostID(rawValue: "host-one")
 
@@ -27,11 +26,11 @@ final class RestorationHintSelectionTests: XCTestCase {
         XCTAssertNotEqual(serverChange, hostChange)
         XCTAssertEqual(serverChange.server?.absoluteString, "https://two.example.test")
 
-        state.account.accountID = AccountID(provider: .github, id: "10002")
+        state.account.accountID = AccountID(provider: .controller, id: "10002")
         let accountChange = RestorationHintSelection(state)
         XCTAssertEqual(accountChange.phase, .ready)
         XCTAssertNotEqual(accountChange, serverChange)
-        XCTAssertEqual(accountChange.account, AccountID(provider: .github, id: "10002"))
+        XCTAssertEqual(accountChange.account, AccountID(provider: .controller, id: "10002"))
         XCTAssertEqual(accountChange.host, HostID(rawValue: "host-two"))
     }
 }

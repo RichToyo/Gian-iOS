@@ -16,6 +16,23 @@ struct AgentLogoTrigger: Equatable {
     }
 }
 
+/// When to (re)load the ⋯ options: per Agent in view, catalog and readiness.
+struct AgentOptionsTrigger: Equatable {
+    let agent: AgentID?
+    let catalogRevision: String
+    let ready: Bool
+
+    @MainActor init(_ store: GianClientStore) {
+        switch store.state.navigation.destination {
+        case .conversation: agent = store.state.conversation?.session.agentID
+        case .newChat: agent = store.state.composer.selection.agentID
+        case .home: agent = nil
+        }
+        catalogRevision = store.state.catalogRevision
+        ready = store.mutationsReady
+    }
+}
+
 struct RestorationHintSelection: Equatable {
     let phase: ClientPhase
     let server: ServerAddress?
@@ -31,8 +48,8 @@ struct RestorationHintSelection: Equatable {
 }
 
 /// Composition root: projects store state into presentation values and wires
-/// every UI intent to `GianClientAction` dispatches. Login polling, event
-/// consumption and diagnostics consumption are owned by Core's coordinator
+/// every UI intent to `GianClientAction` dispatches. Event consumption and
+/// diagnostics consumption are owned by Core's coordinator
 /// (GianLiveClient); this view forwards only `.setForeground` and
 /// `.noteLocalConnectivity`, records the nonsecret restoration hint, and
 /// renders sanitized diagnostic/storage disclosures.
@@ -44,7 +61,6 @@ struct AppRootView: View {
     @State private var thumbnails: [String: Image] = [:]
 
     @Environment(\.scenePhase) private var scenePhase
-    @Environment(\.openURL) private var openURL
 
     var body: some View {
         content
@@ -56,6 +72,13 @@ struct AppRootView: View {
             // Agents change.
             .task(id: AgentLogoTrigger(store)) {
                 if store.mutationsReady { _ = await store.dispatch(.loadAgentLogos) }
+            }
+            // The ⋯ options of the Agent in view: (re)read once the Host is
+            // ready, so a conversation opened (or restored) mid-resync still
+            // gets them.
+            .task(id: AgentOptionsTrigger(store)) {
+                let trigger = AgentOptionsTrigger(store)
+                if trigger.ready, let agent = trigger.agent { _ = await store.dispatch(.loadAgentOptions(agent)) }
             }
             .onChange(of: scenePhase) { _, phase in
                 dispatch(.setForeground(phase == .active ? .foreground : .background))
@@ -70,7 +93,6 @@ struct AppRootView: View {
         switch store.state.phase {
         case .ready:
             AdaptiveRoot(
-                accountLogin: store.state.account.login ?? "Account",
                 hosts: StoreProjection.hosts(store.state),
                 directory: StoreProjection.directory(store.state),
                 navigation: store.state.navigation,
@@ -78,7 +100,7 @@ struct AppRootView: View {
                 composer: store.state.composer,
                 workspaces: store.state.workspaces,
                 agents: store.state.agents,
-                openTasks: StoreProjection.directory(store.state).tasks,
+                openTasks: store.state.openTasks.map { TaskGroupItem(id: $0.id, title: $0.title, conversations: []) },
                 mutationsReady: store.mutationsReady,
                 directoryNegotiated: store.state.capabilities.directoryNegotiated,
                 canRetryUncertainCreate: StoreProjection.canRetryUncertainCreate(
@@ -159,8 +181,8 @@ struct AppRootView: View {
                 },
                 onReturnHome: { dispatch(.returnHome) },
                 onSignOut: { dispatch(.logout) },
-                // Confirmed in Settings first; then sign out and continue
-                // setup on the new server at the GitHub step.
+                // Confirmed in Settings first; then sign out and connect to
+                // the new server (Host pairing follows).
                 onChangeServer: { address in
                     Task {
                         await store.dispatch(.logout)
@@ -189,7 +211,7 @@ struct AppRootView: View {
                     onReset: { dispatch(.cancelHostPairing) }
                 )
             )
-        case .signedOut, .serverEntered, .awaitingGitHubDeviceLogin, .awaitingHostPairing:
+        case .signedOut, .serverEntered, .awaitingHostPairing:
             VStack(spacing: 0) {
                 DiagnosticBar(diagnostic: StoreProjection.diagnostic(store.serviceDiagnostic))
                     .padding(.horizontal, GianTheme.Metrics.paddingMedium)
@@ -206,7 +228,7 @@ struct AppRootView: View {
                         .padding(.horizontal, GianTheme.Metrics.paddingLarge)
                 }
                 if store.authorizationInvalidationUnconfirmed {
-                    Text("Durable removal of saved authorization could not be confirmed. Do not treat this device as clean after a restart without signing in again.")
+                    Text("Durable removal of saved authorization could not be confirmed. Do not treat this device as clean after a restart without connecting again.")
                         .font(GianTheme.Typography.caption)
                         .foregroundStyle(GianTheme.Colors.warning)
                         .padding(.horizontal, GianTheme.Metrics.paddingLarge)
@@ -218,9 +240,7 @@ struct AppRootView: View {
                     pendingPairing: store.state.pendingPairing,
                     pairingNotice: StoreProjection.pairingNotice(store.state.pairingOutcome),
                     onSubmitServer: { dispatch(.setServerAddress($0)) },
-                    onStartGitHubLogin: { dispatch(.startGitHubDeviceLogin) },
-                    onCancelGitHubLogin: { dispatch(.cancelGitHubDeviceLogin) },
-                    onOpenVerificationURL: { openURL($0) },
+                    onTrustNewServerIdentity: { dispatch(.forgetServerIdentity) },
                     onPairPayload: { dispatch(.beginHostPairingFromQR($0)) },
                     onRefreshPairing: { dispatch(.refreshHostPairing) },
                     onStartOver: { dispatch(.logout) }
@@ -258,7 +278,7 @@ struct AppRootView: View {
             )
         case .signedOut:
             RestorationHintStore.clear()
-        case .serverEntered, .awaitingGitHubDeviceLogin, .awaitingHostPairing:
+        case .serverEntered, .awaitingHostPairing:
             break
         }
     }

@@ -2,6 +2,9 @@ import Foundation
 import Testing
 @testable import GianCore
 
+/// Remote 1.5: no account sign-in. The Server proves its identity (pinned on
+/// first use), this app keeps a controller identity for it, and Hosts are
+/// paired by key possession plus the Host's confirmation.
 @MainActor
 struct LiveAuthenticationTests {
     @Test func defaultAndInjectedConstructionAreInert() {
@@ -13,24 +16,65 @@ struct LiveAuthenticationTests {
         #expect(secrets.reads == 0)
         #expect(secrets.records.isEmpty)
     }
-    /// Regression: login stored the vault with two separate clock reads, so on
-    /// a real clock authorizationCreatedAt landed after lastVerifiedAt, the
-    /// invalidation barrier threw `integrity`, and every real sign-in surfaced
-    /// as "The sign-in code expired".
-    @Test func loginSucceedsWhenTheClockMovesBetweenReads() async throws {
+
+    @Test func connectingPinsTheServerIdentityWithoutAnyAccount() async throws {
+        let fixture = RemoteFixture()
+        try await fixture.connect()
+        #expect(fixture.account.provider == .controller)
+        #expect(try fixture.secrets.read(fixture.service.pinKey(fixture.server)) != nil)
+        // Connecting again (same Server key) keeps the same controller identity.
+        let first = fixture.account
+        try await fixture.connect()
+        #expect(fixture.account == first)
+        let paths = fixture.transport.requests.compactMap { $0.url?.path }
+        #expect(paths == ["/api/v1/server-identity", "/api/v1/server-identity"])
+        #expect(fixture.transport.requests.allSatisfy { $0.value(forHTTPHeaderField: "x-gian-account-token") == nil })
+    }
+
+    /// Regression for the vault's proof times on a real clock: creation must
+    /// not land after the last verification.
+    @Test func connectingSucceedsWhenTheClockMovesBetweenReads() async throws {
         let fixture = RemoteFixture()
         fixture.clock.advancesOnRead = 0.000_1
-        guard case .started(let challenge) = await fixture.service.startGitHubDeviceLogin(server: fixture.server) else {
-            Issue.record("Login did not start"); return
-        }
-        fixture.clock.instant = fixture.clock.instant.addingTimeInterval(5)
-        let polled = await fixture.service.pollGitHubDeviceLogin(server: fixture.server, loginID: challenge.loginID)
-        guard case .authorized(let identity) = polled else { Issue.record("Expected authorization, got \(polled)"); return }
-        #expect(identity.account == fixture.account)
+        try await fixture.connect()
+        #expect(try fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account) != nil)
     }
-    @Test func signedDeviceFlowAndGrantAreSeparate() async throws {
+
+    @Test func aChangedServerIdentityIsRefusedUntilForgotten() async throws {
         let fixture = RemoteFixture()
-        try await fixture.loginAndClaim()
+        try await fixture.connectAndClaim()
+        fixture.serverKeyChanged = true
+        #expect(await fixture.service.connectServer(server: fixture.server) == .identityChanged)
+        let claim = await fixture.service.claimHostQR(server: fixture.server, account: fixture.account,
+            qr: HostPairingQR(grantNonce: "fictional-qr-nonce"))
+        guard case .failed = claim else { Issue.record("A changed Server must not receive a claim"); return }
+
+        try await fixture.service.forgetServer(fixture.server)
+        let previous = fixture.account
+        try await fixture.connect()
+        #expect(fixture.account != previous, "Forgetting starts a new controller identity")
+    }
+
+    @Test func aForgedOrMismatchedProofIsNotAConnection() async throws {
+        let fixture = RemoteFixture()
+        let original = try #require(fixture.transport.handler)
+        fixture.transport.handler = { request in
+            var response = try await original(request)
+            if request.url?.path == "/api/v1/server-identity", case .object(var body) = try WireValue.decode(response.body) {
+                body["signature"] = .string(RemoteWire.base64(Data(repeating: 7, count: 64)))
+                response = RemoteHTTPResponse(status: 200, body: try WireValue.object(body).encoded())
+            }
+            return response
+        }
+        guard case .failed = await fixture.service.connectServer(server: fixture.server) else {
+            Issue.record("A bad signature must not connect"); return
+        }
+        #expect(try fixture.secrets.read(fixture.service.pinKey(fixture.server)) == nil, "Nothing is pinned from a bad proof")
+    }
+
+    @Test func pairingAndDeviceLoginCarryNoAccountToken() async throws {
+        let fixture = RemoteFixture()
+        try await fixture.connectAndClaim()
         let cached = try #require(try fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account))
         #expect(cached.identity.account == fixture.account)
         #expect(cached.hosts.isEmpty)
@@ -41,73 +85,46 @@ struct LiveAuthenticationTests {
         // A device access-token lease alone must not manufacture cached Host handshake evidence.
         #expect(try fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account)?.hosts.isEmpty == true)
         let paths = fixture.transport.requests.compactMap { $0.url?.path }
-        #expect(paths.contains("/api/v1/account/start"))
-        #expect(!paths.contains { $0.contains("password") || $0.contains("enrollment") })
+        #expect(!paths.contains { $0.contains("/account/") || $0.contains("enrollment") })
+        #expect(fixture.transport.requests.allSatisfy { $0.value(forHTTPHeaderField: "x-gian-account-token") == nil })
+        let claim = try #require(fixture.transport.requests.first { $0.url?.path == "/api/v1/pairings/claim" })
+        #expect(claim.value(forHTTPHeaderField: "Origin") == fixture.server.absoluteString)
     }
-    @Test func transientPollBackoffIsNotDenialOrAuthorization() async throws {
+
+    @Test func signingOutIsLocalAndStartsANewIdentityNextTime() async throws {
         let fixture = RemoteFixture()
-        guard case .started(let challenge) = await fixture.service.startGitHubDeviceLogin(server: fixture.server) else { Issue.record("Missing challenge"); return }
-        fixture.clock.instant = fixture.clock.instant.addingTimeInterval(5)
-        fixture.pollFailure = .server(code: "HOST_OFFLINE", retryAfter: 30)
-        let result = await fixture.service.pollGitHubDeviceLogin(server: fixture.server, loginID: challenge.loginID)
-        #expect(result == .pending(intervalSeconds: 30))
-        #expect(fixture.service.lastFailure == fixture.pollFailure)
-        fixture.clock.instant = challenge.expiresAt
-        #expect(await fixture.service.pollGitHubDeviceLogin(server: fixture.server, loginID: challenge.loginID) == .expired)
-        #expect(try fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account) == nil)
+        try await fixture.connectAndClaim()
+        let requests = fixture.transport.requests.count
+        let previous = fixture.account
+        try await fixture.service.logout(server: fixture.server, account: fixture.account)
+        #expect(fixture.transport.requests.count == requests, "Sign-out makes no Server request")
+        #expect(try fixture.service.loadCachedAuthorization(server: fixture.server, account: previous) == nil)
+        // The Server pin stays; a new controller identity is created.
+        #expect(try fixture.secrets.read(fixture.service.pinKey(fixture.server)) != nil)
+        try await fixture.connect()
+        #expect(fixture.account != previous)
     }
-    @Test func cancellationCannotBeFollowedByAStaleAuthorization() async throws {
+
+    @Test func unreadableAndMalformedKeychainAreNotAbsentCredentials() async throws {
         let fixture = RemoteFixture()
-        guard case .started(let challenge) = await fixture.service.startGitHubDeviceLogin(server: fixture.server) else { Issue.record("Missing challenge"); return }
-        do { try await fixture.service.cancelLogin(server: fixture.server, loginID: challenge.loginID); Issue.record("Canonical cancellation is unsupported") }
-        catch { #expect(error as? RemoteClientError == .unsupported) }
-        fixture.clock.instant = fixture.clock.instant.addingTimeInterval(5)
-        #expect(await fixture.service.pollGitHubDeviceLogin(server: fixture.server, loginID: challenge.loginID) == .expired)
-        #expect(try fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account) == nil)
-    }
-    @Test func accountMismatchFailsBeforePairingAndLogoutIsLocalEvenOffline() async throws {
-        let fixture = RemoteFixture()
-        try await fixture.loginAndClaim()
-        fixture.differentAccount = true
-        let result = await fixture.service.refreshHostPairing(server: fixture.server, account: fixture.account, pairingID: PairingID(rawValue: fixture.pairingID)!)
-        guard case .failed = result else { Issue.record("Cross-account device login must fail"); return }
-        do { try await fixture.service.logout(server: fixture.server, account: fixture.account); Issue.record("Offline logout must not claim server success") } catch {}
-        #expect(try fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account) == nil)
-    }
-    @Test func unreadableAndMalformedKeychainAreNotAbsentCredentials() throws {
-        let fixture = RemoteFixture()
+        try await fixture.connect()
         fixture.secrets.failure = .integrity
         #expect(throws: RemoteClientError.self) { try fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account) }
         fixture.secrets.failure = nil
         try fixture.secrets.write(Data("not-json".utf8), for: fixture.service.activeKey(fixture.server))
         #expect(throws: (any Error).self) { try fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account) }
     }
-    @Test func aCancelledInFlightPollCannotReinstallCredentials() async throws {
-        let fixture = RemoteFixture()
-        guard case .started(let challenge) = await fixture.service.startGitHubDeviceLogin(server: fixture.server) else { Issue.record("Missing challenge"); return }
-        fixture.clock.instant = fixture.clock.instant.addingTimeInterval(5)
-        let gate = RemoteMailbox()
-        let original = try #require(fixture.transport.handler)
-        fixture.transport.handler = { request in
-            if request.url?.path == "/api/v1/account/poll" { _ = try await gate.next() }
-            return try await original(request)
-        }
-        let task = Task { await fixture.service.pollGitHubDeviceLogin(server: fixture.server, loginID: challenge.loginID) }
-        while gate.waiter == nil { await Task.yield() }
-        do { try await fixture.service.cancelLogin(server: fixture.server, loginID: challenge.loginID) } catch {}
-        try gate.push(.null)
-        #expect(await task.value == .expired)
-        #expect(try fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account) == nil)
-    }
+
     @Test func nonHTTPSValidatedInitializerIsStillRejectedByTransportBoundary() async {
         let fixture = RemoteFixture()
         let invalid = ServerAddress(validated: URL(string: "http://fixture.test")!)
-        guard case .failed = await fixture.service.startGitHubDeviceLogin(server: invalid) else { Issue.record("HTTPS is required"); return }
+        guard case .failed = await fixture.service.connectServer(server: invalid) else { Issue.record("HTTPS is required"); return }
         #expect(fixture.transport.requests.isEmpty)
     }
+
     @Test func unconfirmedPairingStopsPollingWithoutInventingGrantExpiry() async throws {
         let fixture = RemoteFixture()
-        try await fixture.loginAndClaim()
+        try await fixture.connectAndClaim()
         fixture.deviceConfirmed = false
         let pairing = PairingID(rawValue: fixture.pairingID)!
         #expect(await fixture.service.refreshHostPairing(server: fixture.server, account: fixture.account, pairingID: pairing)

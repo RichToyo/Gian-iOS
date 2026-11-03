@@ -36,11 +36,10 @@ func fictionalAuthorization(
     account: AccountIdentity = PreviewScript.legacyContract.account,
     server: String = PreviewFixtures.server,
     hosts: [HostSummary] = [PreviewScript.legacyContract.directory.host],
-    expiresAt: Date? = nil
+    verifiedAt: Date? = nil
 ) -> AuthorizedSessionRestoration {
     AuthorizedSessionRestoration(server: ServerAddress(parsing: server)!, serverIdentityFingerprint: "fictional-server-pin",
-        identity: account, accountAuthorizationExpiresAt: expiresAt ?? clock.now().addingTimeInterval(3_600),
-        accountKeyFingerprint: "fictional-account-key", accountLastVerifiedAt: clock.now(),
+        identity: account, accountKeyFingerprint: "fictional-account-key", accountLastVerifiedAt: verifiedAt ?? clock.now(),
         hosts: hosts.map { AuthorizedHostRestoration(host: $0, deviceID: PreviewFixtures.deviceID,
             hostKeyFingerprint: "fictional-host-key-" + $0.id.rawValue, deviceKeyFingerprint: "fictional-device-key",
             lastVerifiedAt: clock.now(), validation: .cached) })
@@ -163,7 +162,7 @@ struct StoreDurabilityTests {
         #expect(service.sendCount == 1)
     }
 
-    @Test func expiredOrLoggedOutEvidenceCannotRevealCachedHistory() async throws {
+    @Test func futureOrLoggedOutEvidenceCannotRevealCachedHistory() async throws {
         let storage = InMemoryGianStorage()
         let clock = ManualGianClock(instant: PreviewFixtures.instant)
         let service = PreviewGianClientService(script: .legacyContract)
@@ -171,8 +170,8 @@ struct StoreDurabilityTests {
         var saved = retainedFixture()
         saved.transcripts[PreviewFixtures.sessionID] = [transcriptItem(id: "private-message", turn: 1, text: "Scoped content")]
         try storage.save(saved, scope: fictionalScope())
-        let expired = fictionalAuthorization(clock: clock, expiresAt: clock.now())
-        #expect(store.restoreAuthorizedSession(authorization: expired) == .rejected(.notAuthorized))
+        let fromTheFuture = fictionalAuthorization(clock: clock, verifiedAt: clock.now().addingTimeInterval(60))
+        #expect(store.restoreAuthorizedSession(authorization: fromTheFuture) == .rejected(.notAuthorized))
         #expect(store.state.directory.tasks.isEmpty)
         let valid = fictionalAuthorization(clock: clock)
         #expect(store.restoreAuthorizedSession(authorization: valid).isApplied)

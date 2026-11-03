@@ -31,8 +31,6 @@ public final class GianClientStore {
     @ObservationIgnored var directoryRequests: [DirectoryCollection: Int] = [:]
     @ObservationIgnored var directoryViews: [DirectoryCollection: StoredDirectoryView] = [:]
     @ObservationIgnored var directoryRefreshPending = false
-    @ObservationIgnored var authorizationExpiresAt: Date?
-    @ObservationIgnored var authorizationExpiryTask: Task<Void, Never>?
     @ObservationIgnored var invalidatedAuthorizations: [DataScope: Date] = [:]
     @ObservationIgnored var serverPins: [ServerAddress: String] = [:]
     @ObservationIgnored var requiresFreshSnapshot = true
@@ -84,7 +82,6 @@ public final class GianClientStore {
 
     @discardableResult
     public func dispatch(_ action: GianClientAction) async -> GianDispatchResult {
-        expireAuthorizationIfNeeded()
         await finishPendingRemoteLogout()
         synchronizeServiceEpoch()
         eventCoordinator?.willDispatch(action)
@@ -98,45 +95,25 @@ public final class GianClientStore {
         switch action {
         case .setServerAddress(let raw):
             let previous = state.server
-            let login = state.account.deviceLogin?.loginID
             let result = setServer(raw)
-            if result.isApplied, previous != state.server, let lifecycle = service as? any GianClientLifecycle {
-                await lifecycle.disconnect()
-                if let previous, let login {
-                    do { try await lifecycle.cancelLogin(server: previous, loginID: login) }
-                    catch { serverOutcomeUnconfirmed = true }
+            guard result.isApplied else { return result }
+            if previous != state.server, let lifecycle = service as? any GianClientLifecycle { await lifecycle.disconnect() }
+            return await connectServer()
+        case .forgetServerIdentity:
+            guard state.phase == .serverEntered, state.account.status == .serverIdentityChanged, let server = state.server else {
+                return reject(.notAuthorized)
+            }
+            if let lifecycle = service as? any GianClientLifecycle {
+                do { try await lifecycle.forgetServer(server) }
+                catch {
+                    state.account = AccountAuthorization(status: .error, failure: (error as? RemoteClientError)?.safeDescription)
+                    return reject(.notAuthorized)
                 }
             }
-            return result
-        case .startGitHubDeviceLogin: return await startLogin()
-        case .pollGitHubDeviceLogin: return await pollLogin()
-        case .cancelGitHubDeviceLogin:
-            let server = state.server
-            let login = state.account.deviceLogin?.loginID
-            let result = cancelLogin()
-            if result.isApplied, let lifecycle = service as? any GianClientLifecycle {
-                let sequence = beginLifecycleOutcome()
-                if let server, let login {
-                    do {
-                        try await lifecycle.cancelLogin(server: server, loginID: login)
-                        finishLifecycleOutcome(sequence, confirmed: true)
-                    } catch { finishLifecycleOutcome(sequence, confirmed: false) }
-                } else { await lifecycle.disconnect() }
-            }
-            return result
+            return await connectServer()
         case .logout:
-            let server = state.server
-            let login = state.account.deviceLogin?.loginID
-            let pendingLogin = state.phase == .awaitingGitHubDeviceLogin || (state.phase == .serverEntered && state.account.status == .pending)
             let result = logout()
             await finishPendingRemoteLogout()
-            if pendingLogin, let lifecycle = service as? any GianClientLifecycle {
-                let sequence = beginLifecycleOutcome()
-                if let server, let login {
-                    do { try await lifecycle.cancelLogin(server: server, loginID: login); finishLifecycleOutcome(sequence, confirmed: true) }
-                    catch { finishLifecycleOutcome(sequence, confirmed: false) }
-                } else { await lifecycle.disconnect() }
-            }
             return result
         case .beginHostPairingFromQR(let payload): return await beginQR(payload)
         case .refreshHostPairing: return await refreshPairing()
@@ -225,11 +202,9 @@ public final class GianClientStore {
             return .applied
         case .openBanner(let id): return await openBanner(id)
         case .noteLocalConnectivity(let connectivity):
-            if connectivity == .unavailable, state.phase == .awaitingGitHubDeviceLogin { epoch += 1 }
             if connectivity == .unavailable, state.phase == .serverEntered, state.account.status == .pending {
                 epoch += 1
                 state.account.status = .error
-                serverOutcomeUnconfirmed = true
             }
             let result = noteConnectivity(connectivity)
             if connectivity == .unavailable, let lifecycle = service as? any GianClientLifecycle { await lifecycle.disconnect() }
@@ -237,10 +212,9 @@ public final class GianClientStore {
         case .setForeground(let presence):
             state.foreground = presence
             if presence == .background {
-                if state.phase == .awaitingGitHubDeviceLogin || (state.phase == .serverEntered && state.account.status == .pending) { epoch += 1 }
                 if state.phase == .serverEntered, state.account.status == .pending {
+                    epoch += 1
                     state.account.status = .error
-                    serverOutcomeUnconfirmed = true
                 }
                 let result = readyScope() != nil ? persistenceResult() : .applied
                 if let lifecycle = service as? any GianClientLifecycle { await lifecycle.disconnect() }
@@ -254,7 +228,6 @@ public final class GianClientStore {
 
     @discardableResult
     public func ingest(_ envelope: InboundEnvelope) -> GianDispatchResult {
-        expireAuthorizationIfNeeded()
         synchronizeServiceEpoch()
         guard let scope = readyScope(), scope == envelope.scope else { return reject(.scopeMismatch) }
         guard envelope.serviceEpoch == expectedServiceEpoch else { return reject(.staleOperation) }
@@ -327,7 +300,6 @@ public final class GianClientStore {
     func readyScope() -> ClientScope? {
         guard state.phase == .ready,
               state.account.status == .signedIn,
-              authorizationExpiresAt.map({ clock.now() < $0 }) ?? true,
               let server = state.server,
               let account = state.account.accountID,
               let host = state.currentHostID
@@ -456,6 +428,7 @@ public final class GianClientStore {
         )
         if state.directory.authority == .negotiatedDirectoryV1 { projectDirectoryMembership() }
         projectDirectoryStatus()
+        state.openTasks = taskRecords.filter { $0.status == .open }.sorted { $0.id.rawValue < $1.id.rawValue }
     }
 
     @discardableResult
@@ -629,112 +602,43 @@ public final class GianClientStore {
         return .applied
     }
 
-    private func startLogin() async -> GianDispatchResult {
-        guard let server = state.server, state.phase == .serverEntered || state.phase == .awaitingGitHubDeviceLogin else {
-            return reject(.notAuthorized)
-        }
+    /// Verifies the Server's identity (pinned on first use) and prepares this
+    /// app's controller identity there. A Server already used on this device
+    /// restores its paired Hosts; otherwise Host pairing comes next.
+    private func connectServer() async -> GianDispatchResult {
+        guard let server = state.server, state.phase == .serverEntered else { return reject(.notAuthorized) }
         epoch += 1
-        state.account.status = .pending
-        state.account.deviceLogin = nil
-        state.phase = .serverEntered
+        state.account = AccountAuthorization(status: .pending)
         let token = epoch
-        let response = await service.startGitHubDeviceLogin(server: server)
-        guard token == epoch else { return reject(.staleOperation) }
+        let response = await service.connectServer(server: server)
+        guard token == epoch, state.server == server else { return reject(.staleOperation) }
         switch response {
-        case .failed:
-            state.account.status = .error
-            state.account.deviceLogin = nil
-            state.phase = .serverEntered
+        case .failed(let message):
+            state.account = AccountAuthorization(status: .error, failure: message)
             return .applied
-        case .started(let challenge):
-            guard GitHubDeviceFlow.isVerificationURI(challenge.verificationURI) else {
-                state.account.status = .error
-                state.account.deviceLogin = nil
-                return reject(.githubVerificationURIMismatch)
-            }
-            let now = clock.now()
-            state.account.status = .pending
-            state.account.deviceLogin = GitHubDeviceLoginState(
-                loginID: challenge.loginID,
-                userCode: challenge.userCode,
-                verificationURI: challenge.verificationURI,
-                expiresAt: challenge.expiresAt,
-                intervalSeconds: challenge.intervalSeconds,
-                nextPollAt: now.addingTimeInterval(TimeInterval(challenge.intervalSeconds))
-            )
-            state.phase = .awaitingGitHubDeviceLogin
-            return .applied
-        }
-    }
-
-    private func pollLogin() async -> GianDispatchResult {
-        guard state.phase == .awaitingGitHubDeviceLogin, let server = state.server, let login = state.account.deviceLogin else {
-            return reject(.loginNotStarted)
-        }
-        let now = clock.now()
-        if now >= login.expiresAt {
-            state.account.status = .expired
-            state.phase = .serverEntered
-            state.account.deviceLogin = nil
-            return .applied
-        }
-        if now < login.nextPollAt { return reject(.loginPollTooSoon) }
-        state.account.deviceLogin?.nextPollAt = now.addingTimeInterval(TimeInterval(max(1, login.intervalSeconds)))
-        let token = epoch
-        let response = await service.pollGitHubDeviceLogin(server: server, loginID: login.loginID)
-        guard token == epoch else { return reject(.staleOperation) }
-        switch response {
-        case .pending(let interval):
-            let bounded = min(60, max(1, interval))
-            state.account.deviceLogin?.intervalSeconds = bounded
-            state.account.deviceLogin?.nextPollAt = clock.now().addingTimeInterval(TimeInterval(bounded))
-            return .applied
-        case .denied:
-            state.account.status = .denied
-            state.account.deviceLogin = nil
-            state.phase = .serverEntered
-            return .applied
-        case .expired:
-            state.account.status = .expired
-            state.account.deviceLogin = nil
-            state.phase = .serverEntered
-            return .applied
-        case .authorized(let identity):
+        case .identityChanged:
+            state.account = AccountAuthorization(status: .serverIdentityChanged)
+            return reject(.serverIdentityChanged)
+        case .connected(let identity):
             if let live = service as? LiveGianClientService {
                 do {
-                    guard let authorization = try live.loadCachedAuthorization(server: server, account: identity.account) else {
-                        state.account = AccountAuthorization(status: .error)
-                        state.phase = .serverEntered
-                        return reject(.notAuthorized)
+                    if let authorization = try live.loadCachedAuthorization(server: server, account: identity.account),
+                       !authorization.hosts.isEmpty {
+                        let result = restoreAuthorizedSession(authorization: authorization)
+                        guard result.isApplied else { return result }
+                        if readyScope() != nil { return await refresh() }
+                        return .applied
                     }
-                    let result = restoreAuthorizedSession(authorization: authorization)
-                    guard result.isApplied else { return result }
-                    if readyScope() != nil { return await refresh() }
-                    return .applied
                 } catch {
-                    state.account = AccountAuthorization(status: .error)
-                    state.phase = .serverEntered
+                    state.account = AccountAuthorization(status: .error, failure: (error as? RemoteClientError)?.safeDescription)
                     return reject(.notAuthorized)
                 }
             }
-            state.account = AccountAuthorization(
-                status: .signedIn,
-                accountID: identity.account,
-                login: identity.login,
-                installationID: identity.installationID
-            )
+            state.account = AccountAuthorization(status: .signedIn, accountID: identity.account,
+                                                 installationID: identity.installationID)
             state.phase = .awaitingHostPairing
             return .applied
         }
-    }
-
-    private func cancelLogin() -> GianDispatchResult {
-        guard state.phase == .awaitingGitHubDeviceLogin || (state.phase == .serverEntered && state.account.status == .pending) else { return reject(.loginNotStarted) }
-        state.account = .signedOut
-        serviceDiagnostic = nil
-        epoch += 1
-        state.phase = .serverEntered
-        return .applied
     }
 
     func logout(invalidateRemote: Bool = true) -> GianDispatchResult {
@@ -776,32 +680,8 @@ public final class GianClientStore {
         directoryRefreshPending = false
         memory.discardCommitted()
         storageLoadFailed = false
-        authorizationExpiresAt = nil
-        authorizationExpiryTask?.cancel()
-        authorizationExpiryTask = nil
         requiresFreshSnapshot = true
         return .applied
-    }
-
-    func expireAuthorizationIfNeeded() {
-        if let expiry = authorizationExpiresAt, clock.now() >= expiry { _ = logout() }
-    }
-
-    func scheduleAuthorizationExpiry() {
-        authorizationExpiryTask?.cancel()
-        guard let expiry = authorizationExpiresAt else { return }
-        let seconds = min(max(0, expiry.timeIntervalSince(clock.now())), 86_400)
-        let scope = accountScope()
-        let installation = state.account.installationID
-        authorizationExpiryTask = Task { @MainActor [weak self] in
-            do { try await Task.sleep(for: .seconds(seconds)) } catch { return }
-            guard let self, self.accountScope() == scope, self.state.account.installationID == installation,
-                  self.authorizationExpiresAt == expiry else { return }
-            self.authorizationExpiryTask = nil
-            self.expireAuthorizationIfNeeded()
-            await self.finishPendingRemoteLogout()
-            if self.authorizationExpiresAt != nil { self.scheduleAuthorizationExpiry() }
-        }
     }
 
     /// Restores only the selected, evidenced Host's local cache. Neither cached
@@ -823,8 +703,7 @@ public final class GianClientStore {
             state.storageError = "Local authorization safety could not be verified."
             return reject(.notAuthorized)
         }
-        guard authorization.accountAuthorizationExpiresAt > now,
-              authorization.accountLastVerifiedAt <= now,
+        guard authorization.accountLastVerifiedAt <= now,
               invalidatedAt.map({ authorization.accountLastVerifiedAt > $0 }) ?? true,
               ServerAddress(parsing: authorization.server.absoluteString) == authorization.server,
               AccountID(provider: identity.account.provider, id: identity.account.id) == identity.account,
@@ -869,11 +748,9 @@ public final class GianClientStore {
         storageLoadFailed = false
         state.server = authorization.server
         state.account = AccountAuthorization(status: .signedIn, accountID: identity.account,
-                                             login: identity.login, installationID: identity.installationID)
+                                             installationID: identity.installationID)
         state.hosts = authorization.hosts.map(\.host)
         state.currentHostID = host
-        authorizationExpiresAt = authorization.accountAuthorizationExpiresAt
-        scheduleAuthorizationExpiry()
         serverPins[authorization.server] = authorization.serverIdentityFingerprint
         requiresFreshSnapshot = true
         state.connection = .offline

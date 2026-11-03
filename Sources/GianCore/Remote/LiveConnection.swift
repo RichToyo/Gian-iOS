@@ -18,6 +18,8 @@ extension LiveGianClientService {
     }
 
     func openConnection(scope: ClientScope, epoch captured: Int) async throws {
+        // Like remote-web: the Server proves its pinned identity before each connection.
+        _ = try await verifyServerIdentity(server: scope.server, epoch: captured)
         let lease = try await authenticateDevice(scope: scope, epoch: captured)
         let ticket = try await http(server: scope.server, path: "/api/v1/ws-tickets", body: .object([
             "protocol": .string(RemoteBaseline.authProtocol), "host_id": .string(scope.host.rawValue),
@@ -132,36 +134,18 @@ extension LiveGianClientService {
         }
     }
 
-    public func cancelLogin(server: ServerAddress, loginID: LoginID) async throws {
-        guard let attempt = loginAttempts[RemoteLoginAttemptKey(server: server, loginID: loginID)] else { throw RemoteClientError.unsupported }
-        do { try cancelLoginLocally(attempt) }
-        catch {
-            diagnosticContinuation.yield(RemoteServiceDiagnostic(server: server, account: attempt.authorization?.account,
-                host: nil, loginID: loginID, epoch: epoch, status: .connectionClosed(note(error))))
-            throw error
-        }
-        // Only enrollment/account/cancel exists, on a SEPARATE server login exchange.
-        // Calling it here would falsely claim that /account/start was cancelled.
-        diagnosticContinuation.yield(RemoteServiceDiagnostic(server: server, account: attempt.authorization?.account,
-            host: nil, loginID: loginID, epoch: epoch, status: .connectionClosed(.unsupported)))
-        throw RemoteClientError.unsupported
-    }
-
+    /// Signing out is local: this app forgets its controller identity and Host
+    /// keys for the Server (the pinned Server identity stays). Hosts keep the
+    /// pairing until it is removed there.
     public func logout(server: ServerAddress, account: AccountID) async throws {
-        login = nil
         disconnectNow()
-        let loaded = Result { try loadVaultForLogout(server: server, account: account) }
+        let loaded = Result { try loadVaultForCleanup(server: server, account: account) }
         try invalidateAccount(server: server, account: account)
-        // Local deletion precedes the remote request, fencing any poll/connect response.
         try secrets.remove(activeKey(server))
         try secrets.remove(installationKey(server))
-        guard let vault = try loaded.get() else { throw RemoteClientError.notAuthorized }
-        try secrets.remove(vaultKey(server: server, account: account, installation: vault.identity.installation, authorizationID: vault.authorizationID))
+        guard let vault = try loaded.get() else { return }
+        try secrets.remove(vaultKey(server: server, account: account, installation: vault.identity.installation))
         try secrets.remove(RemoteSecretKey(server: server, account: account, installation: vault.identity.installation, purpose: "pending-pairing-key"))
-        let response = try await http(server: server, path: "/api/v1/account/logout",
-            body: .object(["protocol": .string(RemoteBaseline.accountProtocol)]), bearer: vault.token)
-        try validateProtocol(response, account: true)
-        guard try response.boolean("ok") else { throw RemoteClientError.invalidPayload }
     }
 
     public func revoke(scope: ClientScope) async throws {

@@ -9,9 +9,9 @@ final class GianUITests: XCTestCase {
         continueAfterFailure = false
     }
 
-    /// Full setup flow against the scripted preview service: server address →
-    /// GitHub device login (scripted authorize) → Host pairing via manual
-    /// payload → home directory with the scripted task and conversation.
+    /// Full setup flow against the scripted preview service: server address
+    /// (its identity is verified; no account sign-in) → Host pairing via
+    /// manual payload → home directory with the scripted task and conversation.
     func testSetupFlowReachesHomeDirectory() throws {
         let app = XCUIApplication()
         app.launchArguments += ["-previewScript", "legacyContract"]
@@ -24,20 +24,11 @@ final class GianUITests: XCTestCase {
         serverField.typeText("https://remote.example.test")
         app.buttons["Continue"].tap()
 
-        // GitHub device login step.
-        let signIn = app.buttons["Continue with GitHub"]
-        XCTAssertTrue(signIn.waitForExistence(timeout: 10))
-        signIn.tap()
-
-        // Device code appears; the coordinator polls and the scripted service
-        // authorizes on the first poll (5s interval in the script).
-        // The code's accessibility label is "GitHub device code ABCD-EFGH".
-        let code = app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'ABCD-EFGH'")).firstMatch
-        XCTAssertTrue(code.waitForExistence(timeout: 10))
-
-        // Pairing step: paste the scripted QR payload manually.
+        // Pairing step straight away: paste the scripted QR payload manually.
         let pairingField = app.textFields["Paste pairing link"]
         XCTAssertTrue(pairingField.waitForExistence(timeout: 30))
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "label CONTAINS[c] 'GitHub'")).firstMatch.exists,
+                       "There is no GitHub sign-in")
         pairingField.tap()
         pairingField.typeText("https://remote.example.test/pair#nonce=abcdefghijklmnop")
         app.buttons["Pair"].tap()

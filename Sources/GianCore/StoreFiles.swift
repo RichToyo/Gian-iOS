@@ -26,7 +26,6 @@ extension GianClientStore {
     /// A Host-issued file reference, never an upload handle or a Host-local path.
     /// Its DTO deliberately has no SHA; the download metadata supplies that.
     public func transcriptFileDescriptor(for id: AttachmentID) -> RemoteFileDescriptor? {
-        expireAuthorizationIfNeeded()
         guard let scope = readyScope() else { return nil }
         let current = (service as? any TranscriptFileProviding)?.fileDescriptor(scope: scope, id: id)
         let retained = verifiedTranscriptDownloads[id].flatMap { $0.scope == scope ? $0.descriptor : nil }

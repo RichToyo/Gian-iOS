@@ -6,7 +6,7 @@ import Testing
 struct DirectorySupersessionTests {
     private func makeFixture() async throws -> (RemoteFixture, FixtureRelaySocket) {
         let fixture = RemoteFixture()
-        try await fixture.loginAndClaim()
+        try await fixture.connectAndClaim()
         let socket = FixtureRelaySocket(fixture)
         socket.holdCatalogReplies = true
         fixture.transport.socket = socket

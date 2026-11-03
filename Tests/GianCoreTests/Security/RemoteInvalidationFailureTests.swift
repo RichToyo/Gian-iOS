@@ -6,7 +6,7 @@ import Testing
 struct RemoteInvalidationFailureTests {
     private func authorized() async throws -> RemoteFixture {
         let fixture = RemoteFixture()
-        try await fixture.loginAndClaim()
+        try await fixture.connectAndClaim()
         fixture.transport.socket = FixtureRelaySocket(fixture)
         guard case .snapshot = await fixture.service.refreshDirectory(scope: fixture.scope) else { throw RemoteClientError.invalidPayload }
         #expect(try fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account)?.hosts.count == 1)
@@ -26,7 +26,7 @@ struct RemoteInvalidationFailureTests {
                 // This process denies restoration, but failed persistence does not
                 // constitute a durable barrier that a future process can observe.
                 #expect(fixture.secrets.records[marker] == nil)
-                #expect(try fixture.service.activeAuthorization(server: fixture.server) != nil)
+                #expect(fixture.secrets.records[fixture.service.activeKey(fixture.server)] != nil)
             } else {
                 #expect(fixture.secrets.records[marker] != nil)
                 let restarted = LiveGianClientService(transport: fixture.transport, secrets: fixture.secrets, authorizationInvalidations: fixture.invalidations, clock: fixture.clock)
@@ -41,7 +41,7 @@ struct RemoteInvalidationFailureTests {
             let marker = fixture.service.tombstoneKey(server: fixture.server, account: fixture.account, host: fixture.scope.host)
             fixture.secrets.mutationFailure = { key, _ in
                 if failMarker { return key == marker ? .transport : nil }
-                return key.purpose.hasPrefix("account-and-grants:") ? .transport : nil
+                return key.purpose == "controller-and-grants" ? .transport : nil
             }
             do { try await fixture.service.revoke(scope: fixture.scope); Issue.record("Secure revocation cleanup was not confirmed") }
             catch { #expect(error as? RemoteClientError == .transport) }

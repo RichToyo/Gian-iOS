@@ -332,8 +332,6 @@ struct BannerPresentation: Equatable, Identifiable, Sendable {
 
 enum DiagnosticPresentation: Equatable, Sendable {
     case none
-    /// Login challenge/backoff in progress; not a denial.
-    case retryingLogin(message: String, retryAt: Date, expiresAt: Date)
     case connectionClosed(message: String)
     case resyncRequired(reason: String)
 }

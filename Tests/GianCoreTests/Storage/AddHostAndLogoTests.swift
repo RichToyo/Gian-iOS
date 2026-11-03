@@ -65,6 +65,22 @@ struct AddHostAndLogoTests {
         #expect(store.state.navigation.destination == .home)
     }
 
+    /// New chat lists every open Task, including one with no conversations
+    /// yet (Home's sections can leave it out).
+    @Test func newChatOffersOpenTasksWithoutConversations() async throws {
+        let service = ControlledService()
+        let fresh = TaskRecord(id: PreviewFixtures.id("task-fresh", TaskID.self), title: "iOS live test", status: .open,
+                               updatedAt: PreviewFixtures.instant)
+        let done = TaskRecord(id: PreviewFixtures.id("task-done", TaskID.self), title: "Shipped", status: .completed,
+                              updatedAt: PreviewFixtures.instant)
+        service.extraTasks = [fresh, done]
+        let clock = ManualGianClock(instant: PreviewFixtures.instant)
+        let store = GianClientStore(service: service, clock: clock, ids: SequenceIDGenerator(), storage: InMemoryGianStorage())
+        _ = try await signIn(store, clock: clock)
+        #expect(store.state.openTasks.contains(fresh))
+        #expect(!store.state.openTasks.contains(done))
+    }
+
     @Test func cancelDropsALateConfirmation() async throws {
         let (store, service) = try await harness()
         let harbor = try #require(store.state.currentHostID)

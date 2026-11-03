@@ -26,24 +26,23 @@ public struct AuthorizedHostRestoration: Sendable, Equatable {
     }
 }
 
-/// Account authorization expiry is independent of access-token and socket-ticket
-/// leases. The protocol does not define an expiry for the paired Host grant.
+/// This app's controller identity on a Server, with its paired Hosts. Access
+/// tokens and socket tickets are separate, short leases; the protocol defines
+/// no expiry for a paired Host grant.
 public struct AuthorizedSessionRestoration: Sendable, Equatable {
     public let server: ServerAddress
     public let serverIdentityFingerprint: String
     public let identity: AccountIdentity
-    public let accountAuthorizationExpiresAt: Date
     public let accountKeyFingerprint: String
+    /// When this app last verified the Server's identity for this controller.
     public let accountLastVerifiedAt: Date
     public let hosts: [AuthorizedHostRestoration]
 
     init(server: ServerAddress, serverIdentityFingerprint: String, identity: AccountIdentity,
-         accountAuthorizationExpiresAt: Date, accountKeyFingerprint: String,
-         accountLastVerifiedAt: Date, hosts: [AuthorizedHostRestoration]) {
+         accountKeyFingerprint: String, accountLastVerifiedAt: Date, hosts: [AuthorizedHostRestoration]) {
         self.server = server
         self.serverIdentityFingerprint = serverIdentityFingerprint
         self.identity = identity
-        self.accountAuthorizationExpiresAt = accountAuthorizationExpiresAt
         self.accountKeyFingerprint = accountKeyFingerprint
         self.accountLastVerifiedAt = accountLastVerifiedAt
         self.hosts = hosts

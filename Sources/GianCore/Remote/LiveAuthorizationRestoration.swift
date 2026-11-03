@@ -6,7 +6,7 @@ extension LiveGianClientService {
     }
 
     public func revalidateAuthorization(scope: ClientScope) async throws -> AuthorizedSessionRestoration {
-        // Even an existing open socket is not an evergreen account/grant verification.
+        // Even an existing open socket is not an evergreen grant verification.
         disconnectNow()
         try await connect(scope: scope)
         guard let evidence = try restoration(server: scope.server, account: scope.account, onlineHost: scope.host),
@@ -18,13 +18,12 @@ extension LiveGianClientService {
 
     private func restoration(server: ServerAddress, account: AccountID, onlineHost: HostID?) throws -> AuthorizedSessionRestoration? {
         guard let vault = try loadVault(server: server, account: account) else { return nil }
-        let pinKey = RemoteSecretKey(server: server, account: nil, installation: "server-bootstrap", purpose: "server-fingerprint")
-        guard let pin = try secrets.read(pinKey), let identityData = try secrets.read(installationKey(server)) else { return nil }
+        guard let pin = try secrets.read(pinKey(server)), let identityData = try secrets.read(installationKey(server)) else { return nil }
         let identity = try JSONDecoder().decode(RemoteSigningIdentity.self, from: identityData)
         guard pin == Data(vault.fingerprint.utf8), identity.installation == vault.identity.installation,
               try identity.publicKey == vault.identity.publicKey,
               let installation = InstallationID(rawValue: identity.installation),
-              vault.lastVerifiedAt <= clock.now(), !vault.token.isEmpty else { throw RemoteClientError.integrity }
+              vault.lastVerifiedAt <= clock.now() else { throw RemoteClientError.integrity }
         // Sign a local challenge to prove the stored private key is actually usable.
         let proof = WireValue.object(["type": .string("gian.ios.local_key_check/1"), "installation_id": .string(identity.installation)])
         try identity.publicKey.verify(signature: identity.sign(proof), payload: proof)
@@ -45,7 +44,7 @@ extension LiveGianClientService {
                 validation: online ? .online : .cached))
         }
         return AuthorizedSessionRestoration(server: server, serverIdentityFingerprint: vault.fingerprint,
-            identity: AccountIdentity(account: account, login: vault.login, installationID: installation), accountAuthorizationExpiresAt: vault.expiresAt,
+            identity: AccountIdentity(account: account, installationID: installation),
             accountKeyFingerprint: vault.keyFingerprint, accountLastVerifiedAt: vault.lastVerifiedAt, hosts: hosts)
     }
 }

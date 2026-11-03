@@ -46,8 +46,7 @@ struct GlobalToolbarActions: ToolbarContent {
                 Button("New chat", systemImage: "square.and.pencil", action: onNewChat)
                     .accessibilityLabel("Start a new chat")
             }
-            // A symbol, not the avatar view: bars render custom icons blank.
-            Button("Settings", systemImage: "person.crop.circle", action: onSettings)
+            Button("Settings", systemImage: "gearshape", action: onSettings)
         }
         .highVisibilityPriority()
     }

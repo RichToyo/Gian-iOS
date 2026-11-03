@@ -18,17 +18,6 @@ enum AttachmentRules {
     }
 }
 
-enum GitHubDeviceFlow {
-    static func isVerificationURI(_ url: URL) -> Bool {
-        url.scheme == "https"
-            && url.host?.lowercased() == "github.com"
-            && url.path == "/login/device"
-            && url.query == nil
-            && url.user == nil
-            && url.password == nil
-    }
-}
-
 enum PairingQR {
     private static let noncePattern = #"^[-_A-Za-z0-9]{16,256}$"#
     private static let blockedNames: Set<String> = [
