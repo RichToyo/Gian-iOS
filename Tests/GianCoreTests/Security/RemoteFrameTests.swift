@@ -22,8 +22,9 @@ struct RemoteFrameTests {
                 "connection_id": .string(crypto), "direction": .string("host_to_device"), "transport_sequence": .int(sequence)]).encoded()
             let box = try AES.GCM.seal(Data("{\"type\":\"fixture\"}".utf8), using: bindingKey,
                 nonce: RemoteCryptoChannel.nonce(connection: crypto, direction: "host_to_device", sequence: sequence), authenticating: aad)
-            var data = box.ciphertext + box.tag
-            if tamper { data[0] ^= 1 }
+            // `ciphertext` is a slice of the combined box, so rebase before indexing from 0.
+            var data = Data(box.ciphertext + box.tag)
+            if tamper { data[data.startIndex] ^= 1 }
             return .object(["host_id": .string(host), "device_id": .string(device), "route_id": .string(device), "transport_sequence": .int(sequence), "ciphertext": .string(RemoteWire.base64(data))])
         }
         func boundChannel() throws -> RemoteCryptoChannel {

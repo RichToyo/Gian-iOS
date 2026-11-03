@@ -2,48 +2,8 @@ import SwiftUI
 
 /// Translation controls bound to the contract's per-session translation state.
 /// All mutations dispatch typed actions; the Host owns model settings and
-/// translation execution.
-
-/// Session-level automatic-translation toggle with the language pair.
-/// Unconfigured/unsupported capabilities render honest hints and stay inert.
-struct TranslationToggle: View {
-    let state: SessionTranslationPresentation
-    var onToggleAutomatic: (Bool) -> Void
-
-    var body: some View {
-        switch state.capability {
-        case .configured:
-            Toggle(isOn: Binding(
-                get: { state.isAutomatic },
-                set: onToggleAutomatic
-            )) {
-                Label(
-                    "\(state.sendingLanguage) ⇄ \(state.readingLanguage)",
-                    systemImage: "translate"
-                )
-                .font(GianTheme.Typography.caption)
-            }
-            .toggleStyle(.switch)
-            .controlSize(.mini)
-            .accessibilityLabel("Automatic translation")
-            if !state.notice.isEmpty {
-                Text(state.notice)
-                    .font(GianTheme.Typography.caption)
-                    .foregroundStyle(GianTheme.Colors.secondaryLabel)
-            }
-        case .unconfigured:
-            hint(icon: "translate", text: "Translation is not configured on this Host.")
-        case .unsupported:
-            hint(icon: "exclamationmark.triangle", text: "This Host does not support conversation translation.")
-        }
-    }
-
-    private func hint(icon: String, text: String) -> some View {
-        Label(text, systemImage: icon)
-            .font(GianTheme.Typography.caption)
-            .foregroundStyle(GianTheme.Colors.secondaryLabel)
-    }
-}
+/// translation execution. The automatic-translation toggle lives in the
+/// composer's ⋯ menu (`ComposerMoreMenu`).
 
 /// Per-message reading-translation state row: progress with cancel, failure
 /// with explicit retry, and an honest uncertain state that never re-requests

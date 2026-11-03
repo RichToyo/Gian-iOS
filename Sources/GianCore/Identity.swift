@@ -212,7 +212,7 @@ public struct ClientScope: Hashable, Sendable {
     public var data: DataScope { DataScope(server: server, account: account) }
 }
 
-public enum RejectionCode: String, Sendable, Equatable {
+public enum RejectionCode: String, Sendable, Equatable, Error {
     case invalidServerAddress
     case githubVerificationURIMismatch
     case loginNotStarted

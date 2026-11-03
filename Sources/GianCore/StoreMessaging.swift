@@ -556,7 +556,9 @@ extension GianClientStore {
         intent.createDispatched = true
         intent.stage = .create
         let request = SessionCreateRequest(commandID: creationID, catalogRevision: state.catalogRevision,
-            workspaceID: workspaceID, agentID: agentID, taskID: state.composer.selection.taskID, model: state.composer.selection.model)
+            workspaceID: workspaceID, agentID: agentID, taskID: state.composer.selection.taskID, model: state.composer.selection.model,
+            thinking: state.composer.selection.thinking, serviceTier: newChatServiceTier(agentID: agentID))
+        let approvalMode = state.composer.selection.approvalMode
         intent.createRequest = request
         state.composer.send = .creating(intent)
         guard persist() else {
@@ -589,6 +591,8 @@ extension GianClientStore {
             }
             bind(session, intent: &intent)
             draft = state.composer.draft
+            await applyNewChatApproval(approvalMode, to: session, scope: scope)
+            guard responseIsCurrent(token), navigation == navigationEpoch else { return reject(.staleOperation) }
             return nil
         default:
             state.composer.send = .uncertain(intent)

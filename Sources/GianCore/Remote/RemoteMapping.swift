@@ -18,12 +18,59 @@ enum RemoteMapping {
         let agent = value["agent"]
         let id: SessionID = try value.scoped("id")
         let task: TaskID? = value["task_id"].isNull ? nil : try value.scoped("task_id")
-        return SessionRecord(id: id, hostID: host, title: try value.optionalString("name", maximum: 256) ?? "Untitled",
+        var record = SessionRecord(id: id, hostID: host, title: try value.optionalString("name", maximum: 256) ?? "Untitled",
             revision: try value.string("revision"), taskID: task, workspaceID: try value.scoped("workspace_id"),
             agentID: try agent.scoped("id"), agentName: try agent.string("name", maximum: 256), pluginID: try agent.string("proxy", maximum: 256),
             status: try enumeration(value, "status"), unread: value["unread"].isNull ? false : try value.boolean("unread"),
             // RemoteSession has no actual last-message/execution timestamp. Do not reinterpret updated_at as activity.
             updatedAt: try date(value.string("updated_at")))
+        record.model = try value.optionalString("model", maximum: 256)
+        record.thinking = try value.optionalString("thinking", maximum: 256)
+        record.serviceTier = try value.optionalString("service_tier", maximum: 256)
+        record.approvalMode = try value.optionalString("approval_mode", maximum: 256)
+        return record
+    }
+
+    /// `catalog.agent`: `specialCatalogs` names the option ids for thinking,
+    /// fast and approval; each option's string choices become menu entries.
+    /// Fast's `enabledWhen` on the model option limits it to those models.
+    static func agentOptions(_ value: WireValue) throws -> AgentConversationOptions {
+        let options = try value.array("configOptions", maximum: 128)
+        func option(_ id: String?) throws -> WireValue? {
+            guard let id else { return nil }
+            return try options.first { try $0.string("id", maximum: 256) == id }
+        }
+        func choices(_ option: WireValue?) throws -> [AgentOptionChoice] {
+            guard let option, !option["choices"].isNull else { return [] }
+            return try option.array("choices").compactMap { choice in
+                guard case .string(let raw) = choice["value"], !raw.isEmpty, raw.utf16.count <= 256 else { return nil }
+                return AgentOptionChoice(value: raw, label: try choice.string("displayName", maximum: 256))
+            }
+        }
+        let special = value["specialCatalogs"]
+        let modelOptionID = try special.optionalString("model", maximum: 256)
+        let fastOption = try option(special.optionalString("fast", maximum: 256))
+        var fastModels: Set<String>?
+        if let fastOption, !fastOption["enabledWhen"].isNull, let modelOptionID {
+            for condition in try fastOption.array("enabledWhen", maximum: 128) where try condition.string("optionId", maximum: 256) == modelOptionID {
+                let models = try condition.array("oneOf").compactMap { value -> String? in
+                    if case .string(let model) = value { return model }
+                    return nil
+                }
+                fastModels = (fastModels ?? []).union(models)
+            }
+        }
+        let approvalOption = try option(special.optionalString("approvalMode", maximum: 256))
+        var approvalDefault: String?
+        if let approvalOption, case .string(let value) = approvalOption["defaultValue"] { approvalDefault = value }
+        return AgentConversationOptions(
+            catalogRevision: try value.optionalString("catalogRevision", maximum: 256),
+            thinking: try choices(option(special.optionalString("thinking", maximum: 256))),
+            approval: try choices(approvalOption),
+            approvalDefault: approvalDefault,
+            supportsFast: fastOption != nil,
+            fastModels: fastModels
+        )
     }
     static func interaction(_ value: WireValue) throws -> InteractionRecord {
         let presentation = value["presentation"]
@@ -64,7 +111,7 @@ enum RemoteMapping {
             targetLanguage: try value.string("target_language", maximum: 256), presentableText: presentable, textLength: length,
             textSHA256: hash, sourceSHA256: sourceHash, integrity: integrity)
     }
-    static func validateHash(_ hash: String) throws {
+    nonisolated static func validateHash(_ hash: String) throws {
         guard hash.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else { throw RemoteClientError.invalidPayload }
     }
     static func sentTranslation(_ value: WireValue) throws -> SentTranslation {

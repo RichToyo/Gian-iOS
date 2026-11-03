@@ -23,11 +23,82 @@ public protocol GianClientServicing: AnyObject {
     func downloadAttachment(scope: ClientScope, request: AttachmentDownloadRequest) async -> AttachmentTransferResponse
     func pageTranscript(scope: ClientScope, sessionID: SessionID, cursor: String?) async -> TranscriptPageResponse
     func searchSessions(scope: ClientScope, query: String) async -> SearchResponse
+    func updateSession(scope: ClientScope, request: SessionUpdateRequest) async -> SessionUpdateResponse
+    func agentOptions(scope: ClientScope, request: AgentOptionsRequest) async -> AgentOptionsResponse
+    func agentLogo(scope: ClientScope, pluginID: String, variant: AgentLogoVariant) async -> AgentLogoResponse
 }
 
 extension GianClientServicing {
     /// Existing services remain explicitly unsupported, never a fabricated page.
     public func listDirectory(scope: ClientScope, request: DirectoryPageRequest) async -> DirectoryPageResponse { .unsupported }
+    public func updateSession(scope: ClientScope, request: SessionUpdateRequest) async -> SessionUpdateResponse { .unsupported }
+    public func agentOptions(scope: ClientScope, request: AgentOptionsRequest) async -> AgentOptionsResponse { .unavailable }
+    public func agentLogo(scope: ClientScope, pluginID: String, variant: AgentLogoVariant) async -> AgentLogoResponse { .unsupported }
+}
+
+/// One conversation setting change. The Host accepts these mid-run and
+/// applies them from the next turn; nil resets to the Agent default.
+public enum SessionSettingChange: Sendable, Equatable {
+    case model(String?)
+    case thinking(String?)
+    case fast(Bool)
+    case approvalMode(String?)
+}
+
+public struct SessionUpdateRequest: Sendable, Equatable {
+    public var commandID: CommandID
+    public var sessionID: SessionID
+    /// The Host rejects a stale revision (`PRECONDITION_FAILED`).
+    public var sessionRevision: String
+    public var change: SessionSettingChange
+
+    public init(commandID: CommandID, sessionID: SessionID, sessionRevision: String, change: SessionSettingChange) {
+        self.commandID = commandID
+        self.sessionID = sessionID
+        self.sessionRevision = sessionRevision
+        self.change = change
+    }
+}
+
+public enum SessionUpdateResponse: Sendable, Equatable {
+    /// The Host's record after the change, carrying the new revision.
+    case updated(SessionRecord)
+    /// Definitively not applied (stale revision, value not offered, …).
+    case rejected(message: String)
+    /// The reply was lost; refresh before trusting either value.
+    case unknownOutcome
+    case unsupported
+}
+
+public struct AgentOptionsRequest: Sendable, Equatable {
+    public var agentID: AgentID
+    public var catalogRevision: String?
+
+    public init(agentID: AgentID, catalogRevision: String?) {
+        self.agentID = agentID
+        self.catalogRevision = catalogRevision
+    }
+}
+
+public enum AgentOptionsResponse: Sendable, Equatable {
+    case options(AgentConversationOptions)
+    case unavailable
+    case failed(String)
+}
+
+/// The Agent's own logo comes in a variant per appearance.
+public enum AgentLogoVariant: String, Sendable, Equatable, Hashable, CaseIterable {
+    case light, dark
+}
+
+public enum AgentLogoResponse: Sendable, Equatable {
+    /// PNG or WebP bytes, checked against the Host's digest.
+    case logo(Data)
+    /// The Host has no logo for this Agent.
+    case notFound
+    /// The Host predates `proxy.logo`.
+    case unsupported
+    case failed(String)
 }
 
 public struct HostPairingQR: Sendable, Equatable {
@@ -178,6 +249,9 @@ public struct SessionCreateRequest: Codable, Sendable, Equatable {
     public var agentID: AgentID
     public var taskID: TaskID?
     public var model: String?
+    public var thinking: String?
+    /// `fast`, or nil for the standard tier (only Agents offering Fast).
+    public var serviceTier: String?
 
     public init(
         commandID: CommandID,
@@ -185,7 +259,9 @@ public struct SessionCreateRequest: Codable, Sendable, Equatable {
         workspaceID: WorkspaceID,
         agentID: AgentID,
         taskID: TaskID?,
-        model: String?
+        model: String?,
+        thinking: String? = nil,
+        serviceTier: String? = nil
     ) {
         self.commandID = commandID
         self.catalogRevision = catalogRevision
@@ -193,6 +269,8 @@ public struct SessionCreateRequest: Codable, Sendable, Equatable {
         self.agentID = agentID
         self.taskID = taskID
         self.model = model
+        self.thinking = thinking
+        self.serviceTier = serviceTier
     }
 }
 

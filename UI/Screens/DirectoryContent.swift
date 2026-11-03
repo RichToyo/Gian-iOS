@@ -10,6 +10,10 @@ struct DirectoryContent: View {
     var onSelectConversation: (SessionID) -> Void
     var onLoadMore: (DirectoryCollection) -> Void = { _ in }
     var onRefresh: (DirectoryCollection) -> Void = { _ in }
+    /// Awaited by pull-to-refresh so the spinner lasts until the read ends.
+    var onPullToRefresh: (DirectoryCollection) async -> Void = { _ in }
+    /// The Host connection can serve reads; a never-loaded list waits for it.
+    var canLoad: Bool = true
 
     @State private var collapsedGroups: Set<String> = []
 
@@ -39,7 +43,34 @@ struct DirectoryContent: View {
             }
             .padding(.vertical, GianTheme.Metrics.paddingSmall)
         }
-        .background(GianTheme.Colors.background)
+        .refreshable {
+            await onPullToRefresh(currentCollection)
+        }
+        .task(id: AutoLoad(view: directory.view, canLoad: canLoad)) {
+            // A never-loaded view loads on first sight (or as soon as a just
+            // switched-to Host connects) instead of asking for a manual
+            // refresh. Later reads stay user-initiated.
+            if canLoad, currentPage.phase == .idle, currentIsEmpty {
+                onRefresh(currentCollection)
+            }
+        }
+    }
+
+    private struct AutoLoad: Equatable {
+        let view: DirectoryView
+        let canLoad: Bool
+    }
+
+    private var currentCollection: DirectoryCollection {
+        directory.view == .tasks ? .tasks : .repos
+    }
+
+    private var currentPage: DirectoryPageStatus {
+        directory.view == .tasks ? directory.tasksPage : directory.reposPage
+    }
+
+    private var currentIsEmpty: Bool {
+        directory.view == .tasks ? directory.tasks.isEmpty : directory.repos.isEmpty
     }
 
     @ViewBuilder
@@ -74,6 +105,7 @@ struct DirectoryContent: View {
                         ConversationRow(
                             item: conversation,
                             isSelected: conversation.id == selectedConversationID,
+                            showsRepo: collection != .repos,
                             onSelect: { onSelectConversation(conversation.id) }
                         )
                     }
@@ -127,14 +159,14 @@ struct DirectoryPageStatusView: View {
             case .idle:
                 if isEmpty {
                     message(
-                        "Directory not loaded",
-                        detail: "Refresh to request the current directory page.",
+                        "Not loaded yet",
+                        detail: nil,
                         systemImage: "arrow.clockwise"
                     )
+                    refreshButton("Load")
                 } else if page.isStale {
                     staleMessage
                 }
-                refreshButton("Refresh")
             case .loading:
                 HStack(spacing: GianTheme.Metrics.paddingSmall) {
                     ProgressView().controlSize(.small)
@@ -165,13 +197,13 @@ struct DirectoryPageStatusView: View {
                         systemImage: "exclamationmark.circle",
                         tint: GianTheme.Colors.warning
                     )
+                    refreshButton("Refresh")
                 }
-                refreshButton("Refresh")
             case .complete:
                 if isEmpty {
                     message(emptyTitle, detail: emptyDescription, systemImage: "tray")
+                    refreshButton("Refresh")
                 }
-                refreshButton("Refresh")
             case .cursorInvalid:
                 if !isEmpty && page.isStale { staleMessage }
                 message(
@@ -224,13 +256,14 @@ struct DirectoryPageStatusView: View {
         collection == .search ? "No matches loaded yet" : "No rows loaded yet"
     }
 
+    /// Cached rows are normal after launch or reconnect, so this is a quiet
+    /// caption, not a warning. Refresh lives in pull-to-refresh and the list
+    /// menu; no buttons sit below the list.
     private var staleMessage: some View {
-        message(
-            "Saved rows may be out of date",
-            detail: nil,
-            systemImage: "clock",
-            tint: GianTheme.Colors.warning
-        )
+        Label("Saved list · pull to refresh", systemImage: "clock")
+            .font(GianTheme.Typography.caption)
+            .foregroundStyle(GianTheme.Colors.secondaryLabel)
+            .accessibilityElement(children: .combine)
     }
 
     private func message(
@@ -302,7 +335,7 @@ struct SearchScreen: View {
                     ContentUnavailableView(
                         "Search conversations",
                         systemImage: "magnifyingglass",
-                        description: Text("Find older authorized conversations by title, repository, or message text.")
+                        description: Text("Find conversations by title, repository, or message.")
                     )
                 } else {
                     ScrollView {

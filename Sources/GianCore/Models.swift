@@ -84,6 +84,52 @@ public struct AgentRecord: Sendable, Equatable, Identifiable {
     }
 }
 
+/// One selectable value of an Agent option, as the Host labels it.
+public struct AgentOptionChoice: Codable, Sendable, Equatable, Hashable {
+    public var value: String
+    public var label: String
+
+    public init(value: String, label: String) {
+        self.value = value
+        self.label = label
+    }
+}
+
+/// Conversation options an Agent exposes through `catalog.agent`. Empty
+/// choices mean the Agent does not offer that option (e.g. Fast outside
+/// Codex, or anything on Agents configured natively).
+public struct AgentConversationOptions: Codable, Sendable, Equatable {
+    public var catalogRevision: String?
+    public var thinking: [AgentOptionChoice]
+    public var approval: [AgentOptionChoice]
+    public var approvalDefault: String?
+    public var supportsFast: Bool
+    /// Models Fast is limited to; nil means every model.
+    public var fastModels: Set<String>?
+
+    public init(
+        catalogRevision: String? = nil,
+        thinking: [AgentOptionChoice] = [],
+        approval: [AgentOptionChoice] = [],
+        approvalDefault: String? = nil,
+        supportsFast: Bool = false,
+        fastModels: Set<String>? = nil
+    ) {
+        self.catalogRevision = catalogRevision
+        self.thinking = thinking
+        self.approval = approval
+        self.approvalDefault = approvalDefault
+        self.supportsFast = supportsFast
+        self.fastModels = fastModels
+    }
+
+    public func fastAvailable(forModel model: String?) -> Bool {
+        guard supportsFast else { return false }
+        guard let fastModels else { return true }
+        return model.map(fastModels.contains) ?? false
+    }
+}
+
 public struct AgentModelRecord: Codable, Sendable, Equatable, Identifiable {
     public var id: String
     public var label: String
@@ -132,6 +178,13 @@ public struct SessionRecord: Sendable, Equatable, Identifiable {
     public var activityIsMessageOrExecution: Bool
     public var updatedAt: Date
     public var completedAt: String?
+    /// Settings the Host reports for the conversation; nil means the Agent's
+    /// default. `session.update` changes them and they apply from the next turn.
+    public var model: String?
+    public var thinking: String?
+    /// `fast`, or nil for the standard tier.
+    public var serviceTier: String?
+    public var approvalMode: String?
 
     public init(
         id: SessionID,

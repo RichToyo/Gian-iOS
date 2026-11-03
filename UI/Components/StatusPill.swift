@@ -1,29 +1,33 @@
 import SwiftUI
 
-/// Conversation state badge: Working (spinner), Waiting (amber), Failed (red).
-/// Idle rows show no badge, matching the design board.
+/// Conversation state pill: Working (tint, with spinner), Waiting (amber),
+/// Failed (red). Idle rows show no pill.
 struct StatusPill: View {
     @Environment(\.colorScheme) private var colorScheme
     let badge: StatusBadge
 
     var body: some View {
         switch badge {
-        case .working:
-            ProgressView()
-                .controlSize(.small)
-                .tint(GianTheme.Colors.tint)
-                .gianHitTarget()
-                .accessibilityLabel("Working")
-        case .waiting, .failed:
-            Text(badge.label)
-                .font(GianTheme.Typography.badge)
-                .foregroundStyle(badgeColor)
-                .padding(.horizontal, GianTheme.Metrics.paddingSmall)
-                .padding(.vertical, 4)
-                .background(
-                    GianTheme.Colors.statusTint(badgeColor, scheme: colorScheme),
-                    in: Capsule()
-                )
+        case .working, .waiting, .failed:
+            HStack(spacing: 4) {
+                if badge == .working {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .tint(badgeColor)
+                }
+                Text(badge.label)
+                    .lineLimit(1)
+                    .fixedSize()
+            }
+            .font(GianTheme.Typography.badge)
+            .foregroundStyle(badgeColor)
+            .padding(.horizontal, GianTheme.Metrics.paddingSmall)
+            .padding(.vertical, 4)
+            .background(
+                GianTheme.Colors.statusTint(badgeColor, scheme: colorScheme),
+                in: Capsule()
+            )
+            .accessibilityElement(children: .combine)
         case .idle:
             EmptyView()
         }
@@ -31,6 +35,7 @@ struct StatusPill: View {
 
     private var badgeColor: Color {
         switch badge {
+        case .working: GianTheme.Colors.tint
         case .waiting: GianTheme.Colors.warning
         case .failed: GianTheme.Colors.failure
         default: GianTheme.Colors.secondaryLabel

@@ -1,14 +1,14 @@
 import SwiftUI
 import GianCore
 
-/// Main chat screen. Header shows the conversation title and Host only, with
-/// a compact-screen Back control. The translation toggle lives near the
-/// composer. Banner and connectivity share the non-colliding TopStatusStack.
-/// All edits and operations dispatch typed `GianClientAction`s via closures.
+/// Main chat screen. The bar centers the conversation title over the current
+/// Host (status dot + name), with Back on compact screens. Translation lives
+/// in the composer's ⋯ menu. Banner and connectivity share the non-colliding
+/// TopStatusStack. All edits and operations dispatch typed `GianClientAction`s
+/// via closures.
 struct ChatScreen: View {
     let conversation: ActiveConversationPresentation
     let composer: ComposerProjection
-    var showsBack: Bool = true
     /// Authoritative mutation gate from the store; controls stay editable for
     /// drafts, but remote actions (send/interaction/translation/download) are
     /// disabled until catch-up completes.
@@ -17,7 +17,6 @@ struct ChatScreen: View {
     /// UI-local thumbnails captured at attachment pick time.
     var thumbnail: (AttachmentID) -> Image? = { _ in nil }
 
-    var onBack: () -> Void = {}
     var onBannerTap: (BannerID) -> Void = { _ in }
     var onBannerDismiss: (BannerID) -> Void = { _ in }
     var onToggleAutomaticTranslation: (Bool) -> Void = { _ in }
@@ -40,67 +39,93 @@ struct ChatScreen: View {
     var attachmentData: (AttachmentID) -> Data? = { _ in nil }
     var attachmentDescriptorName: (AttachmentID) -> String = { _ in "Attachment" }
     var attachmentPicker: AttachmentPickerButton
+    /// Options for the composer's ⋯ (model, thinking, fast, approval).
+    var settings: ConversationSettingsPresentation? = nil
+    var onSelectModel: (String?) -> Void = { _ in }
+    var onSelectThinking: (String?) -> Void = { _ in }
+    var onSetFast: (Bool) -> Void = { _ in }
+    var onSelectApproval: (String?) -> Void = { _ in }
+    /// Reads the Agent's `catalog.agent` options when the conversation opens.
+    var onLoadOptions: () -> Void = {}
+    /// Global actions stay in the bar inside a conversation.
+    var onOpenNewChat: () -> Void = {}
+    var onOpenSettings: () -> Void = {}
+    /// The current Host, shown under the title.
+    var host: HostItem? = nil
 
     @State private var previewedAttachment: (id: AttachmentID, name: String, data: Data)?
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            ZStack(alignment: .top) {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        if conversation.hasOlderPages {
-                            Button("Load earlier messages", action: onPageOlder)
-                                .font(GianTheme.Typography.caption)
-                                .foregroundStyle(GianTheme.Colors.tint)
-                                .gianHitTarget()
-                                .frame(maxWidth: .infinity)
-                                .padding(.top, GianTheme.Metrics.paddingSmall)
-                        }
-                        TranscriptView(
-                            rows: conversation.rows,
-                            translationEnabled: mutationsReady
-                                && conversation.translation?.capability == .configured,
-                            onRespondToInteraction: mutationsReady ? onRespondToInteraction : { _, _, _ in },
-                            onRequestTranslation: onRequestTranslation,
-                            onCancelTranslation: { onCancelReadingTranslation($0) },
-                            onRetryTranslation: onRequestTranslation,
-                            onPageTranslation: onPageTranslation,
-                            attachmentPresentation: attachmentPresentation,
-                            onDownloadAttachment: mutationsReady ? onDownloadAttachment : { _ in },
-                            onPreviewAttachment: previewAttachment
-                        )
-                        .padding(.top, topOverlayInset)
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(spacing: 0) {
+                    if conversation.hasOlderPages {
+                        Button("Load earlier messages", action: onPageOlder)
+                            .font(GianTheme.Typography.caption)
+                            .foregroundStyle(GianTheme.Colors.tint)
+                            .gianHitTarget()
+                            .padding(.top, GianTheme.Metrics.paddingSmall)
                     }
-                    .onChange(of: conversation.rows.count) { _, _ in
-                        // Follow new content only at the tail; reading position
-                        // is preserved otherwise.
-                        if let last = conversation.rows.last {
-                            withAnimation(.easeOut(duration: 0.2)) {
-                                proxy.scrollTo(last.id, anchor: .bottom)
-                            }
-                        }
+                    TranscriptView(
+                        rows: conversation.rows,
+                        translationEnabled: mutationsReady
+                            && conversation.translation?.capability == .configured,
+                        onRespondToInteraction: mutationsReady ? onRespondToInteraction : { _, _, _ in },
+                        onRequestTranslation: onRequestTranslation,
+                        onCancelTranslation: { onCancelReadingTranslation($0) },
+                        onRetryTranslation: onRequestTranslation,
+                        onPageTranslation: onPageTranslation,
+                        attachmentPresentation: attachmentPresentation,
+                        onDownloadAttachment: mutationsReady ? onDownloadAttachment : { _ in },
+                        onPreviewAttachment: previewAttachment
+                    )
+                    .padding(.top, topOverlayInset)
+                }
+                .frame(maxWidth: GianTheme.Metrics.readableWidth)
+                .frame(maxWidth: .infinity)
+            }
+            .defaultScrollAnchor(.bottom)
+            .scrollDismissesKeyboard(.interactively)
+            .onChange(of: conversation.rows.count) { _, _ in
+                // Follow new content only at the tail; reading position
+                // is preserved otherwise.
+                if let last = conversation.rows.last {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        proxy.scrollTo(last.id, anchor: .bottom)
                     }
                 }
-                TopStatusStack(
-                    banner: conversation.banner,
-                    connectivity: conversation.connectivity,
-                    diagnostic: diagnostic,
-                    onBannerTap: {
-                        if let banner = conversation.banner { onBannerTap(banner.id) }
-                    },
-                    onBannerDismiss: {
-                        if let banner = conversation.banner { onBannerDismiss(banner.id) }
-                    }
-                )
-                .padding(.top, GianTheme.Metrics.paddingSmall)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(GianTheme.Colors.background)
-
+        }
+        .overlay(alignment: .top) {
+            TopStatusStack(
+                banner: conversation.banner,
+                connectivity: conversation.connectivity,
+                diagnostic: diagnostic,
+                onBannerTap: {
+                    if let banner = conversation.banner { onBannerTap(banner.id) }
+                },
+                onBannerDismiss: {
+                    if let banner = conversation.banner { onBannerDismiss(banner.id) }
+                }
+            )
+            .frame(maxWidth: GianTheme.Metrics.readableWidth)
+            .padding(.top, GianTheme.Metrics.paddingSmall)
+        }
+        .safeAreaBar(edge: .bottom) {
             composerArea
         }
         .background(GianTheme.Colors.background)
+        .navigationTitle(conversation.title)
+        .navigationBarTitleDisplayMode(.inline)
+        .task(id: conversation.id) { onLoadOptions() }
+        .toolbar {
+            // Centered on every layout, including the Duo's vertical-bar one,
+            // where the system title sits on the leading edge.
+            ToolbarItem(placement: .principal) {
+                HostScopedTitle(title: conversation.title, host: host)
+            }
+            GlobalToolbarActions(onNewChat: onOpenNewChat, onSettings: onOpenSettings)
+        }
         .sheet(item: previewBinding) { preview in
             AttachmentPreviewSheet(
                 name: preview.name,
@@ -141,83 +166,43 @@ struct ChatScreen: View {
         return rows > 0 ? CGFloat(rows) * 44 + 12 : 0
     }
 
-    // MARK: - Header
-
-    private var header: some View {
-        HStack(spacing: GianTheme.Metrics.paddingSmall) {
-            if showsBack {
-                Button(action: onBack) {
-                    Image(systemName: "chevron.left")
-                        .font(.body.weight(.semibold))
-                        .foregroundStyle(GianTheme.Colors.label)
-                        .gianHitTarget()
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Back")
-            }
-            VStack(spacing: 1) {
-                Text(conversation.title)
-                    .font(GianTheme.Typography.navTitle)
-                    .foregroundStyle(GianTheme.Colors.label)
-                    .lineLimit(1)
-                Text(conversation.hostName)
-                    .font(GianTheme.Typography.navSubtitle)
-                    .foregroundStyle(GianTheme.Colors.secondaryLabel)
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity)
-            if showsBack {
-                // Balance the back button so the title stays centered.
-                Color.clear
-                    .frame(
-                        width: GianTheme.Metrics.minHitTarget,
-                        height: GianTheme.Metrics.minHitTarget
-                    )
-            }
-        }
-        .padding(.horizontal, GianTheme.Metrics.paddingSmall)
-        .padding(.vertical, 6)
-        .background(GianTheme.Colors.card)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(GianTheme.Colors.separator)
-                .frame(height: 0.5)
-        }
-    }
-
     // MARK: - Composer
 
     private var composerArea: some View {
-        VStack(spacing: 4) {
-            if let translation = conversation.translation {
-                TranslationToggle(state: translation, onToggleAutomatic: onToggleAutomaticTranslation)
-                    .disabled(!mutationsReady)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                    .padding(.horizontal, GianTheme.Metrics.paddingMedium)
-            }
-            ComposerView(
-                draft: Binding(
-                    get: { composer.draft.text },
-                    set: onEditDraft
-                ),
-                attachments: composer.draft.attachments,
-                sendPhase: SendPhasePresentation(composer.send),
-                notice: ComposerNoticePresentation(composer.notice),
-                isTurnActive: conversation.isTurnActive,
-                remoteReady: mutationsReady,
-                thumbnail: thumbnail,
-                onSend: onSend,
-                onStop: onStop,
-                onRetryTranslationSend: onRetryTranslationSend,
-                onSendOriginal: onSendOriginal,
-                onCancelTranslation: onCancelTranslationSend,
-                onRecoverUncertain: onRecoverUncertain,
-                onRemoveAttachment: onRemoveAttachment,
-                onRetryAttachmentUpload: onRetryAttachmentUpload,
-                attachmentPicker: attachmentPicker
-            )
-            .padding(.horizontal, GianTheme.Metrics.paddingMedium)
-            .padding(.bottom, GianTheme.Metrics.paddingSmall)
-        }
+        ComposerView(
+            draft: Binding(
+                get: { composer.draft.text },
+                set: onEditDraft
+            ),
+            attachments: composer.draft.attachments,
+            sendPhase: SendPhasePresentation(composer.send),
+            notice: ComposerNoticePresentation(composer.notice),
+            isTurnActive: conversation.isTurnActive,
+            remoteReady: mutationsReady,
+            thumbnail: thumbnail,
+            moreMenu: ComposerMoreMenu(
+                settings: settings,
+                translation: conversation.translation,
+                translationEnabled: mutationsReady,
+                onSelectModel: onSelectModel,
+                onSelectThinking: onSelectThinking,
+                onSetFast: onSetFast,
+                onSelectApproval: onSelectApproval,
+                onToggleAutomaticTranslation: onToggleAutomaticTranslation
+            ),
+            onSend: onSend,
+            onStop: onStop,
+            onRetryTranslationSend: onRetryTranslationSend,
+            onSendOriginal: onSendOriginal,
+            onCancelTranslation: onCancelTranslationSend,
+            onRecoverUncertain: onRecoverUncertain,
+            onRemoveAttachment: onRemoveAttachment,
+            onRetryAttachmentUpload: onRetryAttachmentUpload,
+            attachmentPicker: attachmentPicker
+        )
+        .frame(maxWidth: GianTheme.Metrics.readableWidth)
+        .padding(.horizontal, GianTheme.Metrics.paddingMedium)
+        .padding(.bottom, GianTheme.Metrics.paddingSmall)
+        .frame(maxWidth: .infinity)
     }
 }

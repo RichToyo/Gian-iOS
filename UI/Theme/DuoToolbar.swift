@@ -1,0 +1,54 @@
+import SwiftUI
+
+/// iPhone Duo bar adoption, guarded for the iOS 26 deployment target.
+///
+/// On iPhone Duo's outer display (and the inner display in landscape) system
+/// toolbars become a vertical bar beside the status bar: top placements stack
+/// at its top, `.bottomBar` items at its bottom. Items with a symbol and title
+/// go vertical automatically; custom views stay horizontal unless they opt in.
+/// Elsewhere these modifiers have no visible effect.
+extension ToolbarContent {
+    /// Lets a compact custom item (e.g. a 28 pt avatar) join the vertical bar.
+    @ToolbarContentBuilder
+    func verticalPreferredOnDuo() -> some ToolbarContent {
+        if #available(iOS 27.1, *) {
+            axisBehavior(.verticalPreferred)
+        } else {
+            self
+        }
+    }
+
+    /// Keeps a frequent action (e.g. New chat) out of the overflow menu longest.
+    @ToolbarContentBuilder
+    func highVisibilityPriority() -> some ToolbarContent {
+        if #available(iOS 27.0, *) {
+            visibilityPriority(.high)
+        } else {
+            self
+        }
+    }
+}
+
+/// New chat and Settings are global, so every screen's bar carries them as one
+/// group, declared first so it sits right after Back/Close (on iPhone Duo, high
+/// in the vertical bar) instead of only the conversation list. Not
+/// `.topBarPinnedTrailing`: the pinned slot shows a single item and dropped
+/// Settings.
+struct GlobalToolbarActions: ToolbarContent {
+    /// New chat itself omits the button; it is already the current screen.
+    var showsNewChat: Bool = true
+    var onNewChat: () -> Void
+    var onSettings: () -> Void
+
+    var body: some ToolbarContent {
+        ToolbarItemGroup(placement: .topBarTrailing) {
+            if showsNewChat {
+                Button("New chat", systemImage: "square.and.pencil", action: onNewChat)
+                    .accessibilityLabel("Start a new chat")
+            }
+            // A symbol, not the avatar view: bars render custom icons blank.
+            Button("Settings", systemImage: "person.crop.circle", action: onSettings)
+        }
+        .highVisibilityPriority()
+    }
+}

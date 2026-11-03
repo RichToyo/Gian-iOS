@@ -3,6 +3,19 @@ import Network
 import CryptoKit
 import GianCore
 
+/// When to (re)load Agent logos: per Host, its Agents, and readiness.
+struct AgentLogoTrigger: Equatable {
+    let host: HostID?
+    let pluginIDs: [String]
+    let ready: Bool
+
+    @MainActor init(_ store: GianClientStore) {
+        host = store.state.currentHostID
+        pluginIDs = store.state.agents.map(\.pluginID).sorted()
+        ready = store.mutationsReady
+    }
+}
+
 struct RestorationHintSelection: Equatable {
     let phase: ClientPhase
     let server: ServerAddress?
@@ -35,8 +48,14 @@ struct AppRootView: View {
 
     var body: some View {
         content
+            .environment(\.agentLogoImages, store.state.agentLogos)
             .task {
                 await observeConnectivity()
+            }
+            // Agents' own logos, once the Host is connected and whenever its
+            // Agents change.
+            .task(id: AgentLogoTrigger(store)) {
+                if store.mutationsReady { _ = await store.dispatch(.loadAgentLogos) }
             }
             .onChange(of: scenePhase) { _, phase in
                 dispatch(.setForeground(phase == .active ? .foreground : .background))
@@ -85,6 +104,7 @@ struct AppRootView: View {
                 onClearSearch: { dispatch(.clearSearch) },
                 onLoadMoreDirectory: { dispatch(.loadMoreDirectory($0)) },
                 onRefreshDirectory: { dispatch(.refreshDirectoryView($0)) },
+                onPullToRefresh: { _ = await store.dispatch(.refreshDirectoryView($0)) },
                 onBannerTap: { dispatch(.openBanner($0)) },
                 onBannerDismiss: { dispatch(.dismissBanner($0)) },
                 onToggleAutomaticTranslation: { dispatch(.setAutoTranslation(enabled: $0)) },
@@ -122,10 +142,31 @@ struct AppRootView: View {
                 selectedAgentModels: selectedAgentModels,
                 onSelectModel: { dispatch(.selectModel($0)) },
                 onSelectTask: { dispatch(.selectTask($0)) },
+                conversationSettings: StoreProjection.conversationSettings(store.state, mutationsReady: store.mutationsReady),
+                newChatSettings: StoreProjection.newChatSettings(store.state, mutationsReady: store.mutationsReady),
+                onSetConversationModel: { dispatch(.setConversationModel($0)) },
+                onSetConversationThinking: { dispatch(.setConversationThinking($0)) },
+                onSetConversationFast: { dispatch(.setConversationFast($0)) },
+                onSetConversationApproval: { dispatch(.setConversationApprovalMode($0)) },
+                onSelectThinking: { dispatch(.selectThinking($0)) },
+                onSelectFast: { dispatch(.selectFast($0)) },
+                onSelectApproval: { dispatch(.selectApprovalMode($0)) },
+                onLoadConversationOptions: {
+                    if let agentID = store.state.conversation?.session.agentID { dispatch(.loadAgentOptions(agentID)) }
+                },
+                onLoadNewChatOptions: {
+                    if let agentID = store.state.composer.selection.agentID { dispatch(.loadAgentOptions(agentID)) }
+                },
                 onReturnHome: { dispatch(.returnHome) },
                 onSignOut: { dispatch(.logout) },
-                // "Change server" signs out; setup then collects a new address.
-                onChangeServer: { dispatch(.logout) },
+                // Confirmed in Settings first; then sign out and continue
+                // setup on the new server at the GitHub step.
+                onChangeServer: { address in
+                    Task {
+                        await store.dispatch(.logout)
+                        await store.dispatch(.setServerAddress(address))
+                    }
+                },
                 onEvictAttachmentCache: { dispatch(.clearAttachmentCache) },
                 attachmentPresentation: { attachmentID in
                     StoreProjection.attachmentPresentation(
@@ -138,7 +179,15 @@ struct AppRootView: View {
                 attachmentDescriptorName: {
                     store.transcriptFileDescriptor(for: $0)?.name ?? "Attachment"
                 },
-                serverAddress: store.state.server?.absoluteString ?? "—"
+                serverAddress: store.state.server?.absoluteString ?? "—",
+                addHost: AddHostPresentation(
+                    isWaiting: store.state.pendingPairing != nil,
+                    didPair: { if case .paired = store.state.pairingOutcome { true } else { false } }(),
+                    notice: StoreProjection.pairingNotice(store.state.pairingOutcome),
+                    onPairPayload: { dispatch(.beginHostPairingFromQR($0)) },
+                    onRefresh: { dispatch(.refreshHostPairing) },
+                    onReset: { dispatch(.cancelHostPairing) }
+                )
             )
         case .signedOut, .serverEntered, .awaitingGitHubDeviceLogin, .awaitingHostPairing:
             VStack(spacing: 0) {
@@ -167,12 +216,14 @@ struct AppRootView: View {
                     account: store.state.account,
                     server: store.state.server,
                     pendingPairing: store.state.pendingPairing,
+                    pairingNotice: StoreProjection.pairingNotice(store.state.pairingOutcome),
                     onSubmitServer: { dispatch(.setServerAddress($0)) },
                     onStartGitHubLogin: { dispatch(.startGitHubDeviceLogin) },
                     onCancelGitHubLogin: { dispatch(.cancelGitHubDeviceLogin) },
                     onOpenVerificationURL: { openURL($0) },
                     onPairPayload: { dispatch(.beginHostPairingFromQR($0)) },
-                    onRefreshPairing: { dispatch(.refreshHostPairing) }
+                    onRefreshPairing: { dispatch(.refreshHostPairing) },
+                    onStartOver: { dispatch(.logout) }
                 )
             }
         }

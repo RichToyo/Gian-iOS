@@ -56,7 +56,7 @@ enum GianAppComposition {
     static func makePreviewStore(script: PreviewScript) -> GianClientStore {
         GianClientStore(
             service: PreviewGianClientService(script: script),
-            clock: SystemGianClock(),
+            clock: PreviewGianClock.shared,
             ids: SequenceIDGenerator(),
             storage: InMemoryGianStorage()
         )
@@ -77,6 +77,32 @@ enum GianAppComposition {
         default: return nil
         }
     }
+
+    /// `-previewReady` (alongside `-previewScript`) runs the scripted setup
+    /// programmatically so UI tests can start from the home directory.
+    static var previewDrivesSetupToReady: Bool {
+        ProcessInfo.processInfo.arguments.contains("-previewReady")
+    }
+
+    /// `-previewDestination repos|chat|newChat|settings` (with `-previewReady`)
+    /// opens that surface once ready, so screenshots need no UI automation.
+    static var previewDestination: String? {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard let index = arguments.firstIndex(of: "-previewDestination"),
+              arguments.indices.contains(index + 1) else { return nil }
+        return arguments[index + 1]
+    }
+}
+
+/// Preview time starts at the fixture instant and then advances in real time.
+/// Scripted deadlines (the 15-minute device code) are fixture-relative, so a
+/// wall clock would see them as long expired once the fixtures are in the past.
+@MainActor
+final class PreviewGianClock: GianClock {
+    static let shared = PreviewGianClock()
+    private let offset = PreviewFixtures.instant.timeIntervalSinceNow
+
+    func now() -> Date { Date().addingTimeInterval(offset) }
 }
 
 /// Remembers the nonsecret restoration hint (server/account/Host strings).

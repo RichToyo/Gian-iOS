@@ -131,6 +131,8 @@ extension LiveGianClientService: GianClientServicing {
             "agent_id": .string(request.agentID.rawValue)]
         if let task = request.taskID { params["task_id"] = .string(task.rawValue) }
         if let model = request.model { params["model"] = .string(model) }
+        if let thinking = request.thinking { params["thinking"] = .string(thinking) }
+        if let tier = request.serviceTier { params["service_tier"] = .string(tier) }
         return await dispatchCommand(scope: scope, id: request.commandID, method: "session.create", params: .object(params), capability: .sessionCreate,
             expected: ["catalog_revision": .string(request.catalogRevision)])
     }

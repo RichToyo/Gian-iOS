@@ -54,6 +54,11 @@ public final class GianClientStore {
     @ObservationIgnored var verifiedTranscriptDownloads: [AttachmentID: VerifiedTranscriptDownload] = [:]
     @ObservationIgnored var transcriptDownloadRequests: [AttachmentID: Int] = [:]
     @ObservationIgnored var transcriptDownloadSequence = 0
+    /// Bumped by Cancel so a late pairing reply is dropped.
+    @ObservationIgnored var pairingSequence = 0
+    /// Logo reads in flight or answered "none" per Host, plugin and variant.
+    @ObservationIgnored var agentLogoSkips: Set<String> = []
+    @ObservationIgnored var agentLogoUnsupportedHosts: Set<HostID> = []
 
     /// Compatibility only. Production composition explicitly injects SQLite.
     public convenience init(
@@ -135,6 +140,7 @@ public final class GianClientStore {
             return result
         case .beginHostPairingFromQR(let payload): return await beginQR(payload)
         case .refreshHostPairing: return await refreshPairing()
+        case .cancelHostPairing: return cancelPairing()
         case .selectHost(let id): return await selectHost(id)
         case .selectDirectoryView(let view):
             state.navigation.directoryView = view
@@ -177,12 +183,23 @@ public final class GianClientStore {
         case .removeDraftAttachment(let id): return removeAttachment(id)
         case .retryAttachmentUpload(let id): return await upload(id)
         case .downloadAttachment(let id): return await download(id)
-        case .selectAgent(let id):
-            state.composer.selection.agentID = id
+        case .selectAgent(let id): return selectAgentForNewChat(id)
+        case .selectModel(let model): return selectModelForNewChat(model)
+        case .selectThinking(let thinking):
+            state.composer.selection.thinking = thinking
             return persistenceResult()
-        case .selectModel(let model):
-            state.composer.selection.model = model
+        case .selectFast(let enabled):
+            state.composer.selection.fast = enabled ? true : nil
             return persistenceResult()
+        case .selectApprovalMode(let mode):
+            state.composer.selection.approvalMode = mode
+            return persistenceResult()
+        case .loadAgentOptions(let id): return await loadAgentOptions(id)
+        case .loadAgentLogos: return await loadAgentLogos()
+        case .setConversationModel(let model): return await updateConversation(.model(model))
+        case .setConversationThinking(let thinking): return await updateConversation(.thinking(thinking))
+        case .setConversationFast(let enabled): return await updateConversation(.fast(enabled))
+        case .setConversationApprovalMode(let mode): return await updateConversation(.approvalMode(mode))
         case .selectWorkspace(let id):
             state.composer.selection.workspaceID = id
             return persistenceResult()
@@ -369,7 +386,10 @@ public final class GianClientStore {
 
     func rememberDraft() {
         guard state.composer.draft.hostID != nil else { return }
-        state.drafts.removeAll { $0.id == state.composer.draft.id }
+        // Read the ID before mutating: reading `state` inside the closure while
+        // `removeAll` holds write access to it is an exclusivity violation.
+        let draftID = state.composer.draft.id
+        state.drafts.removeAll { $0.id == draftID }
         state.drafts.append(state.composer.draft)
     }
 
@@ -447,7 +467,9 @@ public final class GianClientStore {
         let host = scope.host
         rememberDraft()
         memory.update(scope) { bundle in
-            bundle.activeDraftID = state.composer.draft.id
+            // Reopened on restore, so only where the user actually was: from
+            // Home, switching Hosts (or relaunching) must not land in New chat.
+            bundle.activeDraftID = state.navigation.destination == .home ? nil : state.composer.draft.id
             bundle.drafts = state.drafts.filter { $0.hostID == host }
             bundle.sessions = sessions
             bundle.tasks = taskRecords
@@ -867,16 +889,23 @@ public final class GianClientStore {
         return .applied
     }
 
+    /// Setup pairs the first Host; once ready, the same flow adds another
+    /// Host while the current one stays open.
     private func beginQR(_ payload: String) async -> GianDispatchResult {
-        guard state.phase == .awaitingHostPairing, let server = state.server, let account = state.account.accountID else {
+        guard state.phase == .awaitingHostPairing || state.phase == .ready,
+              let server = state.server, let account = state.account.accountID else {
             return reject(.notAuthorized)
         }
+        state.pairingOutcome = nil
         switch PairingQR.parse(payload: payload, server: server) {
-        case .failure(let code): return reject(code)
+        case .failure(let code):
+            state.pairingOutcome = .invalidCode
+            return reject(code)
         case .success(let qr):
             let token = epoch
+            let sequence = pairingSequence
             let response = await service.claimHostQR(server: server, account: account, qr: qr)
-            guard token == epoch else { return reject(.staleOperation) }
+            guard token == epoch, sequence == pairingSequence else { return reject(.staleOperation) }
             return await finishPairing(response)
         }
     }
@@ -886,24 +915,42 @@ public final class GianClientStore {
             return reject(.notFound)
         }
         let token = epoch
+        let sequence = pairingSequence
         let response = await service.refreshHostPairing(server: server, account: account, pairingID: pending.pairingID)
-        guard token == epoch else { return reject(.staleOperation) }
+        guard token == epoch, sequence == pairingSequence, state.pendingPairing == pending else { return reject(.staleOperation) }
         return await finishPairing(response)
     }
 
+    private func cancelPairing() -> GianDispatchResult {
+        pairingSequence += 1
+        state.pendingPairing = nil
+        state.pairingOutcome = nil
+        return .applied
+    }
+
     private func finishPairing(_ response: HostPairingResponse) async -> GianDispatchResult {
+        // Adding a Host: stay on the current Host until the new one is confirmed.
+        let addingHost = state.phase == .ready
         switch response {
         case .pendingConfirmation(let pairingID, let hostID):
             state.pendingPairing = PendingHostPairing(pairingID: pairingID, hostID: hostID)
-            state.phase = .awaitingHostPairing
+            if !addingHost { state.phase = .awaitingHostPairing }
             return .applied
         case .rejected, .expired, .failed:
             state.pendingPairing = nil
-            state.phase = .awaitingHostPairing
+            switch response {
+            case .rejected: state.pairingOutcome = .rejected
+            case .expired: state.pairingOutcome = .expired
+            case .failed(let message): state.pairingOutcome = .failed(message)
+            default: break
+            }
+            if !addingHost { state.phase = .awaitingHostPairing }
             return .applied
         case .confirmed(let host, _):
             state.pendingPairing = nil
+            state.pairingOutcome = .paired(host.id)
             if !state.hosts.contains(where: { $0.id == host.id }) { state.hosts.append(host) }
+            if addingHost { return await selectHost(host.id) }
             state.currentHostID = host.id
             expectedServiceEpoch = nil
             requiresFreshSnapshot = true

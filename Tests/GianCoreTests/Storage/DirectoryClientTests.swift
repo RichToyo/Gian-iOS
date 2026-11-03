@@ -51,7 +51,9 @@ final class DirectoryFixtureService: ControlledService {
 extension DirectoryFixtureService: DirectoryMembershipEpoch {}
 
 func directoryEntry(_ title: String, task: Bool = false) -> DirectoryEntry {
-    let session = makeSession(id: title, title: title, taskID: task ? PreviewFixtures.taskID : nil)
+    // Titles may contain spaces, which are not valid ID characters.
+    let id = String(title.map { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" ? $0 : "-" })
+    let session = makeSession(id: id, title: title, taskID: task ? PreviewFixtures.taskID : nil)
     return DirectoryEntry(session: session, workspace: WorkspaceRecord(id: session.workspaceID, name: "Repository"),
         task: task ? TaskRecord(id: PreviewFixtures.taskID, title: "Incomplete Task", status: .open, updatedAt: PreviewFixtures.instant) : nil)
 }
@@ -148,7 +150,8 @@ struct DirectoryClientTests {
         var view = StoredDirectoryView()
         let page = DirectoryPagePayload(view: .repos, asOf: PreviewFixtures.instant, revision: "r",
             state: .incomplete, entries: [directoryEntry("Cached")], nextCursor: "opaque")
-        #expect(view.apply(page, scope: scope, view: .repos))
+        let applied = view.apply(page, scope: scope, view: .repos)
+        #expect(applied)
         var state = StoredHostState(); state.directoryViews = [.repos: view]
         let decoded = try JSONDecoder().decode(StoredHostState.self, from: JSONEncoder().encode(state)).recovered()
         #expect(decoded.directoryViews?[.repos]?.visibleEntries.map { $0.session.title } == ["Cached"])
@@ -227,14 +230,18 @@ struct DirectoryClientTests {
         let scope = fictionalScope()
         let first = DirectoryPagePayload(view: .repos, asOf: PreviewFixtures.instant, revision: "r1", state: .incomplete,
             entries: [directoryEntry("First")], nextCursor: "same")
-        #expect(traversal.apply(first, scope: scope, view: .repos))
-        #expect(!traversal.apply(first, scope: scope, view: .repos))
+        let firstApplied = traversal.apply(first, scope: scope, view: .repos)
+        #expect(firstApplied)
+        let repeatedApplied = traversal.apply(first, scope: scope, view: .repos)
+        #expect(!repeatedApplied)
         var changed = first; changed.revision = "r2"; changed.nextCursor = "new"
-        #expect(!traversal.apply(changed, scope: scope, view: .repos))
+        let changedApplied = traversal.apply(changed, scope: scope, view: .repos)
+        #expect(!changedApplied)
         var archived = directoryEntry("Archived"); archived.session.archived = true
         let invalid = DirectoryPagePayload(view: .repos, asOf: PreviewFixtures.instant, revision: "r1", state: .complete,
             entries: [archived], nextCursor: nil)
-        #expect(!traversal.apply(invalid, scope: scope, view: .repos))
+        let invalidApplied = traversal.apply(invalid, scope: scope, view: .repos)
+        #expect(!invalidApplied)
         #expect(traversal.status.phase == .incomplete)
     }
 
@@ -243,11 +250,13 @@ struct DirectoryClientTests {
         let scope = fictionalScope()
         let complete = DirectoryPagePayload(view: .repos, asOf: PreviewFixtures.instant, revision: "r1", state: .complete,
             entries: [directoryEntry("Coherent old row")], nextCursor: nil)
-        #expect(traversal.apply(complete, scope: scope, view: .repos))
+        let completeApplied = traversal.apply(complete, scope: scope, view: .repos)
+        #expect(completeApplied)
         traversal.invalidate()
         let prefix = DirectoryPagePayload(view: .repos, asOf: PreviewFixtures.instant, revision: "r2", state: .incomplete,
             entries: [directoryEntry("New prefix")], nextCursor: "next")
-        #expect(traversal.apply(prefix, scope: scope, view: .repos))
+        let prefixApplied = traversal.apply(prefix, scope: scope, view: .repos)
+        #expect(prefixApplied)
         #expect(traversal.visibleEntries.map { $0.session.title } == ["Coherent old row"])
         #expect(traversal.status.isStale && traversal.status.hasMore)
     }
@@ -277,8 +286,9 @@ struct DirectoryClientTests {
         for (target, name) in [(scope, "First Host"), (second, "Second Host")] {
             var entry = directoryEntry(name); entry.session.hostID = target.host
             var traversal = StoredDirectoryView()
-            #expect(traversal.apply(DirectoryPagePayload(view: .repos, asOf: PreviewFixtures.instant, revision: "r", state: .incomplete,
-                entries: [entry], nextCursor: "scope-bound"), scope: target, view: .repos))
+            let applied = traversal.apply(DirectoryPagePayload(view: .repos, asOf: PreviewFixtures.instant, revision: "r", state: .incomplete,
+                entries: [entry], nextCursor: "scope-bound"), scope: target, view: .repos)
+            #expect(applied)
             var state = StoredHostState()
             state.directoryViews = [.repos: traversal]; state.sessions = [entry.session]
             state.authority = .negotiatedDirectoryV1

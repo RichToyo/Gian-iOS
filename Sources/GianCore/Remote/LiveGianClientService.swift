@@ -5,7 +5,8 @@ import Foundation
 public final class LiveGianClientService: GianClientLifecycle {
     public let events: AsyncStream<InboundEnvelope>
     public let diagnostics: AsyncStream<RemoteServiceDiagnostic>
-    public private(set) var lastFailure: RemoteClientError?
+    // Set by the extensions in Remote/*.swift, so the setter is module-internal.
+    public internal(set) var lastFailure: RemoteClientError?
     let eventContinuation: AsyncStream<InboundEnvelope>.Continuation
     let diagnosticContinuation: AsyncStream<RemoteServiceDiagnostic>.Continuation
     let transport: any RemoteTransport

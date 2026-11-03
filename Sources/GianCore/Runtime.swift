@@ -14,8 +14,14 @@ public final class SystemGianClock: GianClock {
 @MainActor
 public final class ManualGianClock: GianClock {
     public var instant: Date
+    /// When non-zero, every read advances time like a real clock, so code that
+    /// reads the clock twice and assumes equal values is caught in tests.
+    public var advancesOnRead: TimeInterval = 0
     public init(instant: Date) { self.instant = instant }
-    public func now() -> Date { instant }
+    public func now() -> Date {
+        defer { instant = instant.addingTimeInterval(advancesOnRead) }
+        return instant
+    }
 }
 
 @MainActor

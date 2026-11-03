@@ -57,7 +57,10 @@ struct GianApp: App {
                         )
                     }
             } else if let previewStore {
-                PreviewStoreContainer(store: previewStore, drivesSetupToReady: false) { store in
+                PreviewStoreContainer(
+                    store: previewStore,
+                    drivesSetupToReady: GianAppComposition.previewDrivesSetupToReady
+                ) { store in
                     AppRootView(store: store)
                 }
             } else {

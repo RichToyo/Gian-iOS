@@ -7,7 +7,101 @@ import GianCore
 /// store directly.
 enum StoreProjection {
 
+    // MARK: - Conversation settings
+
+    /// Settings of the open conversation as the Host reports them, with the
+    /// Agent's choices (`catalog.read` models, `catalog.agent` options).
+    static func conversationSettings(_ state: GianClientState, mutationsReady: Bool) -> ConversationSettingsPresentation? {
+        guard let session = state.conversation?.session else { return nil }
+        return settings(
+            agentID: session.agentID,
+            model: session.model,
+            thinking: session.thinking,
+            fast: session.serviceTier == "fast",
+            approval: session.approvalMode,
+            state: state,
+            isEnabled: mutationsReady && !state.settingsUpdatePending
+        )
+    }
+
+    /// The same options for a new chat, from the composer selection.
+    static func newChatSettings(_ state: GianClientState, mutationsReady: Bool) -> ConversationSettingsPresentation? {
+        let selection = state.composer.selection
+        guard let agentID = selection.agentID else { return nil }
+        return settings(
+            agentID: agentID,
+            model: selection.model,
+            thinking: selection.thinking,
+            fast: selection.fast == true,
+            approval: selection.approvalMode,
+            state: state,
+            isEnabled: mutationsReady
+        )
+    }
+
+    private static func settings(
+        agentID: AgentID,
+        model: String?,
+        thinking: String?,
+        fast: Bool,
+        approval: String?,
+        state: GianClientState,
+        isEnabled: Bool
+    ) -> ConversationSettingsPresentation {
+        let agent = state.agents.first { $0.id == agentID }
+        let options = state.agentOptions[agentID]
+        let models = agent?.models ?? []
+        let effectiveModel = model ?? models.first(where: \.isDefault)?.id ?? agent?.defaultModel
+        var presentation = ConversationSettingsPresentation(isEnabled: isEnabled, notice: state.settingsNotice)
+        if let agent {
+            presentation.agent = AgentLogo(pluginID: agent.pluginID, agentName: agent.name)
+            presentation.agentName = agent.name
+        }
+        presentation.models = models.map { AgentOptionChoice(value: $0.id, label: $0.label) }
+        presentation.model = effectiveModel
+        if let thinking = options?.thinking, !thinking.isEmpty {
+            presentation.thinking = thinking.map { choice in
+                choice.label == choice.value ? AgentOptionChoice(value: choice.value, label: thinkingLabel(choice.value)) : choice
+            }
+        } else if let supported = models.first(where: { $0.id == effectiveModel })?.supportedThinking {
+            presentation.thinking = supported.map { AgentOptionChoice(value: $0, label: thinkingLabel($0)) }
+        }
+        presentation.currentThinking = thinking
+        if let options, options.supportsFast {
+            presentation.fast = options.fastAvailable(forModel: effectiveModel) ? .available(isOn: fast) : .unsupportedModel
+        }
+        presentation.approval = options?.approval ?? []
+        presentation.currentApproval = approval ?? options?.approvalDefault
+        return presentation
+    }
+
+    /// The desktop composer's names for raw effort values the Host passes
+    /// through unlabeled (e.g. Codex's `xhigh`).
+    static func thinkingLabel(_ value: String) -> String {
+        switch value {
+        case "minimal": "Minimal"
+        case "low": "Light"
+        case "medium": "Medium"
+        case "high": "High"
+        case "xhigh": "Extra High"
+        case "max": "Max"
+        case "ultra": "Ultra"
+        default: value.capitalized
+        }
+    }
+
     // MARK: - Hosts
+
+    /// Why the last pairing failed, for setup and Add Host.
+    static func pairingNotice(_ outcome: HostPairingOutcome?) -> String? {
+        switch outcome {
+        case nil, .paired: nil
+        case .invalidCode: "That isn't a pairing link or QR code for this server."
+        case .rejected: "The Host declined this device."
+        case .expired: "That pairing link has expired. Make a new one on the Host."
+        case .failed(let message): message
+        }
+    }
 
     static func hosts(_ state: GianClientState) -> [HostItem] {
         state.hosts.map { host in
@@ -22,19 +116,31 @@ enum StoreProjection {
 
     // MARK: - Directory
 
-    static func conversationRow(_ summary: ConversationSummary) -> ConversationRowItem {
-        ConversationRowItem(
+    /// A pending interaction (approval, input) the Host reported for the
+    /// session shows as Waiting even when the session's own attention flag
+    /// has not caught up, so Home surfaces what needs the user.
+    static func conversationRow(
+        _ summary: ConversationSummary,
+        awaitingUser: Set<SessionID> = []
+    ) -> ConversationRowItem {
+        var badge = StatusBadge(status: summary.status, attention: summary.attention)
+        if awaitingUser.contains(summary.id), badge != .failed { badge = .waiting }
+        return ConversationRowItem(
             id: summary.id,
             title: summary.title,
             agent: AgentLogo(pluginID: summary.pluginID, agentName: summary.agentName),
             agentName: summary.agentName,
             repoName: summary.repositoryName,
-            badge: StatusBadge(status: summary.status, attention: summary.attention),
+            badge: badge,
             lastActivity: summary.lastActivityAt
         )
     }
 
     static func directory(_ state: GianClientState) -> DirectoryPresentation {
+        let awaitingUser = Set(state.interactions.filter { $0.phase == .pending }.map(\.sessionID))
+        let conversationRow = { (summary: ConversationSummary) in
+            Self.conversationRow(summary, awaitingUser: awaitingUser)
+        }
         let showsTasks = showsRows(for: state.directory.tasksPage)
         let showsRepos = showsRows(for: state.directory.reposPage)
         let showsSearch = showsRows(for: state.directory.searchPage)
@@ -397,6 +503,9 @@ enum StoreProjection {
         let time = date.formatted(date: .omitted, time: .shortened)
         if calendar.isDateInToday(date) { return "Today \(time)" }
         if calendar.isDateInYesterday(date) { return "Yesterday \(time)" }
+        if calendar.isDate(date, equalTo: now, toGranularity: .year) {
+            return "\(date.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())), \(time)"
+        }
         let day = date.formatted(date: .abbreviated, time: .omitted)
         return "\(day), \(time)"
     }

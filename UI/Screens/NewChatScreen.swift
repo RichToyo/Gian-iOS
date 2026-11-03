@@ -3,13 +3,22 @@ import GianCore
 
 /// Direct-compose new chat: text and attachments compose immediately and the
 /// first Send creates the conversation as one recoverable operation — there is
-/// no separate Create step. Agent, workspace, task and model pickers sit
-/// nearby and dispatch selection actions. The model picker lists only the
-/// selected Agent's actual Host catalog; changing Agent resets the model.
+/// no separate Create step. Repository, Agent and Task are fixed once the
+/// conversation exists, so they are toolbar menus (on iPhone Duo, in the
+/// vertical bar under Close), not composer options; the empty canvas
+/// summarizes the choices. The composer's ⋯ holds only options that can
+/// change while a conversation runs. A single available Agent or repository
+/// is selected automatically; changing Agent resets the model.
+///
+/// Presented inside a NavigationStack (cover on compact, detail column on
+/// wide), so the title, Close and route menus live in system bars.
 ///
 /// Property declaration order is the synthesized memberwise argument order;
 /// call sites (AdaptiveRoot) must match it exactly.
 struct NewChatScreen: View {
+    @Environment(\.agentLogoImages) private var agentLogos
+    @Environment(\.colorScheme) private var colorScheme
+
     let workspaces: [WorkspaceRecord]
     let agents: [AgentRecord]
     /// Open tasks only — the legacy Host requires one for creation.
@@ -44,135 +53,186 @@ struct NewChatScreen: View {
     var onToggleAutomaticTranslation: (Bool) -> Void = { _ in }
     var onClose: () -> Void = {}
     var attachmentPicker: AttachmentPickerButton
+    /// Options for the composer's ⋯ (model, thinking, fast, approval).
+    var settings: ConversationSettingsPresentation? = nil
+    var onSelectThinking: (String?) -> Void = { _ in }
+    var onSetFast: (Bool) -> Void = { _ in }
+    var onSelectApproval: (String?) -> Void = { _ in }
+    /// Reads the selected Agent's `catalog.agent` options.
+    var onLoadOptions: () -> Void = {}
+    var onOpenSettings: () -> Void = {}
+    /// The Host the conversation will be created on, shown under the title.
+    var host: HostItem? = nil
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Spacer(minLength: 0)
-            pickers
-            if composer.selection.taskID == nil && !directoryNegotiated {
-                Label("This Host requires an open task for the first send.", systemImage: "checklist")
-                    .font(GianTheme.Typography.caption)
-                    .foregroundStyle(GianTheme.Colors.secondaryLabel)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, GianTheme.Metrics.paddingMedium)
-                    .padding(.bottom, GianTheme.Metrics.paddingSmall)
+        routeSummary
+            .frame(maxWidth: GianTheme.Metrics.formWidth)
+            .padding(GianTheme.Metrics.paddingLarge)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .safeAreaBar(edge: .bottom) {
+                composerArea
             }
-            if let translation {
-                TranslationToggle(state: translation, onToggleAutomatic: onToggleAutomaticTranslation)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                    .padding(.horizontal, GianTheme.Metrics.paddingMedium)
-                    .padding(.bottom, 4)
-            }
-            ComposerView(
-                draft: Binding(
-                    get: { composer.draft.text },
-                    set: onEditDraft
-                ),
-                attachments: composer.draft.attachments,
-                sendPhase: SendPhasePresentation(composer.send),
-                notice: ComposerNoticePresentation(composer.notice),
-                placeholder: "Message…",
-                remoteReady: StoreProjection.newChatRemoteReady(
-                    taskID: composer.selection.taskID,
-                    directoryNegotiated: directoryNegotiated,
-                    mutationsReady: mutationsReady
-                ),
-                thumbnail: thumbnail,
-                canRetryUncertainCreate: canRetryUncertainCreate,
-                onSend: onSend,
-                onRetryTranslationSend: onRetryTranslationSend,
-                onSendOriginal: onSendOriginal,
-                onCancelTranslation: onCancelTranslationSend,
-                onRecoverUncertain: onRecoverUncertain,
-                onRetryUncertainCreate: onRetryUncertainCreate,
-                onRemoveAttachment: onRemoveAttachment,
-                onRetryAttachmentUpload: onRetryAttachmentUpload,
-                attachmentPicker: attachmentPicker
-            )
-            .padding(.horizontal, GianTheme.Metrics.paddingMedium)
-            .padding(.bottom, GianTheme.Metrics.paddingSmall)
-        }
-        .background(GianTheme.Colors.background)
-    }
-
-    private var header: some View {
-        HStack {
-            Text("New chat")
-                .font(GianTheme.Typography.navTitle)
-                .foregroundStyle(GianTheme.Colors.label)
-            Spacer()
-            Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.body.weight(.medium))
-                    .foregroundStyle(GianTheme.Colors.secondaryLabel)
-                    .gianHitTarget()
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Close")
-        }
-        .padding(.horizontal, GianTheme.Metrics.paddingLarge)
-        .padding(.vertical, GianTheme.Metrics.paddingSmall)
-    }
-
-    /// Nearby workspace / Agent / task selection as compact menus.
-    private var pickers: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: GianTheme.Metrics.paddingSmall) {
-                Menu {
-                    ForEach(workspaces) { workspace in
-                        Button(workspace.name) { onSelectWorkspace(workspace.id) }
-                    }
-                } label: {
-                    pickerChip(
-                        icon: "folder",
-                        label: selectedWorkspaceName ?? "Repository"
+            .background(GianTheme.Colors.background)
+            .navigationTitle("New chat")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close", systemImage: "xmark", action: onClose)
+                        .accessibilityLabel("Close")
+                }
+                ToolbarItem(placement: .principal) {
+                    HostScopedTitle(title: "New chat", host: host, keepsWholeTitle: true)
+                }
+                GlobalToolbarActions(showsNewChat: false, onNewChat: {}, onSettings: onOpenSettings)
+                ToolbarSpacer(.fixed, placement: .topBarTrailing)
+                // Task first: it decides what the conversation is for and is
+                // the one the Host may require. Kept visible longest when the
+                // vertical bar runs out of room (e.g. with the keyboard up).
+                ToolbarItem(placement: .topBarTrailing) {
+                    ChoiceMenu(
+                        title: "Task", systemImage: "checklist",
+                        choices: [(TaskID?.none, "No task")] + openTasks.map { (Optional($0.id), $0.title) },
+                        selected: composer.selection.taskID,
+                        searchableThreshold: 10,
+                        onSelect: onSelectTask
                     )
                 }
-
-                Menu {
-                    ForEach(agents) { agent in
-                        Button(agent.name) { onSelectAgent(agent.id) }
-                    }
-                } label: {
-                    pickerChip(icon: "cpu", label: selectedAgentName ?? "Agent")
+                .highVisibilityPriority()
+                ToolbarItem(placement: .topBarTrailing) {
+                    ChoiceMenu(
+                        title: "Repository", systemImage: "folder",
+                        choices: workspaces.map { (Optional($0.id), $0.name) },
+                        selected: composer.selection.workspaceID,
+                        searchableThreshold: 10,
+                        onSelect: { if let id = $0 { onSelectWorkspace(id) } }
+                    )
                 }
-
-                Menu {
-                    Button("No task") { onSelectTask(nil) }
-                    ForEach(openTasks) { task in
-                        Button(task.title) { onSelectTask(task.id) }
-                    }
-                } label: {
-                    pickerChip(icon: "checklist", label: selectedTaskTitle ?? "Task")
-                }
-                if !selectedAgentModels.isEmpty {
-                    Menu {
-                        Button("Default model") { onSelectModel(nil) }
-                        ForEach(selectedAgentModels) { model in
-                            Button(model.isDefault ? "\(model.label) (default)" : model.label) {
-                                onSelectModel(model.id)
-                            }
-                        }
-                    } label: {
-                        pickerChip(icon: "sparkles", label: selectedModelLabel ?? "Model")
-                    }
+                ToolbarItem(placement: .topBarTrailing) {
+                    ChoiceMenu(
+                        title: "Agent", systemImage: "cpu",
+                        icon: selectedAgent.map { agent in
+                            Image(uiImage: AgentLogoArt.menuIcon(
+                                for: AgentLogo(pluginID: agent.pluginID, agentName: agent.name),
+                                name: agent.name, in: agentLogos, scheme: colorScheme
+                            ))
+                        },
+                        choices: agents.map { (Optional($0.id), $0.name) },
+                        selected: composer.selection.agentID,
+                        searchableThreshold: 10,
+                        onSelect: { if let id = $0 { onSelectAgent(id) } }
+                    )
                 }
             }
-            .padding(.horizontal, GianTheme.Metrics.paddingMedium)
+            .onAppear(perform: selectSingleOptions)
+            .task(id: composer.selection.agentID) { onLoadOptions() }
+    }
+
+    private var requiresTask: Bool {
+        composer.selection.taskID == nil && !directoryNegotiated
+    }
+
+    /// Who the message goes to and where, as chosen in the toolbar menus.
+    private var routeSummary: some View {
+        VStack(spacing: GianTheme.Metrics.paddingMedium) {
+            if let agent = selectedAgent {
+                AgentAvatar(
+                    logo: AgentLogo(pluginID: agent.pluginID, agentName: agent.name),
+                    name: agent.name,
+                    size: GianTheme.Metrics.avatarLarge
+                )
+                Text("New chat with \(agent.name)")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(GianTheme.Colors.label)
+            } else {
+                Image(systemName: "bubble.left.and.text.bubble.right")
+                    .font(.largeTitle)
+                    .foregroundStyle(GianTheme.Colors.secondaryLabel)
+                Text("New chat")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(GianTheme.Colors.label)
+            }
+
+            Text(routeDetail)
+                .font(GianTheme.Typography.caption)
+                .foregroundStyle(GianTheme.Colors.secondaryLabel)
+
+            if requiresTask {
+                Label("Choose an open task before the first message.", systemImage: "checklist")
+                    .font(GianTheme.Typography.caption)
+                    .foregroundStyle(GianTheme.Colors.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
+        .multilineTextAlignment(.center)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var routeDetail: String {
+        let parts = [selectedTaskTitle, selectedWorkspaceName].compactMap { $0 }
+        if parts.isEmpty { return "Choose a task and repository." }
+        return parts.joined(separator: " · ")
+    }
+
+    private var composerArea: some View {
+        ComposerView(
+            draft: Binding(
+                get: { composer.draft.text },
+                set: onEditDraft
+            ),
+            attachments: composer.draft.attachments,
+            sendPhase: SendPhasePresentation(composer.send),
+            notice: ComposerNoticePresentation(composer.notice),
+            remoteReady: StoreProjection.newChatRemoteReady(
+                taskID: composer.selection.taskID,
+                directoryNegotiated: directoryNegotiated,
+                mutationsReady: mutationsReady
+            ),
+            thumbnail: thumbnail,
+            canRetryUncertainCreate: canRetryUncertainCreate,
+            moreMenu: ComposerMoreMenu(
+                settings: settings,
+                translation: translation,
+                translationEnabled: mutationsReady,
+                onSelectModel: onSelectModel,
+                onSelectThinking: onSelectThinking,
+                onSetFast: onSetFast,
+                onSelectApproval: onSelectApproval,
+                onToggleAutomaticTranslation: onToggleAutomaticTranslation
+            ),
+            onSend: onSend,
+            onRetryTranslationSend: onRetryTranslationSend,
+            onSendOriginal: onSendOriginal,
+            onCancelTranslation: onCancelTranslationSend,
+            onRecoverUncertain: onRecoverUncertain,
+            onRetryUncertainCreate: onRetryUncertainCreate,
+            onRemoveAttachment: onRemoveAttachment,
+            onRetryAttachmentUpload: onRetryAttachmentUpload,
+            attachmentPicker: attachmentPicker
+        )
+        .frame(maxWidth: GianTheme.Metrics.readableWidth)
+        .padding(.horizontal, GianTheme.Metrics.paddingMedium)
         .padding(.bottom, GianTheme.Metrics.paddingSmall)
+        .frame(maxWidth: .infinity)
+    }
+
+    /// With exactly one choice there is nothing to decide.
+    private func selectSingleOptions() {
+        if composer.selection.agentID == nil, agents.count == 1 {
+            onSelectAgent(agents[0].id)
+        }
+        if composer.selection.workspaceID == nil, workspaces.count == 1 {
+            onSelectWorkspace(workspaces[0].id)
+        }
+    }
+
+    private var selectedAgent: AgentRecord? {
+        guard let id = composer.selection.agentID else { return nil }
+        return agents.first { $0.id == id }
     }
 
     private var selectedWorkspaceName: String? {
         guard let id = composer.selection.workspaceID else { return nil }
         return workspaces.first { $0.id == id }?.name
-    }
-
-    private var selectedAgentName: String? {
-        guard let id = composer.selection.agentID else { return nil }
-        return agents.first { $0.id == id }?.name
     }
 
     private var selectedTaskTitle: String? {
@@ -183,22 +243,5 @@ struct NewChatScreen: View {
     private var selectedModelLabel: String? {
         guard let model = composer.selection.model else { return nil }
         return selectedAgentModels.first { $0.id == model }?.label ?? model
-    }
-
-    private func pickerChip(icon: String, label: String) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: icon)
-                .font(.caption)
-            Text(label)
-                .font(GianTheme.Typography.caption.weight(.medium))
-                .lineLimit(1)
-            Image(systemName: "chevron.up.chevron.down")
-                .font(.system(size: 8))
-        }
-        .foregroundStyle(GianTheme.Colors.label)
-        .padding(.horizontal, GianTheme.Metrics.paddingMedium)
-        .frame(minHeight: 36)
-        .background(GianTheme.Colors.card, in: Capsule())
-        .overlay(Capsule().stroke(GianTheme.Colors.separator, lineWidth: 0.5))
     }
 }

@@ -1,10 +1,12 @@
 import SwiftUI
 import GianCore
 
-/// Composer bound to the contract composer projection. Text edits dispatch
-/// `.editDraftText`; Send dispatches `.send`; Stop dispatches `.stop`.
-/// Send stays disabled until a draft exists. Translation-stage failures offer
-/// Retry (`.retryTranslationSend`) and Send original (`.sendOriginal`);
+/// Composer bound to the contract composer projection: a one-line box that
+/// grows with line breaks, attach (+) on the far left and Send on the far
+/// right. Every other option lives behind ⋯ (`moreMenu`). Text edits dispatch
+/// `.editDraftText`; Send (or ⌘Return) dispatches `.send`; Stop dispatches `.stop`. Send stays disabled until a
+/// draft exists. Translation-stage failures offer Retry
+/// (`.retryTranslationSend`) and Send original (`.sendOriginal`);
 /// awaiting-translation offers Cancel (`.reclaimTranslationDraft`). An
 /// uncertain outcome offers Check status (`.recoverUncertainOperation`); only
 /// an eligible uncertain create also offers explicit same-identity retry.
@@ -15,7 +17,7 @@ struct ComposerView: View {
     var sendPhase: SendPhasePresentation = .editable
     var notice: ComposerNoticePresentation = .none
     var isTurnActive: Bool = false
-    var placeholder: String = "Message…"
+    var placeholder: String = "Message"
     /// Authoritative mutation gate; send/stop/attachment actions disable
     /// until the store is ready. The draft stays editable regardless.
     /// Declared here so the synthesized memberwise argument order matches
@@ -25,6 +27,8 @@ struct ComposerView: View {
     var thumbnail: (AttachmentID) -> Image? = { _ in nil }
     /// True only for an eligible uncertain create, never for uncertain send.
     var canRetryUncertainCreate: Bool = false
+    /// Options that are not text, attach or send. Nil hides the ⋯ button.
+    var moreMenu: ComposerMoreMenu? = nil
 
     var onSend: () -> Void = {}
     var onStop: () -> Void = {}
@@ -36,6 +40,8 @@ struct ComposerView: View {
     var onRemoveAttachment: (AttachmentID) -> Void = { _ in }
     var onRetryAttachmentUpload: (AttachmentID) -> Void = { _ in }
     var attachmentPicker: AttachmentPickerButton = AttachmentPickerButton(onPicked: { _, _ in })
+
+    @FocusState private var isFocused: Bool
 
     private var canSend: Bool {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -49,50 +55,89 @@ struct ComposerView: View {
         }
     }
 
+    private var sendEnabled: Bool {
+        canSend && !isBusy && remoteReady && sendPhase != .uncertain
+    }
+
+    private var hasAccessory: Bool {
+        notice.message != nil || sendPhase != .editable || !attachments.isEmpty
+    }
+
     var body: some View {
-        VStack(spacing: GianTheme.Metrics.paddingSmall) {
-            if let message = notice.message {
-                noticeRow(message)
-            }
-            phaseAccessory
-            if !attachments.isEmpty {
-                attachmentStrip
-            }
-            HStack(alignment: .bottom, spacing: GianTheme.Metrics.paddingSmall) {
-                attachmentPicker
-                    .disabled(isBusy || !remoteReady)
-
-                TextField(placeholder, text: $draft, axis: .vertical)
-                    .lineLimit(1...6)
-                    .font(GianTheme.Typography.body)
-                    .disabled(isBusy)
-
-                if isTurnActive {
-                    Button(action: onStop) {
-                        Image(systemName: "stop.fill")
+        VStack(alignment: .leading, spacing: 0) {
+            if hasAccessory {
+                VStack(alignment: .leading, spacing: GianTheme.Metrics.paddingSmall) {
+                    if let message = notice.message {
+                        noticeRow(message)
                     }
-                    .buttonStyle(GianCircularButtonStyle(tint: GianTheme.Colors.failure))
-                    .disabled(!remoteReady)
-                    .accessibilityLabel("Stop")
-                } else {
-                    Button(action: onSend) {
-                        Image(systemName: "paperplane.fill")
+                    phaseAccessory
+                    if !attachments.isEmpty {
+                        attachmentStrip
                     }
-                    .buttonStyle(GianCircularButtonStyle())
-                    .disabled(!canSend || isBusy || !remoteReady || sendPhase == .uncertain)
-                    .accessibilityLabel("Send")
                 }
+                .padding(.horizontal, GianTheme.Metrics.paddingMedium)
+                .padding(.top, GianTheme.Metrics.paddingMedium)
             }
-            .padding(.horizontal, GianTheme.Metrics.paddingSmall)
-            .padding(.vertical, 6)
+            inputRow
         }
         .gianGlassSurface(
             in: RoundedRectangle(
-                cornerRadius: GianTheme.Metrics.cornerRadiusLarge,
+                cornerRadius: GianTheme.Metrics.composerRadius,
                 style: .continuous
-            ),
-            interactive: true
+            )
         )
+    }
+
+    /// + · text · ⋯ · Send/Stop. One line by default; Return adds a line and
+    /// the field grows to six lines while the buttons stay on the bottom line.
+    /// Send is the button (or ⌘Return on a hardware keyboard).
+    private var inputRow: some View {
+        HStack(alignment: .bottom, spacing: 0) {
+            attachmentPicker
+                .disabled(isBusy || !remoteReady)
+                .padding(.bottom, 4)
+
+            TextField(placeholder, text: $draft, axis: .vertical)
+                .font(GianTheme.Typography.body)
+                .lineLimit(1...6)
+                .focused($isFocused)
+                .disabled(isBusy)
+                .padding(.horizontal, 4)
+                // Centers a single line in the 52 pt row (≈ 22 pt line + 2 × 15).
+                .padding(.vertical, 15)
+
+            if let moreMenu, !moreMenu.isEmpty {
+                moreMenu
+                    .padding(.bottom, 4)
+            }
+
+            trailingButton
+                .padding(.trailing, 6)
+                .padding(.bottom, 4)
+        }
+        .frame(minHeight: GianTheme.Metrics.composerHeight)
+    }
+
+    @ViewBuilder
+    private var trailingButton: some View {
+        if isTurnActive {
+            Button(action: onStop) {
+                Image(systemName: "stop.fill")
+                    .font(.footnote.weight(.bold))
+            }
+            .buttonStyle(GianCircularButtonStyle(tint: GianTheme.Colors.label))
+            .disabled(!remoteReady)
+            .accessibilityLabel("Stop")
+        } else {
+            Button(action: onSend) {
+                Image(systemName: "arrow.up")
+                    .font(.body.weight(.bold))
+            }
+            .buttonStyle(GianCircularButtonStyle())
+            .disabled(!sendEnabled)
+            .keyboardShortcut(.return, modifiers: .command)
+            .accessibilityLabel("Send")
+        }
     }
 
     // MARK: - Send phase accessory
@@ -208,43 +253,6 @@ struct ComposerView: View {
     }
 }
 
-/// Non-editing long entry on home/directory surfaces: "Start a new chat…".
-/// Tapping dispatches `.openNewChat`.
-struct NewChatEntryBar: View {
-    var onOpen: () -> Void
-
-    var body: some View {
-        Button(action: onOpen) {
-            HStack(spacing: GianTheme.Metrics.paddingSmall) {
-                Text("Start a new chat…")
-                    .font(GianTheme.Typography.body)
-                    .foregroundStyle(GianTheme.Colors.secondaryLabel)
-                Spacer(minLength: 0)
-                Image(systemName: "square.and.pencil")
-                    .font(.body.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .frame(
-                        width: GianTheme.Metrics.avatarMedium,
-                        height: GianTheme.Metrics.avatarMedium
-                    )
-                    .background(GianTheme.Colors.tint, in: Circle())
-            }
-            .padding(.horizontal, GianTheme.Metrics.paddingMedium)
-            .padding(.vertical, 6)
-            .frame(minHeight: GianTheme.Metrics.minHitTarget)
-            .gianGlassSurface(
-                in: RoundedRectangle(
-                    cornerRadius: GianTheme.Metrics.cornerRadiusLarge,
-                    style: .continuous
-                ),
-                interactive: true
-            )
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Start a new chat")
-    }
-}
-
 #Preview("Composer") {
     VStack(spacing: 16) {
         ComposerView(draft: .constant(""), attachments: [])
@@ -261,7 +269,6 @@ struct NewChatEntryBar: View {
             sendPhase: .uncertain,
             canRetryUncertainCreate: true
         )
-        NewChatEntryBar(onOpen: {})
     }
     .padding()
 }

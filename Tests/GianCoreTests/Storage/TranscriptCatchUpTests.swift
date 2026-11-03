@@ -9,7 +9,9 @@ struct TranscriptCatchUpTests {
         let clock = ManualGianClock(instant: PreviewFixtures.instant)
         let store = GianClientStore(service: service, clock: clock, storage: InMemoryGianStorage())
         _ = try await signIn(store, clock: clock)
-        let old = transcriptItem(id: "raced-assistant", turn: 1, text: "A")
+        // `transcriptItem` builds a user message; live deltas only extend assistant text.
+        var old = transcriptItem(id: "raced-assistant", turn: 1, text: "A")
+        old.body = .assistant(text: "A", delta: false)
         service.transcriptPages = [TranscriptPageResponse(items: [old], cursor: nil, hasOlder: false)]
         _ = await store.dispatch(.selectConversation(PreviewFixtures.sessionID))
         store.markConnectionNotReady(.resyncing, reason: .cryptoResumed)

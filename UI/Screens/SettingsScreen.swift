@@ -1,9 +1,10 @@
 import SwiftUI
 import GianCore
 
-/// Settings bound to the contract: Back, Account (login + sign out via
-/// `.logout`), Server (address; changing signs out and returns to setup),
-/// paired Hosts list, Appearance (UI-local preference), and the evictable
+/// Settings bound to the contract: Done, Account (login + confirmed sign out
+/// via `.logout`), Server (address; "Change server…" asks for the new address
+/// with Cancel first and only then signs out),
+/// paired Hosts list with Add Host, Appearance (UI-local preference), and the evictable
 /// attachment cache (`.clearAttachmentCache`). There are intentionally no
 /// OS-notification entries.
 ///
@@ -29,8 +30,14 @@ struct SettingsScreen: View {
 
     var onBack: () -> Void = {}
     var onSignOut: () -> Void = {}
-    var onChangeServer: () -> Void = {}
+    /// Called only after the new address is confirmed; signs out of this server.
+    var onChangeServer: (String) -> Void = { _ in }
     var onEvictAttachmentCache: () -> Void = {}
+    var addHost = AddHostPresentation()
+
+    @State private var confirmsSignOut = false
+    @State private var changesServer = false
+    @State private var addsHost = false
 
     var body: some View {
         List {
@@ -46,12 +53,11 @@ struct SettingsScreen: View {
         .navigationTitle("Settings")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button(action: onBack) {
-                    Label("Back", systemImage: "chevron.left")
-                }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Done", action: onBack)
             }
         }
+        .addHostSheet(isPresented: $addsHost, pairing: addHost)
     }
 
     private var accountSection: some View {
@@ -66,16 +72,28 @@ struct SettingsScreen: View {
                         .foregroundStyle(GianTheme.Colors.secondaryLabel)
                 }
             }
-            Button("Sign out", role: .destructive, action: onSignOut)
+            Button("Sign out", role: .destructive) { confirmsSignOut = true }
                 .accessibilityHint("Hides this account's local data until you sign in again")
+                .confirmationDialog("Sign out of \(serverAddress)?", isPresented: $confirmsSignOut, titleVisibility: .visible) {
+                    Button("Sign out", role: .destructive, action: onSignOut)
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("You'll need to sign in with GitHub and pair a Host again.")
+                }
         }
     }
 
     private var serverSection: some View {
         Section("Server") {
             LabeledContent("Address", value: serverAddress)
-            Button("Change server…", action: onChangeServer)
-                .accessibilityHint("Signs out and returns to server setup")
+            Button("Change server…") { changesServer = true }
+                .accessibilityHint("Asks for the new address; nothing changes until you confirm")
+                .sheet(isPresented: $changesServer) {
+                    ChangeServerSheet(current: serverAddress) { address in
+                        changesServer = false
+                        onChangeServer(address)
+                    }
+                }
         }
     }
 
@@ -95,6 +113,7 @@ struct SettingsScreen: View {
                     }
                 }
             }
+            Button("Add Host", systemImage: "plus") { addsHost = true }
         }
     }
 
@@ -126,8 +145,50 @@ struct SettingsScreen: View {
                     .font(GianTheme.Typography.caption)
                     .foregroundStyle(GianTheme.Colors.warning)
             }
-            Button("Evict attachment cache", action: onEvictAttachmentCache)
+            Button("Clear cached attachments", action: onEvictAttachmentCache)
                 .accessibilityHint("Re-downloads attachments when needed; drafts and history are kept")
         }
+    }
+}
+
+/// New server address with Cancel. Switching signs out of the current server,
+/// so nothing happens until the user confirms a different address.
+private struct ChangeServerSheet: View {
+    let current: String
+    var onSwitch: (String) -> Void
+
+    @State private var address = ""
+    @Environment(\.dismiss) private var dismiss
+
+    private var trimmed: String {
+        address.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("https://server.example.com", text: $address)
+                        .keyboardType(.URL)
+                        .textContentType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                } footer: {
+                    Text("Switching signs you out of \(current). You'll sign in with GitHub and pair a Host on the new server.")
+                }
+            }
+            .navigationTitle("Change Server")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel", systemImage: "xmark") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Switch") { onSwitch(trimmed) }
+                        .disabled(trimmed.isEmpty || trimmed == current)
+                }
+            }
+        }
+        .onAppear { address = current }
     }
 }

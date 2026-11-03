@@ -313,7 +313,7 @@ final class StoreProjectionTests: XCTestCase {
         ]
         let banner = StoreProjection.banner(state)
         XCTAssertEqual(banner?.id, id("b1", BannerID.self))
-        XCTAssertEqual(banner?.agent, .claude)
+        XCTAssertEqual(banner?.agent.bundled, .claude)
         XCTAssertEqual(banner?.summary, "Task completed · 3 events")
     }
 

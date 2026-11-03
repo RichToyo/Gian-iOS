@@ -61,6 +61,33 @@ public struct AccountAuthorization: Sendable, Equatable {
     public static let signedOut = AccountAuthorization(status: .signedOut)
 }
 
+/// How the last pairing attempt ended.
+public enum HostPairingOutcome: Sendable, Equatable {
+    /// Confirmed; the Host is now current (it may have been paired before).
+    case paired(HostID)
+    /// Not a pairing link or QR code for this server.
+    case invalidCode
+    case rejected
+    case expired
+    case failed(String)
+}
+
+/// An Agent's own logo as the Host provides it, per appearance.
+public struct AgentLogoImages: Sendable, Equatable {
+    public var light: Data?
+    public var dark: Data?
+
+    public init(light: Data? = nil, dark: Data? = nil) {
+        self.light = light
+        self.dark = dark
+    }
+
+    public subscript(variant: AgentLogoVariant) -> Data? {
+        get { variant == .light ? light : dark }
+        set { if variant == .light { light = newValue } else { dark = newValue } }
+    }
+}
+
 public struct PendingHostPairing: Sendable, Equatable {
     public var pairingID: PairingID
     public var hostID: HostID
@@ -196,6 +223,12 @@ public struct ComposerSelection: Sendable, Equatable {
     public var model: String?
     public var workspaceID: WorkspaceID?
     public var taskID: TaskID?
+    /// New-chat conversation options. Thinking and Fast travel with
+    /// `session.create`; approval is applied right after creation. Optional so
+    /// selections persisted before these existed still decode.
+    public var thinking: String? = nil
+    public var fast: Bool? = nil
+    public var approvalMode: String? = nil
 
     public init(agentID: AgentID? = nil, model: String? = nil, workspaceID: WorkspaceID? = nil, taskID: TaskID? = nil) {
         self.agentID = agentID
@@ -272,6 +305,8 @@ public struct GianClientState: Sendable, Equatable {
     public var hosts: [HostSummary]
     public var currentHostID: HostID?
     public var pendingPairing: PendingHostPairing?
+    /// The last pairing attempt's outcome, cleared by the next attempt.
+    public var pairingOutcome: HostPairingOutcome? = nil
     public var connection: ConnectionProjection
     public var localConnectivity: LocalConnectivity
     public var foreground: ForegroundPresence
@@ -289,6 +324,13 @@ public struct GianClientState: Sendable, Equatable {
     public var capabilities: CapabilityProjection
     public var sync: SyncProjection
     public var pendingStop: SendPhase
+    /// `catalog.agent` options per Agent, for the composer's ⋯ menu.
+    public var agentOptions: [AgentID: AgentConversationOptions] = [:]
+    /// A conversation-setting change in flight, and the last failure to show.
+    public var settingsUpdatePending: Bool = false
+    public var settingsNotice: String? = nil
+    /// Agent logos fetched from the Host, keyed by plugin ID.
+    public var agentLogos: [String: AgentLogoImages] = [:]
 
     public init(
         phase: ClientPhase,

@@ -1,11 +1,14 @@
 import SwiftUI
 import GianCore
 
-/// Adaptive root for the ready phase: narrow (compact) shows home → chat
-/// navigation; wide (regular / Duo / tablet) keeps the directory left and
-/// chat right. Drafts live in the store (per conversation target), so they
-/// survive layout changes and navigation by construction. Back and new-chat
-/// dismissal dispatch `.returnHome`; no device dimensions are hardcoded.
+/// Adaptive root for the ready phase: narrow (compact, folded Duo) is a
+/// navigation stack whose path follows the store's destination (home → new
+/// chat or chat, so a created conversation replaces new chat in place); wide (regular,
+/// unfolded Duo, tablet) is a split view with the directory as sidebar and
+/// chat or new chat in the detail column. Drafts live in the store (per
+/// conversation target), so they survive layout changes and navigation by
+/// construction. Back and new-chat dismissal dispatch `.returnHome`; no device
+/// dimensions are hardcoded.
 struct AdaptiveRoot: View {
     let accountLogin: String
     let hosts: [HostItem]
@@ -40,6 +43,7 @@ struct AdaptiveRoot: View {
     var onClearSearch: () -> Void = {}
     var onLoadMoreDirectory: (DirectoryCollection) -> Void = { _ in }
     var onRefreshDirectory: (DirectoryCollection) -> Void = { _ in }
+    var onPullToRefresh: (DirectoryCollection) async -> Void = { _ in }
     var onBannerTap: (BannerID) -> Void = { _ in }
     var onBannerDismiss: (BannerID) -> Void = { _ in }
     var onToggleAutomaticTranslation: (Bool) -> Void = { _ in }
@@ -66,17 +70,34 @@ struct AdaptiveRoot: View {
     var selectedAgentModels: [AgentModelRecord] = []
     var onSelectModel: (String?) -> Void = { _ in }
     var onSelectTask: (TaskID?) -> Void = { _ in }
+    /// Composer ⋯ options: the open conversation (`session.update`) and the
+    /// new-chat selection (sent with creation).
+    var conversationSettings: ConversationSettingsPresentation? = nil
+    var newChatSettings: ConversationSettingsPresentation? = nil
+    var onSetConversationModel: (String?) -> Void = { _ in }
+    var onSetConversationThinking: (String?) -> Void = { _ in }
+    var onSetConversationFast: (Bool) -> Void = { _ in }
+    var onSetConversationApproval: (String?) -> Void = { _ in }
+    var onSelectThinking: (String?) -> Void = { _ in }
+    var onSelectFast: (Bool) -> Void = { _ in }
+    var onSelectApproval: (String?) -> Void = { _ in }
+    var onLoadConversationOptions: () -> Void = {}
+    var onLoadNewChatOptions: () -> Void = {}
     var onReturnHome: () -> Void = {}
     var onSignOut: () -> Void = {}
-    var onChangeServer: () -> Void = {}
+    var onChangeServer: (String) -> Void = { _ in }
     var onEvictAttachmentCache: () -> Void = {}
     var attachmentPresentation: (AttachmentID) -> AttachmentFilePresentation = { _ in .unknown }
     var onDownloadAttachment: (AttachmentID) -> Void = { _ in }
     var attachmentData: (AttachmentID) -> Data? = { _ in nil }
     var attachmentDescriptorName: (AttachmentID) -> String = { _ in "Attachment" }
     var serverAddress: String = ""
+    /// Pairing another Host from the Host menu or Settings.
+    var addHost = AddHostPresentation()
 
     @State private var showsSearch = false
+    @State private var showsAddHost = false
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var appearance: SettingsScreen.Appearance = .system
     @AppStorage("gian.appearance") private var storedAppearance: String = SettingsScreen.Appearance.system.rawValue
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -91,7 +112,6 @@ struct AdaptiveRoot: View {
                 narrowLayout
             }
         }
-        .background(GianTheme.Colors.background)
         .preferredColorScheme(colorScheme)
         .onAppear {
             appearance = SettingsScreen.Appearance(rawValue: storedAppearance) ?? .system
@@ -133,158 +153,244 @@ struct AdaptiveRoot: View {
                     onBack: onCloseSettings,
                     onSignOut: onSignOut,
                     onChangeServer: onChangeServer,
-                    onEvictAttachmentCache: onEvictAttachmentCache
+                    onEvictAttachmentCache: onEvictAttachmentCache,
+                    addHost: addHost
                 )
             }
         }
-        .fullScreenCover(
-            isPresented: Binding(
-                get: { navigation.destination == .newChat },
-                set: { if !$0 { onReturnHome() } }
-            )
-        ) {
-            NewChatScreen(
-                workspaces: workspaces,
-                agents: agents,
-                openTasks: openTasks,
-                composer: composer,
-                translation: nil,
-                selectedAgentModels: selectedAgentModels,
-                mutationsReady: mutationsReady,
-                directoryNegotiated: directoryNegotiated,
-                canRetryUncertainCreate: canRetryUncertainCreate,
-                thumbnail: thumbnail,
-                onSelectWorkspace: onSelectWorkspace,
-                onSelectAgent: onSelectAgent,
-                onSelectModel: onSelectModel,
-                onSelectTask: onSelectTask,
-                onEditDraft: onEditDraft,
-                onSend: onSend,
-                onRetryTranslationSend: onRetryTranslationSend,
-                onSendOriginal: onSendOriginal,
-                onCancelTranslationSend: onCancelTranslationSend,
-                onRecoverUncertain: onRecoverUncertain,
-                onRetryUncertainCreate: onRetryUncertainCreate,
-                onRemoveAttachment: onRemoveAttachment,
-                onRetryAttachmentUpload: onRetryAttachmentUpload,
-                onClose: onReturnHome,
-                attachmentPicker: AttachmentPickerButton(onPicked: onPickAttachment)
-            )
-        }
+        .addHostSheet(isPresented: $showsAddHost, pairing: addHost)
+    }
+
+    private var currentHost: HostItem? {
+        hosts.first(where: \.isCurrent)
+    }
+
+    /// Compact navigation is a path derived from the store's destination.
+    /// New chat is pushed, not presented: when the first send creates the
+    /// conversation the path swaps New chat for it in one step, instead of a
+    /// cover dismissal racing a push (which landed on Home).
+    private enum Route: Hashable {
+        case newChat
+        case conversation(SessionID)
+    }
+
+    private var narrowPath: Binding<[Route]> {
+        Binding(
+            get: {
+                switch navigation.destination {
+                case .home: []
+                case .newChat: [.newChat]
+                case .conversation(let id): [.conversation(id)]
+                }
+            },
+            set: { if $0.isEmpty { onReturnHome() } }
+        )
     }
 
     // MARK: - Layouts
 
     private var narrowLayout: some View {
-        NavigationStack {
-            HomeScreen(
-                accountLogin: accountLogin,
-                hosts: hosts,
-                directory: directory,
-                onOpenSettings: onOpenSettings,
-                onOpenSearch: { showsSearch = true },
-                onSelectHost: onSelectHost,
-                onSelectDirectoryView: onSelectDirectoryView,
-                onSelectConversation: onSelectConversation,
-                onLoadMoreDirectory: onLoadMoreDirectory,
-                onRefreshDirectory: onRefreshDirectory,
-                onOpenNewChat: onOpenNewChat
-            )
-            .navigationDestination(
-                isPresented: Binding(
-                    get: {
-                        if case .conversation = navigation.destination { return true }
-                        return false
-                    },
-                    set: { if !$0 { onReturnHome() } }
+        NavigationStack(path: narrowPath) {
+            home(selectedConversationID: nil, isSidebar: false, onToggleSidebar: nil)
+                .background(GianTheme.Colors.background)
+                .navigationDestination(for: Route.self) { route in
+                    switch route {
+                    case .newChat:
+                        newChatScreen
+                            // Close (top of the bar) dismisses; no Back too.
+                            .navigationBarBackButtonHidden()
+                    case .conversation:
+                        chatSurface
+                    }
+                }
+        }
+    }
+
+    /// Landscape keeps the sidebar open beside the chat (nothing to collapse,
+    /// no toggle). Portrait shows it as a wider overlay, collapsible from a
+    /// toggle on its far left. Size classes are regular both ways on the inner
+    /// display, so the split view's own aspect ratio decides.
+    private var wideLayout: some View {
+        GeometryReader { geometry in
+            let isLandscape = geometry.size.width > geometry.size.height
+            NavigationSplitView(columnVisibility: isLandscape ? .constant(.all) : $columnVisibility) {
+                // The detail column's bar (vertical on the unfolded Duo)
+                // carries the global actions, so the sidebar keeps list actions.
+                home(
+                    selectedConversationID: conversation?.id,
+                    isSidebar: true,
+                    onToggleSidebar: isLandscape ? nil : { withAnimation { columnVisibility = .detailOnly } }
                 )
-            ) {
-                chatSurface(showsBack: true, onBack: onReturnHome)
+                // Tiled in landscape; in portrait the overlay is the system's
+                // 320 pt (wider than the ~250 pt a tiled portrait column got).
+                .navigationSplitViewColumnWidth(min: 280, ideal: 320, max: 380)
+                .toolbar(removing: .sidebarToggle)
+            } detail: {
+                // Removing the system toggle from the sidebar removes it here
+                // too, so portrait supplies its own Show sidebar on the far left.
+                NavigationStack {
+                    detailContent
+                        .toolbar {
+                            if !isLandscape, columnVisibility == .detailOnly {
+                                ToolbarItem(placement: .topBarLeading) {
+                                    Button("Show sidebar", systemImage: "sidebar.left") {
+                                        withAnimation { columnVisibility = .all }
+                                    }
+                                }
+                            }
+                        }
+                }
+            }
+            .modifier(SplitStyleModifier(isLandscape: isLandscape))
+            // Portrait overlay: show the list when nothing is open, get out of
+            // the way once a conversation (or new chat) is.
+            // The split view picks its own visibility on first layout, so
+            // re-apply after it settles (and on rotation).
+            .task(id: isLandscape) {
+                try? await Task.sleep(for: .milliseconds(350))
+                syncPortraitSidebar(isLandscape: isLandscape)
+            }
+            .onChange(of: navigation.destination) { _, _ in syncPortraitSidebar(isLandscape: isLandscape) }
+        }
+    }
+
+    private func syncPortraitSidebar(isLandscape: Bool) {
+        guard !isLandscape else { return }
+        withAnimation {
+            columnVisibility = navigation.destination == .home ? .all : .detailOnly
+        }
+    }
+
+    private func home(selectedConversationID: SessionID?, isSidebar: Bool, onToggleSidebar: (() -> Void)?) -> some View {
+        HomeScreen(
+            accountLogin: accountLogin,
+            hosts: hosts,
+            directory: directory,
+            selectedConversationID: selectedConversationID,
+            isSidebar: isSidebar,
+            onToggleSidebar: onToggleSidebar,
+            onOpenSettings: onOpenSettings,
+            onOpenSearch: { showsSearch = true },
+            onSelectHost: onSelectHost,
+            onSelectDirectoryView: onSelectDirectoryView,
+            onSelectConversation: onSelectConversation,
+            onLoadMoreDirectory: onLoadMoreDirectory,
+            onRefreshDirectory: onRefreshDirectory,
+            onPullToRefresh: onPullToRefresh,
+            onOpenNewChat: onOpenNewChat,
+            onAddHost: { showsAddHost = true },
+            canLoad: mutationsReady
+        )
+    }
+
+    @ViewBuilder
+    private var detailContent: some View {
+        switch navigation.destination {
+        case .newChat:
+            newChatScreen
+        case .conversation:
+            chatSurface
+        case .home:
+            ContentUnavailableView(
+                "Select a conversation",
+                systemImage: "bubble.left.and.bubble.right",
+                description: Text("Choose a conversation or start a new chat.")
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(GianTheme.Colors.background)
+            .toolbar {
+                GlobalToolbarActions(onNewChat: onOpenNewChat, onSettings: onOpenSettings)
             }
         }
     }
 
-    private var wideLayout: some View {
-        HStack(spacing: 0) {
-            DirectorySidebar(
-                accountLogin: accountLogin,
-                hosts: hosts,
-                directory: directory,
-                selectedConversationID: conversation?.id,
-                onOpenSettings: onOpenSettings,
-                onOpenSearch: { showsSearch = true },
-                onSelectHost: onSelectHost,
-                onSelectDirectoryView: onSelectDirectoryView,
-                onSelectConversation: onSelectConversation,
-                onLoadMoreDirectory: onLoadMoreDirectory,
-                onRefreshDirectory: onRefreshDirectory,
-                onOpenNewChat: onOpenNewChat
-            )
-            .frame(minWidth: 280, idealWidth: 320, maxWidth: 380)
-
-            Rectangle()
-                .fill(GianTheme.Colors.separator)
-                .frame(width: 0.5)
-
-            if conversation != nil {
-                chatSurface(showsBack: false, onBack: {})
-            } else {
-                ContentUnavailableView(
-                    "Select a conversation",
-                    systemImage: "bubble.left.and.bubble.right",
-                    description: Text("Choose a conversation or start a new chat.")
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(GianTheme.Colors.background)
-            }
-        }
+    private var newChatScreen: some View {
+        NewChatScreen(
+            workspaces: workspaces,
+            agents: agents,
+            openTasks: openTasks,
+            composer: composer,
+            translation: nil,
+            selectedAgentModels: selectedAgentModels,
+            mutationsReady: mutationsReady,
+            directoryNegotiated: directoryNegotiated,
+            canRetryUncertainCreate: canRetryUncertainCreate,
+            thumbnail: thumbnail,
+            onSelectWorkspace: onSelectWorkspace,
+            onSelectAgent: onSelectAgent,
+            onSelectModel: onSelectModel,
+            onSelectTask: onSelectTask,
+            onEditDraft: onEditDraft,
+            onSend: onSend,
+            onRetryTranslationSend: onRetryTranslationSend,
+            onSendOriginal: onSendOriginal,
+            onCancelTranslationSend: onCancelTranslationSend,
+            onRecoverUncertain: onRecoverUncertain,
+            onRetryUncertainCreate: onRetryUncertainCreate,
+            onRemoveAttachment: onRemoveAttachment,
+            onRetryAttachmentUpload: onRetryAttachmentUpload,
+            onClose: onReturnHome,
+            attachmentPicker: AttachmentPickerButton(onPicked: onPickAttachment),
+            settings: newChatSettings,
+            onSelectThinking: onSelectThinking,
+            onSetFast: onSelectFast,
+            onSelectApproval: onSelectApproval,
+            onLoadOptions: onLoadNewChatOptions,
+            onOpenSettings: onOpenSettings,
+            host: currentHost
+        )
     }
 
     // MARK: - Chat surface
 
-    private func chatSurface(showsBack: Bool, onBack: @escaping () -> Void) -> some View {
-        Group {
-            if let conversation {
-                ChatScreen(
-                    conversation: conversation,
-                    composer: composer,
-                    showsBack: showsBack,
-                    mutationsReady: mutationsReady,
-                    diagnostic: diagnostic,
-                    thumbnail: thumbnail,
-                    onBack: onBack,
-                    onBannerTap: onBannerTap,
-                    onBannerDismiss: onBannerDismiss,
-                    onToggleAutomaticTranslation: onToggleAutomaticTranslation,
-                    onEditDraft: onEditDraft,
-                    onSend: onSend,
-                    onStop: onStop,
-                    onRetryTranslationSend: onRetryTranslationSend,
-                    onSendOriginal: onSendOriginal,
-                    onCancelTranslationSend: onCancelTranslationSend,
-                    onRecoverUncertain: onRecoverUncertain,
-                    onRemoveAttachment: onRemoveAttachment,
-                    onRetryAttachmentUpload: onRetryAttachmentUpload,
-                    onPageOlder: onPageOlder,
-                    onRespondToInteraction: onRespondToInteraction,
-                    onRequestTranslation: onRequestTranslation,
-                    onCancelReadingTranslation: onCancelReadingTranslation,
-                    onPageTranslation: onPageTranslation,
-                    attachmentPresentation: attachmentPresentation,
-                    onDownloadAttachment: onDownloadAttachment,
-                    attachmentData: attachmentData,
-                    attachmentDescriptorName: attachmentDescriptorName,
-                    attachmentPicker: AttachmentPickerButton(onPicked: onPickAttachment)
-                )
-            } else {
-                ContentUnavailableView(
-                    "Conversation unavailable",
-                    systemImage: "exclamationmark.triangle",
-                    description: Text("It may have been archived on the Host.")
-                )
-            }
+    @ViewBuilder
+    private var chatSurface: some View {
+        if let conversation {
+            ChatScreen(
+                conversation: conversation,
+                composer: composer,
+                mutationsReady: mutationsReady,
+                diagnostic: diagnostic,
+                thumbnail: thumbnail,
+                onBannerTap: onBannerTap,
+                onBannerDismiss: onBannerDismiss,
+                onToggleAutomaticTranslation: onToggleAutomaticTranslation,
+                onEditDraft: onEditDraft,
+                onSend: onSend,
+                onStop: onStop,
+                onRetryTranslationSend: onRetryTranslationSend,
+                onSendOriginal: onSendOriginal,
+                onCancelTranslationSend: onCancelTranslationSend,
+                onRecoverUncertain: onRecoverUncertain,
+                onRemoveAttachment: onRemoveAttachment,
+                onRetryAttachmentUpload: onRetryAttachmentUpload,
+                onPageOlder: onPageOlder,
+                onRespondToInteraction: onRespondToInteraction,
+                onRequestTranslation: onRequestTranslation,
+                onCancelReadingTranslation: onCancelReadingTranslation,
+                onPageTranslation: onPageTranslation,
+                attachmentPresentation: attachmentPresentation,
+                onDownloadAttachment: onDownloadAttachment,
+                attachmentData: attachmentData,
+                attachmentDescriptorName: attachmentDescriptorName,
+                attachmentPicker: AttachmentPickerButton(onPicked: onPickAttachment),
+                settings: conversationSettings,
+                onSelectModel: onSetConversationModel,
+                onSelectThinking: onSetConversationThinking,
+                onSetFast: onSetConversationFast,
+                onSelectApproval: onSetConversationApproval,
+                onLoadOptions: onLoadConversationOptions,
+                onOpenNewChat: onOpenNewChat,
+                onOpenSettings: onOpenSettings,
+                host: currentHost
+            )
+        } else {
+            ContentUnavailableView(
+                "Conversation unavailable",
+                systemImage: "exclamationmark.triangle",
+                description: Text("It may have been archived on the Host.")
+            )
         }
-        .toolbar(.hidden, for: .navigationBar)
     }
 
     private var colorScheme: ColorScheme? {
@@ -296,64 +402,16 @@ struct AdaptiveRoot: View {
     }
 }
 
-/// Sidebar column for wide layouts (design D): avatar + search, menu-style
-/// Host selector, Tasks/Repos segmented list, new-chat bar at the bottom.
-struct DirectorySidebar: View {
-    let accountLogin: String
-    let hosts: [HostItem]
-    let directory: DirectoryPresentation
-    var selectedConversationID: SessionID? = nil
+/// Side-by-side columns in landscape; an overlay sidebar in portrait so it can
+/// be wider than a tiled column without squeezing the conversation.
+private struct SplitStyleModifier: ViewModifier {
+    let isLandscape: Bool
 
-    var onOpenSettings: () -> Void = {}
-    var onOpenSearch: () -> Void = {}
-    var onSelectHost: (HostID) -> Void = { _ in }
-    var onSelectDirectoryView: (DirectoryView) -> Void = { _ in }
-    var onSelectConversation: (SessionID) -> Void = { _ in }
-    var onLoadMoreDirectory: (DirectoryCollection) -> Void = { _ in }
-    var onRefreshDirectory: (DirectoryCollection) -> Void = { _ in }
-    var onOpenNewChat: () -> Void = {}
-
-    var body: some View {
-        VStack(spacing: GianTheme.Metrics.paddingSmall) {
-            HStack {
-                Button(action: onOpenSettings) {
-                    UserAvatar(login: accountLogin, size: GianTheme.Metrics.avatarMedium)
-                }
-                .buttonStyle(.plain)
-                .gianHitTarget()
-                Spacer()
-                Button(action: onOpenSearch) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.body.weight(.medium))
-                        .foregroundStyle(GianTheme.Colors.label)
-                        .gianHitTarget()
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Search conversations")
-            }
-            .padding(.horizontal, GianTheme.Metrics.paddingMedium)
-
-            HostMenuSelector(hosts: hosts, onSelect: onSelectHost)
-                .padding(.horizontal, GianTheme.Metrics.paddingMedium)
-
-            DirectorySegmentedControl(selection: Binding(
-                get: { directory.view },
-                set: onSelectDirectoryView
-            ))
-
-            DirectoryContent(
-                directory: directory,
-                selectedConversationID: selectedConversationID,
-                onSelectConversation: onSelectConversation,
-                onLoadMore: onLoadMoreDirectory,
-                onRefresh: onRefreshDirectory
-            )
-
-            NewChatEntryBar(onOpen: onOpenNewChat)
-                .padding(.horizontal, GianTheme.Metrics.paddingMedium)
-                .padding(.bottom, GianTheme.Metrics.paddingSmall)
+    func body(content: Content) -> some View {
+        if isLandscape {
+            content.navigationSplitViewStyle(.balanced)
+        } else {
+            content.navigationSplitViewStyle(.prominentDetail)
         }
-        .padding(.top, GianTheme.Metrics.paddingSmall)
-        .background(GianTheme.Colors.card)
     }
 }

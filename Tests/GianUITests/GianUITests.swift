@@ -31,7 +31,8 @@ final class GianUITests: XCTestCase {
 
         // Device code appears; the coordinator polls and the scripted service
         // authorizes on the first poll (5s interval in the script).
-        let code = app.staticTexts["ABCD-EFGH"]
+        // The code's accessibility label is "GitHub device code ABCD-EFGH".
+        let code = app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'ABCD-EFGH'")).firstMatch
         XCTAssertTrue(code.waitForExistence(timeout: 10))
 
         // Pairing step: paste the scripted QR payload manually.
@@ -44,7 +45,8 @@ final class GianUITests: XCTestCase {
         // Home: scripted task group and its conversation appear; the new-chat
         // entry exists. No notification bell or inbox exists anywhere.
         XCTAssertTrue(app.buttons["Start a new chat"].waitForExistence(timeout: 15))
-        XCTAssertTrue(app.staticTexts["Paint the harbor"].waitForExistence(timeout: 10))
+        let taskGroup = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Paint the harbor'")).firstMatch
+        XCTAssertTrue(taskGroup.waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["Mooring notes"].waitForExistence(timeout: 10))
         XCTAssertFalse(app.images["bell"].exists)
     }

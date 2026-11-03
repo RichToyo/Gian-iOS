@@ -10,31 +10,55 @@ import GianCore
 
 /// Agent logo selection from the Host-supplied plugin identity. Unknown
 /// plugins render a neutral symbol — never a wrong logo.
-enum AgentLogo: Equatable, Sendable {
-    case claude, codex, deepseek, grok, kimi, zcode, other
+/// An Agent's logo: the Host's own (`proxy.logo`, looked up by plugin ID)
+/// when it has one, else a bundled copy for well-known Agents, else the
+/// Agent name's initial (see `AgentAvatar`).
+struct AgentLogo: Equatable, Sendable {
+    enum Bundled: Equatable, Sendable {
+        case claude, codex, deepseek, grok, kimi, zcode
 
-    init(pluginID: String, agentName: String) {
-        let token = (pluginID + " " + agentName).lowercased()
-        if token.contains("claude") || token.contains("cc-proxy") { self = .claude }
-        else if token.contains("codex") { self = .codex }
-        else if token.contains("deepseek") || token.contains("dsh") { self = .deepseek }
-        else if token.contains("grok") { self = .grok }
-        else if token.contains("kimi") { self = .kimi }
-        else if token.contains("zcode") { self = .zcode }
-        else { self = .other }
-    }
-
-    var assetName: String? {
-        switch self {
-        case .claude: "agent-claude"
-        case .codex: "agent-codex"
-        case .deepseek: "agent-deepseek"
-        case .grok: "agent-grok"
-        case .kimi: "agent-kimi"
-        case .zcode: "agent-zcode"
-        case .other: nil
+        var assetName: String {
+            switch self {
+            case .claude: "agent-claude"
+            case .codex: "agent-codex"
+            case .deepseek: "agent-deepseek"
+            case .grok: "agent-grok"
+            case .kimi: "agent-kimi"
+            case .zcode: "agent-zcode"
+            }
         }
     }
+
+    var pluginID: String
+    var bundled: Bundled?
+
+    init(pluginID: String, agentName: String) {
+        self.pluginID = pluginID
+        let token = (pluginID + " " + agentName).lowercased()
+        if token.contains("claude") || token.contains("cc-proxy") { bundled = .claude }
+        else if token.contains("codex") { bundled = .codex }
+        else if token.contains("deepseek") || token.contains("dsh") { bundled = .deepseek }
+        else if token.contains("grok") { bundled = .grok }
+        else if token.contains("kimi") { bundled = .kimi }
+        else if token.contains("zcode") { bundled = .zcode }
+        else { bundled = nil }
+    }
+
+    private init(pluginID: String, bundled: Bundled?) {
+        self.pluginID = pluginID
+        self.bundled = bundled
+    }
+
+    var assetName: String? { bundled?.assetName }
+
+    // Shorthands for previews and fixtures.
+    static let claude = AgentLogo(pluginID: "claude", bundled: .claude)
+    static let codex = AgentLogo(pluginID: "codex", bundled: .codex)
+    static let deepseek = AgentLogo(pluginID: "dsh", bundled: .deepseek)
+    static let grok = AgentLogo(pluginID: "grok", bundled: .grok)
+    static let kimi = AgentLogo(pluginID: "kimi", bundled: .kimi)
+    static let zcode = AgentLogo(pluginID: "zcode", bundled: .zcode)
+    static let other = AgentLogo(pluginID: "", bundled: nil)
 }
 
 // MARK: - Directory
@@ -355,4 +379,40 @@ struct ActiveConversationPresentation: Equatable, Sendable {
     var banner: BannerPresentation?
     var translation: SessionTranslationPresentation?
     var isTurnActive: Bool
+}
+
+/// The options a conversation can change while it runs, for the composer's ⋯
+/// menu. Empty choice lists hide that item (the Agent doesn't offer it).
+struct ConversationSettingsPresentation: Equatable, Sendable {
+    enum Fast: Equatable, Sendable {
+        /// The Agent has no Fast option.
+        case unavailable
+        /// Fast exists but not for the current model.
+        case unsupportedModel
+        case available(isOn: Bool)
+    }
+
+    /// The conversation's Agent: its logo marks the Model row.
+    var agent: AgentLogo = .other
+    var agentName: String = "Agent"
+    var models: [AgentOptionChoice] = []
+    var model: String?
+    var thinking: [AgentOptionChoice] = []
+    var currentThinking: String?
+    var fast: Fast = .unavailable
+    var approval: [AgentOptionChoice] = []
+    var currentApproval: String?
+    /// False while a change is in flight or mutations are gated.
+    var isEnabled: Bool = true
+    var notice: String?
+
+    /// Fast is shown only when the current model offers it.
+    var showsFast: Bool {
+        if case .available = fast { return true }
+        return false
+    }
+
+    var isEmpty: Bool {
+        models.isEmpty && thinking.isEmpty && !showsFast && approval.isEmpty
+    }
 }

@@ -81,12 +81,16 @@ extension LiveGianClientService {
                 let expires = Date(timeIntervalSince1970: Double(try response.integer("expires_at")) / 1000)
                 guard expires > clock.now() else { throw RemoteClientError.expired }
                 let previous = try loadVault(server: server, account: identity.account)
+                // One instant for both: the invalidation barrier requires
+                // authorizationCreatedAt <= lastVerifiedAt, and two reads of a
+                // real clock put creation a few microseconds later.
+                let verifiedAt = clock.now()
                 let vault = RemoteAccountVault(server: server.absoluteString, account: identity.account.id, login: identity.login,
                     identity: pending.identity, token: token, expiresAt: expires, fingerprint: pending.fingerprint,
-                    keyFingerprint: RemoteWire.hash(try pending.identity.publicKey.wire.encoded()), lastVerifiedAt: clock.now(),
+                    keyFingerprint: RemoteWire.hash(try pending.identity.publicKey.wire.encoded()), lastVerifiedAt: verifiedAt,
                     hosts: previous?.identity.installation == identity.installationID.rawValue ? previous?.hosts ?? [:] : [:],
                     translationAttempts: previous?.translationAttempts ?? [:], commandAttempts: previous?.commandAttempts ?? [:],
-                    authorizationID: pending.attempt.authorizationID, authorizationCreatedAt: clock.now())
+                    authorizationID: pending.attempt.authorizationID, authorizationCreatedAt: verifiedAt)
                 try persistLogin(vault, account: identity.account, attempt: pending.attempt, epoch: captured)
                 login = nil; lastFailure = nil; diagnostic(.cleared, login: pending)
                 return .authorized(identity)

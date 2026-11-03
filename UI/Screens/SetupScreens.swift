@@ -11,6 +11,8 @@ struct SetupFlowView: View {
     let account: AccountAuthorization
     let server: ServerAddress?
     let pendingPairing: PendingHostPairing?
+    /// Why the last pairing attempt failed, if it did.
+    var pairingNotice: String? = nil
 
     var onSubmitServer: (String) -> Void = { _ in }
     var onStartGitHubLogin: () -> Void = {}
@@ -18,31 +20,55 @@ struct SetupFlowView: View {
     var onOpenVerificationURL: (URL) -> Void = { _ in }
     var onPairPayload: (String) -> Void = { _ in }
     var onRefreshPairing: () -> Void = {}
+    /// Leaves pairing (signs out) so this step is never a dead end.
+    var onStartOver: () -> Void = {}
 
     @State private var serverAddress = ""
 
     var body: some View {
-        VStack(spacing: GianTheme.Metrics.paddingLarge) {
+        // A plain stack, not a ScrollView: inside a scroll view that re-centers
+        // as the keyboard resizes it, the first tap on Continue was swallowed.
+        VStack(spacing: GianTheme.Metrics.paddingLarge * 1.5) {
+            Spacer(minLength: 0)
             brandHeader
-            Spacer()
             stepContent
-            Spacer()
+            Spacer(minLength: 0)
         }
+        .frame(maxWidth: GianTheme.Metrics.formWidth)
         .padding(GianTheme.Metrics.paddingLarge)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(GianTheme.Colors.background)
+        .onAppear { serverAddress = server?.absoluteString ?? serverAddress }
+        .onChange(of: server) { _, value in
+            if let value { serverAddress = value.absoluteString }
+        }
     }
 
     private var brandHeader: some View {
         VStack(spacing: GianTheme.Metrics.paddingSmall) {
             Image("brand-icon")
                 .resizable()
-                .frame(width: 72, height: 72)
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .frame(width: 64, height: 64)
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             Text("Gian")
-                .font(.title.weight(.bold))
+                .font(.title2.weight(.bold))
                 .foregroundStyle(GianTheme.Colors.label)
+            if let step {
+                Text("Step \(step) of 3")
+                    .font(GianTheme.Typography.caption)
+                    .foregroundStyle(GianTheme.Colors.secondaryLabel)
+            }
         }
         .accessibilityElement(children: .combine)
+    }
+
+    private var step: Int? {
+        switch phase {
+        case .signedOut, .serverEntered: 1
+        case .awaitingGitHubDeviceLogin: 2
+        case .awaitingHostPairing: 3
+        case .ready: nil
+        }
     }
 
     @ViewBuilder
@@ -61,6 +87,13 @@ struct SetupFlowView: View {
 
     // MARK: - Server address + sign-in
 
+    /// The address field stays editable after Continue (Core accepts a new
+    /// address until sign-in starts), so a typo is fixed in place.
+    private var serverChanged: Bool {
+        let typed = serverAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        return server == nil || typed != server?.absoluteString
+    }
+
     @ViewBuilder
     private var serverAndSignInStep: some View {
         VStack(spacing: GianTheme.Metrics.paddingMedium) {
@@ -72,8 +105,15 @@ struct SetupFlowView: View {
 
             TextField("https://server.example.com", text: $serverAddress)
                 .keyboardType(.URL)
+                .textContentType(.URL)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
+                .submitLabel(.continue)
+                .onSubmit {
+                    if serverChanged, !serverAddress.trimmingCharacters(in: .whitespaces).isEmpty {
+                        onSubmitServer(serverAddress)
+                    }
+                }
                 .font(GianTheme.Typography.body)
                 .padding(GianTheme.Metrics.paddingMedium)
                 .background(
@@ -90,20 +130,14 @@ struct SetupFlowView: View {
                     )
                     .stroke(GianTheme.Colors.separator, lineWidth: 0.5)
                 )
-                .disabled(phase == .serverEntered)
 
-            if phase == .signedOut {
+            if serverChanged {
                 Button("Continue") {
                     onSubmitServer(serverAddress)
                 }
                 .buttonStyle(GianPrimaryButtonStyle())
                 .disabled(serverAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             } else {
-                if let server {
-                    Text(server.absoluteString)
-                        .font(GianTheme.Typography.caption)
-                        .foregroundStyle(GianTheme.Colors.secondaryLabel)
-                }
                 Button(action: onStartGitHubLogin) {
                     Label("Continue with GitHub", systemImage: "person.crop.circle.badge.checkmark")
                         .frame(maxWidth: .infinity)
@@ -161,6 +195,16 @@ struct SetupFlowView: View {
                     )
                     .accessibilityLabel("GitHub device code \(login.userCode)")
 
+                Button {
+                    UIPasteboard.general.string = login.userCode
+                } label: {
+                    Label("Copy code", systemImage: "doc.on.doc")
+                        .font(GianTheme.Typography.caption.weight(.semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(GianTheme.Colors.tint)
+                .frame(minHeight: GianTheme.Metrics.minHitTarget)
+
                 Text("Enter this code on GitHub. The code expires \(login.expiresAt.formatted(date: .omitted, time: .shortened)).")
                     .font(GianTheme.Typography.caption)
                     .foregroundStyle(GianTheme.Colors.secondaryLabel)
@@ -183,7 +227,10 @@ struct SetupFlowView: View {
             }
 
             Button("Cancel", action: onCancelGitHubLogin)
-                .buttonStyle(GianSecondaryButtonStyle())
+                .font(GianTheme.Typography.body)
+                .foregroundStyle(GianTheme.Colors.secondaryLabel)
+                .buttonStyle(.plain)
+                .frame(minHeight: GianTheme.Metrics.minHitTarget)
         }
     }
 
@@ -195,7 +242,33 @@ struct SetupFlowView: View {
                 .font(GianTheme.Typography.title)
                 .foregroundStyle(GianTheme.Colors.label)
 
-            if pendingPairing != nil {
+            HostPairingPanel(
+                isWaiting: pendingPairing != nil,
+                notice: pairingNotice,
+                onPairPayload: onPairPayload,
+                onRefreshPairing: onRefreshPairing
+            )
+
+            Button("Sign out and start over", action: onStartOver)
+                .font(GianTheme.Typography.caption)
+                .foregroundStyle(GianTheme.Colors.secondaryLabel)
+                .buttonStyle(.plain)
+                .frame(minHeight: GianTheme.Metrics.minHitTarget)
+        }
+    }
+}
+
+/// Pairing entry (QR or link), or once claimed, the wait for the Host to
+/// confirm this device. Shared by setup and Add Host.
+struct HostPairingPanel: View {
+    let isWaiting: Bool
+    var notice: String? = nil
+    var onPairPayload: (String) -> Void
+    var onRefreshPairing: () -> Void
+
+    var body: some View {
+        VStack(spacing: GianTheme.Metrics.paddingMedium) {
+            if isWaiting {
                 VStack(spacing: GianTheme.Metrics.paddingSmall) {
                     ProgressView()
                     Text("Confirm this device on your Host.")
@@ -204,11 +277,26 @@ struct SetupFlowView: View {
                     Button("Check confirmation", action: onRefreshPairing)
                         .buttonStyle(GianSecondaryButtonStyle())
                 }
+                // The Host confirms out of band; check periodically so the app
+                // moves on by itself. The button stays as a manual check.
+                .task {
+                    while !Task.isCancelled {
+                        try? await Task.sleep(for: .seconds(3))
+                        guard !Task.isCancelled else { return }
+                        onRefreshPairing()
+                    }
+                }
             } else {
                 Text("Scan the QR code shown by the Host, or paste the pairing link. QR codes pair Hosts only.")
                     .font(GianTheme.Typography.caption)
                     .foregroundStyle(GianTheme.Colors.secondaryLabel)
                     .multilineTextAlignment(.center)
+                if let notice {
+                    Label(notice, systemImage: "exclamationmark.triangle.fill")
+                        .font(GianTheme.Typography.caption)
+                        .foregroundStyle(GianTheme.Colors.failure)
+                        .multilineTextAlignment(.center)
+                }
                 QRPairingEntry(onPayload: onPairPayload)
             }
         }

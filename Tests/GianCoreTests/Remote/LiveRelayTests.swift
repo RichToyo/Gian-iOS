@@ -17,7 +17,7 @@ struct LiveRelayTests {
     }
     @Test func realEncryptedLoginPairSubscribeAndSend() async throws {
         let (fixture, socket) = try await connected()
-        let cached = try #require(fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account))
+        let cached = try #require(try fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account))
         #expect(cached.hosts.count == 1)
         #expect(cached.hosts[0].validation == .cached)
         #expect(!cached.hosts[0].host.online)
@@ -120,7 +120,7 @@ struct LiveRelayTests {
     @Test func transportLeaseExpiryDoesNotInventGrantExpiry() async throws {
         let (fixture, _) = try await connected()
         fixture.clock.instant = fixture.clock.instant.addingTimeInterval(601)
-        let cached = try #require(fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account))
+        let cached = try #require(try fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account))
         #expect(cached.hosts.count == 1)
         #expect(cached.hosts[0].validation == .cached)
         fixture.clock.instant = cached.accountAuthorizationExpiresAt
@@ -133,7 +133,7 @@ struct LiveRelayTests {
         let fresh = try await fixture.service.revalidateAuthorization(scope: fixture.scope)
         #expect(fresh.hosts.count == 1)
         #expect(fresh.hosts[0].validation == .online)
-        let cached = try #require(fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account))
+        let cached = try #require(try fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account))
         #expect(cached.hosts[0].validation == .cached)
         await fixture.service.disconnect()
     }
@@ -141,7 +141,7 @@ struct LiveRelayTests {
         let (fixture, _) = try await connected()
         do { try await fixture.service.revoke(scope: fixture.scope); Issue.record("Fixture server did not confirm revocation") } catch {}
         let replacement = LiveGianClientService(transport: fixture.transport, secrets: fixture.secrets, authorizationInvalidations: fixture.invalidations, clock: fixture.clock)
-        let restored = try #require(replacement.loadCachedAuthorization(server: fixture.server, account: fixture.account))
+        let restored = try #require(try replacement.loadCachedAuthorization(server: fixture.server, account: fixture.account))
         #expect(restored.hosts.isEmpty)
     }
     @Test func transcriptReferencesUseFileProtocolRatherThanUploadHandles() async throws {

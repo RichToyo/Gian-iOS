@@ -18,14 +18,61 @@ class ControlledService: GianClientServicing {
     var translationPages: [TranslationTextPageResponse] = []
     var transcriptPages: [TranscriptPageResponse] = []
     var transcriptRequestCursors: [String?] = []
+    var sessionCreateRequests: [SessionCreateRequest] = []
+    var updateRequests: [SessionUpdateRequest] = []
+    /// Overrides the preview service's `session.update` result when set.
+    var updateResponse: SessionUpdateResponse?
+    /// Scripted pairing replies, consumed in order before the preview's.
+    var claimResponses: [HostPairingResponse] = []
+    var pairingRefreshResponses: [HostPairingResponse] = []
+    var holdNextPairingRefresh = false
+    var pairingRefresh: CheckedContinuation<HostPairingResponse, Never>?
+    /// Further Hosts; each answers with an empty directory under its own summary.
+    var extraHosts: [HostSummary] = []
+    /// `proxy.logo` replies by plugin ID (default: none); reads are recorded.
+    var logos: [String: AgentLogoResponse] = [:]
+    var logoRequests: [String] = []
 
     func startGitHubDeviceLogin(server: ServerAddress) async -> GitHubLoginStartResponse { await base.startGitHubDeviceLogin(server: server) }
     func pollGitHubDeviceLogin(server: ServerAddress, loginID: LoginID) async -> GitHubLoginPollResponse { await base.pollGitHubDeviceLogin(server: server, loginID: loginID) }
-    func claimHostQR(server: ServerAddress, account: AccountID, qr: HostPairingQR) async -> HostPairingResponse { await base.claimHostQR(server: server, account: account, qr: qr) }
-    func refreshHostPairing(server: ServerAddress, account: AccountID, pairingID: PairingID) async -> HostPairingResponse { await base.refreshHostPairing(server: server, account: account, pairingID: pairingID) }
-    func refreshDirectory(scope: ClientScope) async -> DirectoryRefreshResponse { await base.refreshDirectory(scope: scope) }
+    func claimHostQR(server: ServerAddress, account: AccountID, qr: HostPairingQR) async -> HostPairingResponse {
+        if !claimResponses.isEmpty { return claimResponses.removeFirst() }
+        return await base.claimHostQR(server: server, account: account, qr: qr)
+    }
+    func refreshHostPairing(server: ServerAddress, account: AccountID, pairingID: PairingID) async -> HostPairingResponse {
+        if holdNextPairingRefresh {
+            holdNextPairingRefresh = false
+            return await withCheckedContinuation { pairingRefresh = $0 }
+        }
+        if !pairingRefreshResponses.isEmpty { return pairingRefreshResponses.removeFirst() }
+        return await base.refreshHostPairing(server: server, account: account, pairingID: pairingID)
+    }
+    func refreshDirectory(scope: ClientScope) async -> DirectoryRefreshResponse {
+        if let host = extraHosts.first(where: { $0.id == scope.host }) {
+            guard case .snapshot(var payload) = await base.refreshDirectory(scope: scope) else { return .failed("no snapshot") }
+            payload.host = host
+            payload.tasks = []; payload.sessions = []; payload.interactions = []; payload.workspaces = []; payload.agents = []
+            return .snapshot(payload)
+        }
+        return await base.refreshDirectory(scope: scope)
+    }
+    func agentLogo(scope: ClientScope, pluginID: String, variant: AgentLogoVariant) async -> AgentLogoResponse {
+        logoRequests.append("\(pluginID)/\(variant.rawValue)")
+        return logos[pluginID] ?? .notFound
+    }
     func listDirectory(scope: ClientScope, request: DirectoryPageRequest) async -> DirectoryPageResponse { .unsupported }
-    func createSession(scope: ClientScope, request: SessionCreateRequest) async -> CommandDispatchResponse { await base.createSession(scope: scope, request: request) }
+    func createSession(scope: ClientScope, request: SessionCreateRequest) async -> CommandDispatchResponse {
+        sessionCreateRequests.append(request)
+        return await base.createSession(scope: scope, request: request)
+    }
+    func updateSession(scope: ClientScope, request: SessionUpdateRequest) async -> SessionUpdateResponse {
+        updateRequests.append(request)
+        if let updateResponse { return updateResponse }
+        return await base.updateSession(scope: scope, request: request)
+    }
+    func agentOptions(scope: ClientScope, request: AgentOptionsRequest) async -> AgentOptionsResponse {
+        await base.agentOptions(scope: scope, request: request)
+    }
     func sendMessage(scope: ClientScope, request: SessionSendRequest) async -> CommandDispatchResponse {
         sendRequest = request
         if holdNextSend {

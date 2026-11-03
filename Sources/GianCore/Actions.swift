@@ -6,8 +6,12 @@ public enum GianClientAction: Sendable {
     case pollGitHubDeviceLogin
     case cancelGitHubDeviceLogin
     case logout
+    /// Pairs a Host: during setup, or later to add another Host (the current
+    /// one stays open until the new one is confirmed, then becomes current).
     case beginHostPairingFromQR(String)
     case refreshHostPairing
+    /// Abandons the pairing in progress (Add Host's Cancel).
+    case cancelHostPairing
     case selectHost(HostID)
     case selectDirectoryView(DirectoryView)
     case selectConversation(SessionID)
@@ -47,4 +51,17 @@ public enum GianClientAction: Sendable {
     case setForeground(ForegroundPresence)
     case refreshDirectory
     case clearAttachmentCache
+    /// Reads an Agent's conversation options (`catalog.agent`).
+    case loadAgentOptions(AgentID)
+    /// Fetches each known Agent's own logo from the Host (`proxy.logo`).
+    case loadAgentLogos
+    /// Changes the open conversation (`session.update`); applies next turn.
+    case setConversationModel(String?)
+    case setConversationThinking(String?)
+    case setConversationFast(Bool)
+    case setConversationApprovalMode(String?)
+    /// New-chat options, sent with or right after creation.
+    case selectThinking(String?)
+    case selectFast(Bool)
+    case selectApprovalMode(String?)
 }

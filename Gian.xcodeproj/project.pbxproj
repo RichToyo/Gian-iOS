@@ -28,6 +28,12 @@
 		};
 /* End PBXContainerItemProxy section */
 
+/* Begin PBXFileReference section */
+		A10000000000000000000040 /* Gian.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Gian.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000041 /* GianUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = GianUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000042 /* GianAppTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = GianAppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		A10000000000000000000031 /* App */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
@@ -213,7 +219,7 @@
 			mainGroup = A10000000000000000000002;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				A10000000000000000000080 /* XCLocalSwiftPackageReference ".." */,
+				A10000000000000000000080 /* XCLocalSwiftPackageReference "." */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A10000000000000000000003 /* Products */;
@@ -473,7 +479,6 @@
 		A10000000000000000000064 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -484,7 +489,6 @@
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Gian.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Gian";
 				TEST_TARGET_NAME = Gian;
 			};
 			name = Debug;
@@ -492,7 +496,6 @@
 		A10000000000000000000065 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -503,7 +506,6 @@
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Gian.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Gian";
 				TEST_TARGET_NAME = Gian;
 			};
 			name = Release;
@@ -588,16 +590,16 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
-		A10000000000000000000080 /* XCLocalSwiftPackageReference ".." */ = {
+		A10000000000000000000080 /* XCLocalSwiftPackageReference "." */ = {
 			isa = XCLocalSwiftPackageReference;
-			relativePath = ..;
+			relativePath = .;
 		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		A10000000000000000000081 /* GianCore */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = A10000000000000000000080 /* XCLocalSwiftPackageReference ".." */;
+			package = A10000000000000000000080 /* XCLocalSwiftPackageReference "." */;
 			productName = GianCore;
 		};
 /* End XCSwiftPackageProductDependency section */

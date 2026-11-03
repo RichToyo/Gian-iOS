@@ -28,7 +28,7 @@ struct LiveLoginCancellationTests {
         }
         _ = try await persisted.next()
         #expect(fixture.service.login == nil)
-        let pointer = try #require(fixture.service.activeAuthorization(server: fixture.server))
+        let pointer = try #require(try fixture.service.activeAuthorization(server: fixture.server))
         let oldEpoch = fixture.service.eventEpoch
         do { try await fixture.service.cancelLogin(server: fixture.server, loginID: challenge.loginID); Issue.record("No server cancellation endpoint exists") }
         catch { #expect(error as? RemoteClientError == .unsupported) }
@@ -61,7 +61,7 @@ struct LiveLoginCancellationTests {
     @Test func cancellingNewAuthorizationPreservesPreviouslyAuthorizedAccount() async throws {
         let fixture = RemoteFixture()
         try await fixture.loginAndClaim()
-        let previous = try #require(fixture.service.activeAuthorization(server: fixture.server))
+        let previous = try #require(try fixture.service.activeAuthorization(server: fixture.server))
         let previousKey = fixture.service.vaultKey(server: fixture.server, account: fixture.account,
             installation: previous.installation, authorizationID: previous.authorizationID)
         let previousBytes = try #require(fixture.secrets.records[previousKey])

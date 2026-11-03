@@ -4,7 +4,8 @@ extension LiveGianClientService {
     public func setAutoTranslation(scope: ClientScope, request: TranslationAutoRequest) async -> TranslationCommandResponse {
         do {
             try requireTranslation(scope)
-            try requireCapability(.sessionSend, scope: scope)
+            // The Host grants `translation.set_auto` under session.update.
+            try requireCapability(.sessionUpdate, scope: scope)
             var params: [String: WireValue] = ["session_id": .string(request.sessionID.rawValue), "enabled": .bool(request.enabled)]
             if let enabled = request.expectedEnabled { params["expected_enabled"] = .bool(enabled) }
             if let revision = request.expectedRevision { params["expected_revision"] = .int(revision) }

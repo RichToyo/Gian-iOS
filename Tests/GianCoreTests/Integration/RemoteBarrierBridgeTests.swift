@@ -45,7 +45,7 @@ struct RemoteBarrierBridgeTests {
         let storage = try SQLiteGianStorage(directory: directory)
         let fixture = RemoteFixture(invalidations: storage)
         try await fixture.loginAndClaim()
-        let evidence = try #require(fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account))
+        let evidence = try #require(try fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account))
         let store = GianClientStore(service: fixture.service, clock: fixture.clock, storage: storage)
         #expect(store.restoreAuthorizedSession(authorization: evidence).isApplied)
         #expect((await store.dispatch(.logout)).isApplied)
@@ -98,7 +98,7 @@ struct RemoteBarrierBridgeTests {
         let storage = FailingBarrierStorage()
         let fixture = RemoteFixture(invalidations: storage)
         try await fixture.loginAndClaim()
-        let evidence = try #require(fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account))
+        let evidence = try #require(try fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account))
         let store = GianClientStore(service: fixture.service, clock: fixture.clock, storage: storage)
         #expect(store.restoreAuthorizedSession(authorization: evidence).isApplied)
         fixture.secrets.mutationFailure = { _, _ in .transport }

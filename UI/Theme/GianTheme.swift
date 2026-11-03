@@ -94,6 +94,13 @@ enum GianTheme {
         static let avatarSmall: CGFloat = 24
         static let avatarMedium: CGFloat = 36
         static let avatarLarge: CGFloat = 44
+        /// Single-line composer and the matching new-chat entry.
+        static let composerHeight: CGFloat = 52
+        static let composerRadius: CGFloat = 26
+        /// Transcript and composer stop growing past this on wide screens.
+        static let readableWidth: CGFloat = 720
+        /// Setup flow column width on wide screens.
+        static let formWidth: CGFloat = 440
     }
 }
 

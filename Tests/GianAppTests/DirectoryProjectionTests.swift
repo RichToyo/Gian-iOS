@@ -91,6 +91,44 @@ final class DirectoryProjectionTests: XCTestCase {
         XCTAssertFalse(directory.tasks.contains { $0.title == "Unassigned" })
     }
 
+    func testPendingInteractionShowsWaitingEvenWithoutSessionAttention() {
+        let taskID = id("task-open", TaskID.self)
+        var state = GianClientState.signedOut()
+        state.directory.tasks = [
+            TaskSection(
+                id: taskID,
+                title: "Open task",
+                conversations: [
+                    summary("session-approval", taskID: taskID),
+                    summary("session-resolved", taskID: taskID),
+                    summary("session-quiet", taskID: taskID),
+                ]
+            )
+        ]
+        func interaction(_ session: String, phase: InteractionPhase) -> InteractionRecord {
+            InteractionRecord(
+                id: id("interaction-\(session)", InteractionID.self),
+                revision: "1",
+                sessionID: id(session, SessionID.self),
+                turnID: id("turn-1", TurnID.self),
+                kind: .approval,
+                title: "Allow",
+                detail: "",
+                risk: .low,
+                actions: [],
+                phase: phase
+            )
+        }
+        state.interactions = [
+            interaction("session-approval", phase: .pending),
+            interaction("session-resolved", phase: .resolvedHere),
+        ]
+
+        let badges = StoreProjection.directory(state).tasks.flatMap(\.conversations).map(\.badge)
+
+        XCTAssertEqual(badges, [.waiting, .idle, .idle])
+    }
+
     func testSearchRetainsHostMessageMatchWithoutLocalTitleFiltering() {
         var state = GianClientState.signedOut()
         state.directory.searchQuery = "needle in an old message"

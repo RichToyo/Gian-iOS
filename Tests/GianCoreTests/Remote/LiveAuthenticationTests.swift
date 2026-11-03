@@ -13,10 +13,25 @@ struct LiveAuthenticationTests {
         #expect(secrets.reads == 0)
         #expect(secrets.records.isEmpty)
     }
+    /// Regression: login stored the vault with two separate clock reads, so on
+    /// a real clock authorizationCreatedAt landed after lastVerifiedAt, the
+    /// invalidation barrier threw `integrity`, and every real sign-in surfaced
+    /// as "The sign-in code expired".
+    @Test func loginSucceedsWhenTheClockMovesBetweenReads() async throws {
+        let fixture = RemoteFixture()
+        fixture.clock.advancesOnRead = 0.000_1
+        guard case .started(let challenge) = await fixture.service.startGitHubDeviceLogin(server: fixture.server) else {
+            Issue.record("Login did not start"); return
+        }
+        fixture.clock.instant = fixture.clock.instant.addingTimeInterval(5)
+        let polled = await fixture.service.pollGitHubDeviceLogin(server: fixture.server, loginID: challenge.loginID)
+        guard case .authorized(let identity) = polled else { Issue.record("Expected authorization, got \(polled)"); return }
+        #expect(identity.account == fixture.account)
+    }
     @Test func signedDeviceFlowAndGrantAreSeparate() async throws {
         let fixture = RemoteFixture()
         try await fixture.loginAndClaim()
-        let cached = try #require(fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account))
+        let cached = try #require(try fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account))
         #expect(cached.identity.account == fixture.account)
         #expect(cached.hosts.isEmpty)
         let result = await fixture.service.refreshHostPairing(server: fixture.server, account: fixture.account,

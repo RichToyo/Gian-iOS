@@ -122,6 +122,35 @@ public struct PreviewScript: Sendable, Equatable {
 }
 
 enum PreviewDirectory {
+    /// Fictional Agent with a model catalog, so the composer's ⋯ shows real
+    /// choices in previews.
+    static var ada: AgentRecord {
+        var agent = AgentRecord(id: PreviewFixtures.agentID, name: "Ada", pluginID: "ada.plugin")
+        let thinking = ["low", "medium", "high"]
+        agent.models = [
+            AgentModelRecord(id: "ada-large", label: "Ada Large", isDefault: true, supportedThinking: thinking),
+            AgentModelRecord(id: "ada-swift", label: "Ada Swift", isDefault: false, supportedThinking: thinking),
+        ]
+        agent.defaultModel = "ada-large"
+        return agent
+    }
+
+    static let adaOptions = AgentConversationOptions(
+        thinking: [
+            AgentOptionChoice(value: "low", label: "Light"),
+            AgentOptionChoice(value: "medium", label: "Medium"),
+            AgentOptionChoice(value: "high", label: "High"),
+        ],
+        approval: [
+            AgentOptionChoice(value: "ask", label: "Ask for approval"),
+            AgentOptionChoice(value: "auto", label: "Approve for me"),
+            AgentOptionChoice(value: "full-access", label: "Full access"),
+        ],
+        approvalDefault: "ask",
+        supportsFast: true,
+        fastModels: ["ada-swift"]
+    )
+
     static func make(authority: DirectoryAuthority, extras: Bool) -> DirectorySnapshotPayload {
         let now = PreviewFixtures.instant
         var sessions = [mooring(now)]
@@ -137,7 +166,7 @@ enum PreviewDirectory {
             sessions: sessions,
             interactions: [interaction],
             workspaces: [WorkspaceRecord(id: PreviewFixtures.workspaceID, name: "Harbor Repo")],
-            agents: [AgentRecord(id: PreviewFixtures.agentID, name: "Ada", pluginID: "ada.plugin")],
+            agents: [PreviewDirectory.ada],
             capabilities: BusinessCapability.allCases.map { CapabilityGrant(capability: $0, state: .supported) },
             negotiatedFeatures: KnownWireFeature.allCases.filter { $0 != .sessionDirectoryV1 },
             cursor: SyncCursor(hostGeneration: PreviewFixtures.generationID, eventSequence: 4, revision: "rev-4"),
@@ -235,6 +264,7 @@ public final class PreviewGianClientService: GianClientServicing {
     private var createIDs: Set<CommandID> = []
     private var sendIDs: Set<CommandID> = []
     private var created: [CommandID: SessionRecord] = [:]
+    private var updated: [SessionID: SessionRecord] = [:]
     private var serial = 0
     private var claimed = false
 
@@ -421,10 +451,39 @@ public final class PreviewGianClientService: GianClientServicing {
         )
     }
 
+    public func agentOptions(scope: ClientScope, request: AgentOptionsRequest) async -> AgentOptionsResponse {
+        _ = scope
+        return request.agentID == PreviewFixtures.agentID ? .options(PreviewDirectory.adaOptions) : .unavailable
+    }
+
+    /// Applies the change to the scripted record and bumps its revision, like
+    /// the Host's `session.update` result.
+    public func updateSession(scope: ClientScope, request: SessionUpdateRequest) async -> SessionUpdateResponse {
+        _ = scope
+        guard var record = updated[request.sessionID]
+                ?? script.directory.sessions.first(where: { $0.id == request.sessionID })
+                ?? created.values.first(where: { $0.id == request.sessionID }) else {
+            return .rejected(message: "Unknown conversation")
+        }
+        guard record.revision == request.sessionRevision else { return .rejected(message: "Revision mismatch") }
+        switch request.change {
+        case .model(let model):
+            record.model = model
+            record.thinking = nil
+        case .thinking(let thinking): record.thinking = thinking
+        case .fast(let enabled): record.serviceTier = enabled ? "fast" : nil
+        case .approvalMode(let mode): record.approvalMode = mode
+        }
+        serial += 1
+        record.revision = "rev-update-\(serial)"
+        updated[request.sessionID] = record
+        return .updated(record)
+    }
+
     private func createdSession(_ request: SessionCreateRequest) -> SessionRecord {
         if let existing = created[request.commandID] { return existing }
         serial += 1
-        let record = SessionRecord(
+        var record = SessionRecord(
             id: PreviewFixtures.id("session-created-\(serial)", SessionID.self),
             hostID: script.directory.host.id,
             title: "New conversation",
@@ -439,6 +498,9 @@ public final class PreviewGianClientService: GianClientServicing {
             activityIsMessageOrExecution: true,
             updatedAt: PreviewFixtures.instant
         )
+        record.model = request.model
+        record.thinking = request.thinking
+        record.serviceTier = request.serviceTier
         created[request.commandID] = record
         return record
     }
