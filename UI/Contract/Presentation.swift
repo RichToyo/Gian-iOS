@@ -80,10 +80,10 @@ enum StatusBadge: Equatable, Sendable {
             }
         }
         switch status {
-        case .running, .new: self = .working
+        case .running: self = .working
         case .pending: self = .waiting
         case .error: self = .failed
-        case .done: self = .idle
+        case .new, .done: self = .idle
         }
     }
 
@@ -144,6 +144,10 @@ struct DirectoryPresentation: Equatable, Sendable {
     var tasksPage: DirectoryPageStatus
     var reposPage: DirectoryPageStatus
     var searchPage: DirectoryPageStatus
+    var timeFilter: DirectoryTimeFilter = .last7Days
+    var temporarySearchResult: ConversationRowItem? = nil
+    var temporarySearchGeneration: Int = 0
+    var temporaryCreatedResults: [ConversationRowItem] = []
 }
 
 // MARK: - Transcript rows
@@ -164,6 +168,7 @@ enum ReadingTranslationPresentation: Equatable, Sendable {
     /// Settled but the ack was uncertain; never re-requested implicitly.
     case uncertain
     case failed(String)
+    case unavailable(String)
     /// Verified text ready to show.
     case translated(ReadingTranslation)
     /// Descriptor verified but full text must be paged before display.
@@ -176,15 +181,19 @@ struct AssistantRow: Equatable, Identifiable, Sendable {
     var agentName: String
     var markdown: String
     var reading: ReadingTranslationPresentation
+    var translationSourceID: String? = nil
+    var translationExpandedByDefault: Bool = true
+    var canCancelTranslation: Bool = false
+    var isFinalResult: Bool = true
 }
 
 struct WorkEventItem: Equatable, Identifiable, Sendable {
-    enum Kind: Sendable {
-        case command, fileChange, fileRead, fileSearch, webSearch, tool, subagent
+    enum Kind: Sendable, Equatable {
+        case command, fileChange, fileRead, fileSearch, webSearch, tool, subagent, warning
     }
 
     enum Outcome: Sendable {
-        case running, done, failed
+        case running, done, failed, unknown
     }
 
     let id: TranscriptItemID
@@ -196,12 +205,14 @@ struct WorkEventItem: Equatable, Identifiable, Sendable {
 
 struct WorkCard: Equatable, Identifiable, Sendable {
     enum Phase: Sendable {
-        case working, worked, failed, stopped
+        case working, worked, failed, stopped, unknown
     }
 
     let id: TurnID
     var phase: Phase
     var events: [WorkEventItem]
+    var startedAt: Date? = nil
+    var finishedAt: Date? = nil
 }
 
 enum TranscriptRow: Equatable, Identifiable, Sendable {
@@ -219,7 +230,7 @@ enum TranscriptRow: Equatable, Identifiable, Sendable {
         case .timeMarker(let id, _): "marker-\(id)"
         case .user(let row): row.id.rawValue
         case .assistant(let row): row.id.rawValue
-        case .work(let card): "work-\(card.id.rawValue)"
+        case .work(let card): "work-\(card.id.rawValue)-\(card.events.first?.id.rawValue ?? "empty")"
         case .interaction(let record): "interaction-\(record.id.rawValue)"
         case .turnOutcome(let id, _): "outcome-\(id.rawValue)"
         case .severeError(let id): "error-\(id.rawValue)"
@@ -336,6 +347,54 @@ enum DiagnosticPresentation: Equatable, Sendable {
     case resyncRequired(reason: String)
 }
 
+struct ConversationStatusPresentation: Equatable {
+    let label: String
+    let symbol: String
+    let details: [String]
+    let retryConnection: Bool
+    let retryMessages: Bool
+    let isError: Bool
+
+    static func make(connectivity: ConnectivityPresentation, diagnostic: DiagnosticPresentation,
+                     transcriptSync: TranscriptSyncState) -> Self? {
+        var details: [String] = []
+        var primary: (String, String, Bool)?
+        var retryConnection = false
+        var retryMessages = false
+        func add(_ label: String, _ symbol: String, _ detail: String, error: Bool = false) {
+            if primary == nil { primary = (label, symbol, error) }
+            details.append(detail)
+        }
+        switch connectivity {
+        case .offlineHistory: add("Offline", "wifi.slash", "Offline. Showing saved history.")
+        case .hostOffline: add("Host offline", "laptopcomputer.slash", "The Host is offline.")
+        case .deviceRevoked: add("Access revoked", "hand.raised.fill", "This device's access was revoked. Pair the Host again.", error: true)
+        case .versionMismatch(let version): add("Incompatible", "exclamationmark.triangle", "Host version \(version) is not supported by this app.", error: true)
+        case .hidden, .reconnecting, .resyncing: break
+        }
+        if transcriptSync == .failed {
+            add("Sync failed", "exclamationmark.triangle", "Messages could not be synchronized.", error: true)
+            retryMessages = true
+        }
+        if case .connectionClosed(let message) = diagnostic {
+            add("Connection lost", "wifi.exclamationmark", message, error: true)
+        }
+        switch connectivity {
+        case .reconnecting: add("Reconnecting", "arrow.triangle.2.circlepath", "Reconnecting to the Host.")
+        case .resyncing: add("Syncing", "arrow.triangle.2.circlepath", "Catching up with the Host.")
+        default: break
+        }
+        if case .resyncRequired = diagnostic {
+            add("Sync required", "arrow.triangle.2.circlepath", "Synchronization is required.", error: true)
+            retryConnection = true
+        }
+        if transcriptSync == .syncing { add("Syncing", "arrow.triangle.2.circlepath", "Synchronizing messages.") }
+        guard let primary else { return nil }
+        return Self(label: primary.0, symbol: primary.1, details: details,
+                    retryConnection: retryConnection, retryMessages: retryMessages, isError: primary.2)
+    }
+}
+
 // MARK: - Transcript files
 
 /// Cache-aware presentation of one transcript attachment, from the Core
@@ -377,6 +436,13 @@ struct ActiveConversationPresentation: Equatable, Sendable {
     var banner: BannerPresentation?
     var translation: SessionTranslationPresentation?
     var isTurnActive: Bool
+    var transcriptSync: TranscriptSyncState = .idle
+    var queue: SessionQueue? = nil
+    var queueCommand: QueueCommandState? = nil
+    var canUpdateQueue = false
+    var canRemoveQueue = false
+    var canClearQueue = false
+    var canSendQueueNow = false
 }
 
 /// The options a conversation can change while it runs, for the composer's ⋯

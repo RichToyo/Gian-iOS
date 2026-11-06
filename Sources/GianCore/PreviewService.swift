@@ -325,6 +325,15 @@ public final class PreviewGianClientService: GianClientServicing {
         sendIDs.insert(request.commandID)
         switch script.commandBehavior {
         case .succeed:
+            if request.busy == .queue,
+               let index = script.directory.sessions.firstIndex(where: { $0.id == request.sessionID }),
+               var queue = script.directory.sessions[index].queue {
+                queue.entries.append(QueuedMessage(id: "preview-queued-\(sendCount + 1)", text: request.text,
+                                                   attachmentCount: request.attachmentIDs.count))
+                queue.revision = "preview-queue-\(sendCount + 1)"
+                script.directory.sessions[index].queue = queue
+                return .succeeded(CommandSuccess(commandID: request.commandID, session: script.directory.sessions[index], deliveryID: "delivery-1"))
+            }
             return .succeeded(CommandSuccess(commandID: request.commandID, deliveryID: "delivery-1"))
         case .createSucceedsSendUnknown, .lostAckStillUnknown, .lostAckNotSeen:
             return .unknownOutcome(request.commandID)
@@ -336,6 +345,27 @@ public final class PreviewGianClientService: GianClientServicing {
     public func stopSession(scope: ClientScope, request: SessionStopRequest) async -> CommandDispatchResponse {
         _ = scope
         return .succeeded(CommandSuccess(commandID: request.commandID))
+    }
+
+    public func mutateQueue(scope: ClientScope, request: QueueMutationRequest) async -> CommandDispatchResponse {
+        guard let index = script.directory.sessions.firstIndex(where: { $0.id == request.sessionID && $0.hostID == scope.host }),
+              var queue = script.directory.sessions[index].queue, queue.revision == request.revision else {
+            return .failed(request.commandID, message: "Queue changed. Refresh and try again.")
+        }
+        switch request.mutation {
+        case .update(let id, let text):
+            guard let entry = queue.entries.firstIndex(where: { $0.id == id }) else { return .failed(request.commandID, message: "Message not found.") }
+            queue.entries[entry].text = text
+        case .remove(let id): queue.entries.removeAll { $0.id == id }
+        case .clear: queue.entries.removeAll()
+        case .sendNow:
+            if script.directory.sessions[index].status == .running { queue.entries.removeAll() }
+            else if !queue.entries.isEmpty { queue.entries.removeFirst() }
+        }
+        serial += 1
+        queue.revision = "preview-queue-updated-\(serial)"
+        script.directory.sessions[index].queue = queue
+        return .succeeded(CommandSuccess(commandID: request.commandID, queue: queue))
     }
 
     public func queryCommand(scope: ClientScope, commandID: CommandID) async -> CommandStatusResponse {

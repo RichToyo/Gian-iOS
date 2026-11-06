@@ -80,15 +80,18 @@ extension LiveGianClientService {
             try checkEpoch(captured)
             guard membershipGeneration == directoryMembershipGeneration, subscribedSession == sessionID else { throw RemoteClientError.cancelled }
             guard try result.identifier("session_id") == sessionID.rawValue else { throw RemoteClientError.integrity }
-            try captureFiles(result.array("items"), session: sessionID)
+            let rawItems = try result.array("items")
+            let items = try RemoteMapping.transcriptPage(rawItems)
+            let next = try result.optionalString("cursor")
+            let hasOlder = try result.boolean("has_more")
+            try captureFiles(rawItems, session: sessionID)
             try applyPageTranslations(result, sessionID: sessionID, scope: scope)
-            let items = try RemoteMapping.transcriptPage(result.array("items"))
             noteTranscriptTurns(items, session: sessionID)
-            return TranscriptPageResponse(items: items,
-                cursor: try result.optionalString("cursor"), hasOlder: try result.boolean("has_more"))
+            return TranscriptPageResponse(items: items, cursor: next, hasOlder: hasOlder)
         } catch {
             let safe = note(error)
             if safe == .capabilityDenied || safe == .server(code: "RESOURCE_NOT_FOUND", retryAfter: nil) {
+                directoryMembershipGeneration += 1
                 emit(.sessionUnavailable(sessionID), scope: scope)
             }
             return TranscriptPageResponse(items: [], cursor: cursor, hasOlder: false, failed: true)
@@ -130,9 +133,11 @@ extension LiveGianClientService {
     func applyPageTranslations(_ result: WireValue, sessionID: SessionID, scope: ClientScope) throws {
         guard !result["translations"].isNull else { return }
         try requireTranslation(scope)
-        for value in try result.array("translations") {
-            emit(.translation(sessionID: sessionID, update: .upsert(try RemoteMapping.reading(value, session: sessionID))), scope: scope)
+        let records = try result.array("translations").map { value in
+            guard try value.string("purpose") == "read" else { throw RemoteClientError.invalidPayload }
+            return try RemoteMapping.reading(value, session: sessionID)
         }
+        for record in records { emit(.translation(sessionID: sessionID, update: .upsert(record)), scope: scope) }
     }
 
     func receive(_ message: WireValue, scope: ClientScope) throws {
@@ -161,25 +166,43 @@ extension LiveGianClientService {
             let revision = try message.string("revision")
             guard generation.rawValue == relay?.generation, !revision.isEmpty else { throw RemoteClientError.integrity }
             directoryMembershipGeneration += 1
-            subscribedSession = nil
             emit(.directoryChanged(generation: generation, revision: revision), scope: scope)
         case "snapshot.required":
             let reason: SnapshotRequiredReason = try RemoteMapping.enumeration(message, "reason")
             invalidateDirectoryRead(); emit(.snapshotRequired(reason), scope: scope); diagnostic(.resyncRequired(reason), scope: scope)
         case "resume.ok": break
         case "state.patch":
-            invalidateDirectoryRead()
-            emit(.snapshotRequired(.revisionMismatch), scope: scope)
-            diagnostic(.resyncRequired(.revisionMismatch), scope: scope)
+            try message.closed(["type", "host_generation", "event_sequence", "base_revision", "revision", "patch"])
+            let generation: HostGenerationID = try message.scoped("host_generation")
+            let sequence = try message.integer("event_sequence")
+            let base = try message.string("base_revision")
+            let revision = try message.string("revision")
+            guard generation.rawValue == relay?.generation, let current = cursor,
+                  current.hostGeneration == generation, sequence == current.eventSequence + 1,
+                  !base.isEmpty, !revision.isEmpty, base == current.revision else {
+                invalidateDirectoryRead(); emit(.snapshotRequired(.revisionMismatch), scope: scope)
+                diagnostic(.resyncRequired(.revisionMismatch), scope: scope); return
+            }
+            guard case .object(let fields) = message["patch"] else { throw RemoteClientError.invalidPayload }
+            if !Set(fields.keys).isSubset(of: ["sessions", "tasks", "interactions", "attention", "queues"]) {
+                invalidateDirectoryRead(); emit(.snapshotRequired(.revisionMismatch), scope: scope)
+                diagnostic(.resyncRequired(.revisionMismatch), scope: scope); return
+            }
+            let patch = try RemoteMapping.statePatch(message["patch"], host: scope.host)
+            if !patch.removedSessions.isEmpty || !patch.removedTasks.isEmpty { directoryMembershipGeneration += 1 }
+            invalidateInFlightDirectoryRead()
+            cursor?.eventSequence = sequence; cursor?.revision = revision
+            emit(.statePatch(sequence: sequence, generation: generation, baseRevision: base, revision: revision, patch: patch), scope: scope)
         case "event": try receiveEvent(message, scope: scope)
         case "transcript.page":
             let session: SessionID = try message.scoped("session_id")
             guard session == subscribedSession else { throw RemoteClientError.integrity }
-            try captureFiles(message.array("items"), session: session)
-            let items = try RemoteMapping.transcriptPage(message.array("items"))
+            let rawItems = try message.array("items")
+            let items = try RemoteMapping.transcriptPage(rawItems)
+            try captureFiles(rawItems, session: session)
+            try applyPageTranslations(message, sessionID: session, scope: scope)
             noteTranscriptTurns(items, session: session)
             for item in items { emit(.transcript(sessionID: session, item: item), scope: scope) }
-            try applyPageTranslations(message, sessionID: session, scope: scope)
         case "transfer.ack", "transfer.error", "transfer.cancel", "attachment.result", "download.metadata", "attachment.chunk", "download.complete":
             let id = try message.identifier("transfer_id")
             guard let transfer = transfers[id] else { return }
@@ -251,6 +274,7 @@ extension LiveGianClientService {
         try acceptSnapshot(result, scope: scope)
     }
     func receiveEvent(_ message: WireValue, scope: ClientScope) throws {
+        try message.closed(["type", "host_generation", "event_sequence", "event"])
         let generation: HostGenerationID = try message.scoped("host_generation")
         let sequence = try message.integer("event_sequence")
         let value = message["event"]
@@ -258,8 +282,9 @@ extension LiveGianClientService {
         let canonical = kind != "transcript.item" && kind != "translation.updated"
         guard generation.rawValue == relay?.generation else { throw RemoteClientError.integrity }
         if canonical {
-            invalidateDirectoryRead()
+            invalidateInFlightDirectoryRead()
             guard let current = cursor, current.hostGeneration == generation, sequence == current.eventSequence + 1 else {
+                invalidateDirectoryRead()
                 emit(.snapshotRequired(.gapEvicted), scope: scope)
                 diagnostic(.resyncRequired(.gapEvicted), scope: scope)
                 return
@@ -267,12 +292,15 @@ extension LiveGianClientService {
         }
         switch kind {
         case "session.updated":
+            try value.closed(["kind", "session"])
             emit(.canonical(sequence: sequence, generation: generation, body: .session(try RemoteMapping.session(value["session"], host: scope.host))), scope: scope)
         case "interaction.updated":
+            try value.closed(["kind", "interaction"])
             emit(.canonical(sequence: sequence, generation: generation, body: .interaction(try RemoteMapping.interaction(value["interaction"]))), scope: scope)
         case "attention.updated":
-            // One canonical event may contain many attention rows, which the baseline store API cannot represent atomically.
-            snapshot = nil; emit(.snapshotRequired(.revisionMismatch), scope: scope)
+            try value.closed(["kind", "attention"])
+            let values = try RemoteMapping.attention(value.array("attention"))
+            emit(.canonical(sequence: sequence, generation: generation, body: .attentions(values)), scope: scope)
         case "transcript.item":
             let session: SessionID = try value.scoped("session_id")
             try captureFiles([value["item"]], session: session)
@@ -288,7 +316,13 @@ extension LiveGianClientService {
                 emit(.translation(sessionID: session, update: .automatic(sourceID: try automatic.string("source_id"), pending: try automatic.boolean("pending"),
                     error: try RemoteMapping.safeTranslationError(automatic), revision: try value.integer("automatic_revision"), epoch: try value.string("automatic_epoch"))), scope: scope)
             }
-            if !value["upsert"].isNull { emit(.translation(sessionID: session, update: .upsert(try RemoteMapping.reading(value["upsert"], session: session))), scope: scope) }
+            if !value["upsert"].isNull {
+                let purpose = try value["upsert"].string("purpose")
+                guard purpose == "read" || purpose == "send" else { throw RemoteClientError.invalidPayload }
+                if purpose == "read" {
+                    emit(.translation(sessionID: session, update: .upsert(try RemoteMapping.reading(value["upsert"], session: session))), scope: scope)
+                }
+            }
             if let request = try value.optionalString("request_id") { try mailboxes["translation:\(session.rawValue):\(request)"]?.push(value) }
         default: throw RemoteClientError.invalidPayload
         }

@@ -1,6 +1,15 @@
 import SwiftUI
 import QuickLook
+import ImageIO
 import GianCore
+
+enum InlineImagePolicy {
+    static func shouldLoad(isImage: Bool, enabled: Bool, presentation: AttachmentFilePresentation) -> Bool {
+        guard isImage, enabled else { return false }
+        if case .readyToDownload(_, _, let previewable) = presentation { return previewable }
+        return false
+    }
+}
 
 /// Real transcript attachment row driven by the Core descriptor and bounded
 /// download-cache state. Download dispatches `.downloadAttachment`; preview is
@@ -8,19 +17,55 @@ import GianCore
 /// files with generated safe names — never a Host-local path.
 struct TranscriptAttachmentView: View {
     let presentation: AttachmentFilePresentation
+    var isImage: Bool = false
+    var imageData: Data? = nil
+    var autoLoadEnabled: Bool = false
+    var attachmentNumber: Int? = nil
     var onDownload: () -> Void = {}
     var onPreview: () -> Void = {}
+    @State private var requestedAutomatically = false
+    @State private var thumbnail: UIImage?
+    @State private var imageDecodeFinished = false
 
     var body: some View {
+        content
+            .onChange(of: autoLoadEnabled) { _, enabled in
+                if !enabled { requestedAutomatically = false }
+            }
+            .task(id: shouldAutoDownload) {
+                guard shouldAutoDownload, !requestedAutomatically else { return }
+                requestedAutomatically = true
+                onDownload()
+            }
+            .task(id: imageData) {
+                guard isImage, let imageData else {
+                    thumbnail = nil; imageDecodeFinished = false
+                    return
+                }
+                thumbnail = Self.makeThumbnail(imageData)
+                imageDecodeFinished = true
+            }
+    }
+
+    private var shouldAutoDownload: Bool {
+        InlineImagePolicy.shouldLoad(isImage: isImage, enabled: autoLoadEnabled, presentation: presentation)
+    }
+
+    @ViewBuilder
+    private var content: some View {
         switch presentation {
         case .unknown:
             note(icon: "questionmark.folder", text: "Attachment details are unavailable.", tint: GianTheme.Colors.secondaryLabel)
-        case .readyToDownload(let name, let byteCount, _):
-            Button(action: onDownload) {
-                rowContent(icon: "arrow.down.circle", name: name, detail: byteCountText(byteCount), tint: GianTheme.Colors.tint)
+        case .readyToDownload(let name, let byteCount, let previewable):
+            if isImage && previewable {
+                note(icon: "photo", text: autoLoadEnabled ? "Loading image…" : "Image waiting for connection.", tint: GianTheme.Colors.secondaryLabel)
+            } else {
+                Button(action: onDownload) {
+                    rowContent(icon: "arrow.down.circle", name: name, detail: byteCountText(byteCount), tint: GianTheme.Colors.tint)
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("Downloads the file")
             }
-            .buttonStyle(.plain)
-            .accessibilityHint("Downloads the file")
         case .downloading(let name):
             HStack(spacing: GianTheme.Metrics.paddingSmall) {
                 ProgressView().controlSize(.small)
@@ -32,7 +77,29 @@ struct TranscriptAttachmentView: View {
             }
             .padding(GianTheme.Metrics.paddingSmall)
         case .cached(let name, let previewable):
-            if previewable {
+            if isImage, previewable, let thumbnail {
+                Button(action: onPreview) {
+                    Image(uiImage: thumbnail)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: 220, maxHeight: 220)
+                        .clipShape(RoundedRectangle(cornerRadius: GianTheme.Metrics.cornerRadiusSmall))
+                        .overlay(alignment: .bottomTrailing) {
+                            if let attachmentNumber {
+                                Text("\(attachmentNumber)")
+                                    .font(GianTheme.Typography.badge)
+                                    .foregroundStyle(.white)
+                                    .padding(4)
+                                    .background(.black.opacity(0.65), in: Capsule())
+                                    .padding(4)
+                            }
+                        }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Open image \(name)")
+            } else if isImage, previewable, imageData != nil, !imageDecodeFinished {
+                ProgressView().frame(width: 120, height: 100)
+            } else if previewable {
                 Button(action: onPreview) {
                     rowContent(icon: "doc.text.magnifyingglass", name: name, detail: "Downloaded", tint: GianTheme.Colors.success)
                 }
@@ -58,11 +125,23 @@ struct TranscriptAttachmentView: View {
                     .font(GianTheme.Typography.caption.weight(.semibold))
                     .foregroundStyle(GianTheme.Colors.tint)
                     .gianHitTarget()
+                    .disabled(isImage && !autoLoadEnabled)
             }
             .padding(GianTheme.Metrics.paddingSmall)
             .accessibilityElement(children: .combine)
             .accessibilityHint(message)
         }
+    }
+
+    private static func makeThumbnail(_ data: Data) -> UIImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 1024,
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        return UIImage(cgImage: image)
     }
 
     private func rowContent(icon: String, name: String, detail: String, tint: Color) -> some View {

@@ -1,6 +1,134 @@
 import Foundation
 
 extension GianClientStore {
+    func cancelRetentionExpiry() {
+        retentionExpiryGeneration &+= 1
+        retentionExpiryTask?.cancel()
+        retentionExpiryTask = nil
+        retentionExpiryDeadline = nil
+        retentionExpiryScope = nil
+        retentionExpiryEpoch = nil
+    }
+
+    func scheduleRetentionExpiry(_ scope: ClientScope) {
+        guard readyScope() == scope, state.foreground == .foreground,
+              let deadline = memory.retentionNextExpiry(scope), deadline.timeIntervalSince1970.isFinite else {
+            cancelRetentionExpiry()
+            return
+        }
+        if retentionExpiryTask != nil, retentionExpiryDeadline == deadline,
+           retentionExpiryScope == scope, retentionExpiryEpoch == epoch { return }
+        cancelRetentionExpiry()
+        retentionExpiryDeadline = deadline
+        let ownerEpoch = epoch
+        retentionExpiryScope = scope
+        retentionExpiryEpoch = ownerEpoch
+        let generation = retentionExpiryGeneration
+        retentionExpiryTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.retentionExpiryGeneration == generation {
+                    self.retentionExpiryTask = nil
+                    self.retentionExpiryDeadline = nil
+                    self.retentionExpiryScope = nil
+                    self.retentionExpiryEpoch = nil
+                    if !Task.isCancelled, self.readyScope() == scope, self.state.foreground == .foreground {
+                        self.scheduleRetentionExpiry(scope)
+                    }
+                }
+            }
+            var retry = false
+            while !Task.isCancelled {
+                let seconds = retry ? 30 : UInt64(min(max(ceil(deadline.timeIntervalSince(self.clock.now())) + 1, 1), 7 * 24 * 60 * 60))
+                do { try await self.retentionExpirySleep(seconds) }
+                catch {
+                    guard !Task.isCancelled else { return }
+                    do { try await Task.sleep(nanoseconds: 30_000_000_000) } catch { return }
+                    retry = true
+                    continue
+                }
+                guard !Task.isCancelled, self.retentionExpiryGeneration == generation,
+                      self.readyScope() == scope, self.epoch == ownerEpoch,
+                      self.state.foreground == .foreground else { return }
+                if self.clock.now() <= deadline { retry = false; continue }
+                if self.persist() { return }
+                retry = true
+            }
+        }
+    }
+
+    func scheduleRetentionRecovery(_ scope: ClientScope) {
+        guard retentionRecoveryTasks[scope] == nil else { return }
+        let ownerEpoch = epoch
+        retentionRecoveryTasks[scope] = Task { @MainActor [weak self] in
+            var delay: UInt64 = 1
+            var cachedGeneration: Int?
+            var cachedMemoryGeneration: Int?
+            var cachedReferences: Set<AttachmentID> = []
+            var cachedProtectedSessions: Set<SessionID> = []
+            var cachedHoldDownloads = false
+            while !Task.isCancelled {
+                guard let self else { return }
+                guard self.readyScope() == scope, self.epoch == ownerEpoch, self.state.foreground == .foreground else {
+                    self.retentionRecoveryTasks[scope] = nil
+                    if self.readyScope() == scope, self.state.foreground == .foreground,
+                       self.memory.needsRetentionRecovery(scope) { self.scheduleRetentionRecovery(scope) }
+                    return
+                }
+                do {
+                    guard let (snapshot, stored, generation, memoryGeneration, evicted, now) = try self.memory.retentionWorkSnapshot(scope) else {
+                        self.retentionRecoveryTasks[scope] = nil
+                        return
+                    }
+                    if cachedGeneration != generation || cachedMemoryGeneration != memoryGeneration {
+                        let result = await Task.detached(priority: .utility) { snapshot.retentionWorkReferences(stored: stored, evicted: evicted, now: now) }.value
+                        cachedReferences = result.0
+                        cachedProtectedSessions = result.1
+                        cachedHoldDownloads = result.2
+                        cachedGeneration = generation
+                        cachedMemoryGeneration = memoryGeneration
+                    }
+                    guard !Task.isCancelled, self.readyScope() == scope, self.epoch == ownerEpoch,
+                          self.state.foreground == .foreground else {
+                        self.retentionRecoveryTasks[scope] = nil
+                        if !Task.isCancelled, self.readyScope() == scope, self.state.foreground == .foreground,
+                           self.memory.needsRetentionRecovery(scope) { self.scheduleRetentionRecovery(scope) }
+                        return
+                    }
+                    switch try self.memory.retentionStep(scope, generation: generation, memoryGeneration: memoryGeneration,
+                                                         protected: cachedReferences, protectedSessions: cachedProtectedSessions,
+                                                         holdDownloads: cachedHoldDownloads) {
+                    case .complete:
+                        self.retentionRecoveryTasks[scope] = nil
+                        if self.storageLoadFailed { _ = self.restore(host: scope.host) }
+                        else if self.storageWritesBlocked { _ = self.recoverLocalStorage() }
+                        else { _ = self.persist() }
+                        return
+                    case .paused:
+                        self.retentionRecoveryTasks[scope] = nil; return
+                    case .more:
+                        delay = 1
+                        await self.retentionRecoveryYield()
+                    case .stale:
+                        cachedGeneration = nil; cachedMemoryGeneration = nil
+                        delay = 1
+                        await self.retentionRecoveryYield()
+                    }
+                } catch {
+                    if (error as? GianStorageError) != .unavailable {
+                        if self.readyScope() == scope {
+                            self.state.storageError = "Local history cleanup could not continue."
+                        }
+                        self.retentionRecoveryTasks[scope] = nil; return
+                    }
+                    do { try await self.retentionRecoverySleep(delay) }
+                    catch { self.retentionRecoveryTasks[scope] = nil; return }
+                    delay = min(delay * 2, 30)
+                }
+            }
+        }
+    }
+
     // Stream delivery can lag behind an awaited service result. Fence against
     // the producer's actual generation before applying that result as well.
     func responseIsCurrent(_ storeEpoch: Int) -> Bool {
@@ -40,6 +168,8 @@ extension GianClientStore {
         }
         guard readyScope() != nil else { return }
         epoch += 1
+        if let scope = readyScope() { scheduleRetentionExpiry(scope) }
+        locallyCreatedSessions = []; locallyCreatedWithActivity = []
         if state.composer.send.isInFlight, let intent = state.composer.send.intent {
             state.composer.send = .uncertain(intent)
             state.composer.notice = .keptAfterUncertainOutcome
@@ -158,6 +288,11 @@ extension GianClientStore {
         taskRecords = []
         searchHits = []
         directoryViews = [:]
+        manualDirectoryRecoveries = [:]
+        temporarySearchResultID = nil
+        locallyCreatedSessions = []; locallyCreatedWithActivity = []
+        pendingSessionAccess = [:]; deniedSessionAccess = []; sessionAccessOverflow = false
+        directoryExpiryTask?.cancel(); directoryExpiryTask = nil
         directoryRefreshPending = false
     }
 

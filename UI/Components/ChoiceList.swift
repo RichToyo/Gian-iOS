@@ -18,6 +18,8 @@ struct ChoiceListRow: Identifiable {
 struct ChoiceList: View {
     var header: String? = nil
     var rows: [ChoiceListRow]
+    var additionalHeader: String? = nil
+    var additionalRows: [ChoiceListRow] = []
     var actions: [ChoiceListRow] = []
 
     @Environment(\.dismiss) private var dismiss
@@ -34,6 +36,16 @@ struct ChoiceList: View {
                     .accessibilityAddTraits(.isHeader)
             }
             ForEach(rows) { row($0) }
+            if let additionalHeader {
+                Divider().padding(.vertical, 4)
+                Text(additionalHeader)
+                    .font(GianTheme.Typography.caption)
+                    .foregroundStyle(GianTheme.Colors.secondaryLabel)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 4)
+                    .accessibilityAddTraits(.isHeader)
+                ForEach(additionalRows) { row($0) }
+            }
             if !actions.isEmpty {
                 Divider().padding(.vertical, 4)
                 ForEach(actions) { row($0) }

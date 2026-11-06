@@ -18,40 +18,57 @@ struct DirectoryContent: View {
     @State private var collapsedGroups: Set<String> = []
 
     var body: some View {
-        ScrollView {
-            LazyVStack(spacing: 0) {
-                switch directory.view {
-                case .tasks:
-                    directoryGroups(
-                        collection: .tasks,
-                        page: directory.tasksPage,
-                        groups: directory.tasks.map { ($0.id.rawValue, $0.title, $0.conversations) },
-                        unsupportedMessage: "Tasks are unavailable on this Host.",
-                        emptyTitle: "No conversations in open tasks",
-                        emptyDescription: "Conversations associated with open tasks will appear here."
-                    )
-                case .repos:
-                    directoryGroups(
-                        collection: .repos,
-                        page: directory.reposPage,
-                        groups: directory.repos.map { ($0.id.rawValue, $0.repoName, $0.conversations) },
-                        unsupportedMessage: unsupportedMessage(directory.reposAvailability),
-                        emptyTitle: "No recent conversations",
-                        emptyDescription: "Authorized conversations with recent activity will appear here."
-                    )
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    Color.clear.frame(height: 0).id("directory-top")
+                    if let result = directory.temporarySearchResult,
+                       currentPage.phase != .denied, currentPage.phase != .unsupported {
+                        ConversationRow(item: result, isSelected: result.id == selectedConversationID,
+                                        showsRepo: true, onSelect: { onSelectConversation(result.id) })
+                    }
+                    if currentPage.phase != .denied && currentPage.phase != .unsupported {
+                        ForEach(directory.temporaryCreatedResults) { result in
+                            ConversationRow(item: result, isSelected: result.id == selectedConversationID,
+                                            showsRepo: true, onSelect: { onSelectConversation(result.id) })
+                        }
+                    }
+                    switch directory.view {
+                    case .tasks:
+                        directoryGroups(
+                            collection: .tasks,
+                            page: directory.tasksPage,
+                            groups: directory.tasks.map { ($0.id.rawValue, $0.title, $0.conversations) },
+                            unsupportedMessage: "Tasks are unavailable on this Host.",
+                            emptyTitle: "No conversations in open tasks",
+                            emptyDescription: "Conversations associated with open tasks will appear here."
+                        )
+                    case .repos:
+                        directoryGroups(
+                            collection: .repos,
+                            page: directory.reposPage,
+                            groups: directory.repos.map { ($0.id.rawValue, $0.repoName, $0.conversations) },
+                            unsupportedMessage: unsupportedMessage(directory.reposAvailability),
+                            emptyTitle: "No recent conversations",
+                            emptyDescription: "Authorized conversations with recent activity will appear here."
+                        )
+                    }
+                }
+                .padding(.vertical, GianTheme.Metrics.paddingSmall)
+            }
+            .refreshable {
+                await onPullToRefresh(currentCollection)
+            }
+            .task(id: AutoLoad(view: directory.view, canLoad: canLoad)) {
+                // A never-loaded view loads on first sight (or as soon as a just
+                // switched-to Host connects) instead of asking for a manual
+                // refresh. Later reads stay user-initiated.
+                if canLoad, currentPage.phase == .idle, currentIsEmpty {
+                    onRefresh(currentCollection)
                 }
             }
-            .padding(.vertical, GianTheme.Metrics.paddingSmall)
-        }
-        .refreshable {
-            await onPullToRefresh(currentCollection)
-        }
-        .task(id: AutoLoad(view: directory.view, canLoad: canLoad)) {
-            // A never-loaded view loads on first sight (or as soon as a just
-            // switched-to Host connects) instead of asking for a manual
-            // refresh. Later reads stay user-initiated.
-            if canLoad, currentPage.phase == .idle, currentIsEmpty {
-                onRefresh(currentCollection)
+            .onChange(of: directory.temporarySearchGeneration) { _, _ in
+                if directory.temporarySearchResult != nil { proxy.scrollTo("directory-top", anchor: .top) }
             }
         }
     }
@@ -114,7 +131,7 @@ struct DirectoryContent: View {
             DirectoryPageStatusView(
                 collection: collection,
                 page: page,
-                isEmpty: groups.isEmpty,
+                isEmpty: groups.isEmpty && directory.temporarySearchResult == nil && directory.temporaryCreatedResults.isEmpty,
                 unsupportedMessage: unsupportedMessage,
                 emptyTitle: emptyTitle,
                 emptyDescription: emptyDescription,
@@ -164,17 +181,17 @@ struct DirectoryPageStatusView: View {
                         systemImage: "arrow.clockwise"
                     )
                     refreshButton("Load")
-                } else if page.isStale {
-                    staleMessage
                 }
             case .loading:
-                HStack(spacing: GianTheme.Metrics.paddingSmall) {
-                    ProgressView().controlSize(.small)
-                    Text(isEmpty ? loadingTitle : "Updating saved rows…")
-                        .font(GianTheme.Typography.caption)
-                        .foregroundStyle(GianTheme.Colors.secondaryLabel)
+                if isEmpty {
+                    HStack(spacing: GianTheme.Metrics.paddingSmall) {
+                        ProgressView().controlSize(.small)
+                        Text(loadingTitle)
+                            .font(GianTheme.Typography.caption)
+                            .foregroundStyle(GianTheme.Colors.secondaryLabel)
+                    }
+                    .accessibilityElement(children: .combine)
                 }
-                .accessibilityElement(children: .combine)
             case .incomplete:
                 if isEmpty {
                     message(
@@ -182,8 +199,6 @@ struct DirectoryPageStatusView: View {
                         detail: "The Host reports more directory data to scan. This is not an empty result.",
                         systemImage: "ellipsis.circle"
                     )
-                } else if page.isStale {
-                    staleMessage
                 }
                 if page.hasMore {
                     actionButton("Load more", systemImage: "chevron.down") {
@@ -205,7 +220,6 @@ struct DirectoryPageStatusView: View {
                     refreshButton("Refresh")
                 }
             case .cursorInvalid:
-                if !isEmpty && page.isStale { staleMessage }
                 message(
                     "Directory changed",
                     detail: page.error ?? "The continuation is no longer valid. Restart the directory read.",
@@ -214,7 +228,6 @@ struct DirectoryPageStatusView: View {
                 )
                 refreshButton("Restart")
             case .failed:
-                if !isEmpty && page.isStale { staleMessage }
                 message(
                     isEmpty ? "Directory couldn't load" : "Directory refresh failed",
                     detail: page.error ?? "The Host could not provide this directory page.",
@@ -254,16 +267,6 @@ struct DirectoryPageStatusView: View {
 
     private var emptyIncompleteTitle: String {
         collection == .search ? "No matches loaded yet" : "No rows loaded yet"
-    }
-
-    /// Cached rows are normal after launch or reconnect, so this is a quiet
-    /// caption, not a warning. Refresh lives in pull-to-refresh and the list
-    /// menu; no buttons sit below the list.
-    private var staleMessage: some View {
-        Label("Saved list · pull to refresh", systemImage: "clock")
-            .font(GianTheme.Typography.caption)
-            .foregroundStyle(GianTheme.Colors.secondaryLabel)
-            .accessibilityElement(children: .combine)
     }
 
     private func message(
@@ -308,7 +311,7 @@ struct DirectoryPageStatusView: View {
     }
 }
 
-/// Host-authoritative search includes message matches, not only titles.
+/// Host results are narrowed to conversation titles by Core.
 struct SearchScreen: View {
     let directory: DirectoryPresentation
     var onQueryChange: (String) -> Void
@@ -316,6 +319,11 @@ struct SearchScreen: View {
     var onLoadMore: (DirectoryCollection) -> Void = { _ in }
     var onRefresh: (DirectoryCollection) -> Void = { _ in }
     var onClose: () -> Void
+    @State private var queryText = ""
+
+    private var normalizedQuery: String {
+        queryText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     var body: some View {
         NavigationStack {
@@ -331,12 +339,14 @@ struct SearchScreen: View {
                         onLoadMore: onLoadMore,
                         onRefresh: onRefresh
                     )
-                } else if directory.searchQuery.isEmpty {
+                } else if normalizedQuery.isEmpty {
                     ContentUnavailableView(
                         "Search conversations",
                         systemImage: "magnifyingglass",
-                        description: Text("Find conversations by title, repository, or message.")
+                        description: Text("Find conversations by title.")
                     )
+                } else if directory.searchQuery != normalizedQuery {
+                    ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     ScrollView {
                         LazyVStack(spacing: 0) {
@@ -352,7 +362,7 @@ struct SearchScreen: View {
                                 isEmpty: directory.searchResults.isEmpty,
                                 unsupportedMessage: searchUnsupportedMessage,
                                 emptyTitle: "No results",
-                                emptyDescription: "No authorized non-archived conversation matches \"\(directory.searchQuery)\".",
+                                emptyDescription: "The Host returned no matching conversation titles for \"\(directory.searchQuery)\".",
                                 onLoadMore: onLoadMore,
                                 onRefresh: onRefresh
                             )
@@ -369,13 +379,17 @@ struct SearchScreen: View {
                 }
             }
         }
-        .searchable(
-            text: Binding(
-                get: { directory.searchQuery },
-                set: onQueryChange
-            ),
-            prompt: "Title, repository, or message"
-        )
+        .searchable(text: $queryText, prompt: "Conversation title")
+        .onAppear { queryText = directory.searchQuery }
+        .task(id: queryText) {
+            let value = queryText
+            if !value.isEmpty {
+                do { try await Task.sleep(for: .milliseconds(200)) }
+                catch { return }
+            }
+            guard !Task.isCancelled else { return }
+            onQueryChange(value)
+        }
         .background(GianTheme.Colors.background)
     }
 

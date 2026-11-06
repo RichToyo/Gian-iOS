@@ -10,8 +10,11 @@ import SwiftUI
 /// implicitly.
 struct ReadingTranslationStatus: View {
     let presentation: ReadingTranslationPresentation
+    var canCancel: Bool = true
     var onRetry: () -> Void
     var onCancel: () -> Void
+    var onRecover: () -> Void = {}
+    var canRecover: Bool = true
 
     var body: some View {
         switch presentation {
@@ -23,13 +26,26 @@ struct ReadingTranslationStatus: View {
                 Text("Translating…")
                     .font(GianTheme.Typography.caption)
                     .foregroundStyle(GianTheme.Colors.secondaryLabel)
-                Button("Cancel", action: onCancel)
-                    .font(GianTheme.Typography.caption)
-                    .foregroundStyle(GianTheme.Colors.tint)
-                    .gianHitTarget()
+                if canCancel {
+                    Button("Cancel", action: onCancel)
+                        .font(GianTheme.Typography.caption)
+                        .foregroundStyle(GianTheme.Colors.tint)
+                        .gianHitTarget()
+                }
             }
         case .uncertain:
-            Label("Translation outcome unknown — not re-requested", systemImage: "exclamationmark.triangle")
+            HStack(spacing: 6) {
+                Label("Translation outcome unknown — not re-requested", systemImage: "exclamationmark.triangle")
+                    .font(GianTheme.Typography.caption)
+                    .foregroundStyle(GianTheme.Colors.warning)
+                Button("Check status", action: onRecover)
+                    .font(GianTheme.Typography.caption.weight(.semibold))
+                    .fixedSize(horizontal: true, vertical: false)
+                    .gianHitTarget()
+                    .disabled(!canRecover)
+            }
+        case .unavailable(let reason):
+            Label(reason, systemImage: "exclamationmark.triangle")
                 .font(GianTheme.Typography.caption)
                 .foregroundStyle(GianTheme.Colors.warning)
         case .failed(let reason):
@@ -44,6 +60,7 @@ struct ReadingTranslationStatus: View {
                     .font(GianTheme.Typography.caption.weight(.semibold))
                     .foregroundStyle(GianTheme.Colors.tint)
                     .gianHitTarget()
+                    .disabled(!canRecover)
             }
         }
     }
@@ -53,15 +70,16 @@ struct ReadingTranslationStatus: View {
 /// e.g. "Translation · Chinese" / "Sent as · English".
 struct LanguageTag: View {
     let label: String
+    var onColoredBackground = false
 
     var body: some View {
         Text(label)
             .font(GianTheme.Typography.badge)
-            .foregroundStyle(GianTheme.Colors.secondaryLabel)
+            .foregroundStyle(onColoredBackground ? Color.white.opacity(0.9) : GianTheme.Colors.secondaryLabel)
             .padding(.horizontal, GianTheme.Metrics.paddingSmall)
             .padding(.vertical, 2)
             .background(
-                GianTheme.Colors.secondaryLabel.opacity(0.12),
+                onColoredBackground ? Color.white.opacity(0.16) : GianTheme.Colors.secondaryLabel.opacity(0.12),
                 in: Capsule()
             )
     }

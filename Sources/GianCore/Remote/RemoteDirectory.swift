@@ -51,17 +51,18 @@ extension RemoteMapping {
         let status: SessionStatus = try enumeration(value, "status")
         let waiting = try value.boolean("waiting_for_user")
         let revision = try value.string("revision")
+        let name = try value.optionalString("name", maximum: 256)
         guard !revision.isEmpty else { throw RemoteClientError.invalidPayload }
         // Membership already passed Host archive/authorization policy. A retained
         // completed_at is informational, including after a session is reopened.
         var session = SessionRecord(id: try value.scoped("id"), hostID: host,
-            title: try value.optionalString("name", maximum: 256) ?? "Untitled", revision: revision,
+            title: name ?? "Untitled", revision: revision,
             taskID: task?.id, workspaceID: workspace.id, agentID: try value["agent"].scoped("id"),
             agentName: try value["agent"].string("name", maximum: 256), pluginID: try value["agent"].string("proxy", maximum: 256),
             status: status, unread: try value.boolean("unread"), attention: waiting ? .interaction : (status == .running ? .running : nil),
             lastActivityAt: activity, activityIsMessageOrExecution: activity != nil, updatedAt: activity ?? .distantPast)
         session.completedAt = try value.optionalString("completed_at")
-        return DirectoryEntry(session: session, workspace: workspace, task: task)
+        return DirectoryEntry(session: session, workspace: workspace, task: task, searchName: name)
     }
 }
 

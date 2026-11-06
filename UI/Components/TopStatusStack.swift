@@ -31,6 +31,7 @@ struct TransientBanner: View {
             .padding(.leading, GianTheme.Metrics.paddingMedium)
             .padding(.trailing, 44)
             .padding(.vertical, GianTheme.Metrics.paddingSmall)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .overlay(alignment: .topTrailing) {
@@ -59,52 +60,14 @@ struct TransientBanner: View {
         )
         .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
         .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("transient-banner")
         .accessibilityHint("Opens the conversation")
     }
 }
 
-/// Connectivity/sync row. Persisted history stays visible while offline;
-/// revoked/mismatch states are honest and non-interactive.
-struct ConnectivityBar: View {
-    let state: ConnectivityPresentation
-
-    var body: some View {
-        switch state {
-        case .hidden:
-            EmptyView()
-        case .offlineHistory:
-            row(icon: "wifi.slash", text: "Offline — showing saved history", color: GianTheme.Colors.secondaryLabel)
-        case .reconnecting:
-            row(icon: "arrow.triangle.2.circlepath", text: "Reconnecting…", color: GianTheme.Colors.warning)
-        case .hostOffline:
-            row(icon: "laptopcomputer.slash", text: "Host is offline", color: GianTheme.Colors.warning)
-        case .resyncing:
-            row(icon: "arrow.triangle.2.circlepath", text: "Catching up…", color: GianTheme.Colors.warning)
-        case .deviceRevoked:
-            row(icon: "hand.raised.fill", text: "This device's access was revoked. Pair the Host again.", color: GianTheme.Colors.failure)
-        case .versionMismatch(let version):
-            row(icon: "exclamationmark.triangle", text: "Host version \(version) is not supported by this app.", color: GianTheme.Colors.failure)
-        }
-    }
-
-    private func row(icon: String, text: String, color: Color) -> some View {
-        Label(text, systemImage: icon)
-            .font(GianTheme.Typography.caption)
-            .foregroundStyle(color)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 6)
-            .background(GianTheme.Colors.card)
-            .accessibilityElement(children: .combine)
-    }
-}
-
-/// Top overlay stack for chat screens. The transient banner and the
-/// connectivity row are vertically stacked in one container, so they can
-/// never overlap; safe-area padding keeps them clear of cards and inputs.
+/// Cross-conversation events remain transient; connection state lives in the title.
 struct TopStatusStack: View {
     var banner: BannerPresentation?
-    var connectivity: ConnectivityPresentation
-    var diagnostic: DiagnosticPresentation = .none
     var onBannerTap: () -> Void = {}
     var onBannerDismiss: () -> Void = {}
 
@@ -118,12 +81,45 @@ struct TopStatusStack: View {
                 )
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
-            DiagnosticBar(diagnostic: diagnostic)
-            ConnectivityBar(state: connectivity)
         }
         .animation(.spring(duration: 0.3), value: banner)
-        .animation(.easeInOut(duration: 0.2), value: connectivity)
         .padding(.horizontal, GianTheme.Metrics.paddingMedium)
+    }
+}
+
+struct ConversationStatusView: View {
+    let status: ConversationStatusPresentation
+    var onRetryConnection: () -> Void
+    var onRetryMessages: () -> Void
+    @State private var showsDetails = false
+
+    var body: some View {
+        Button { showsDetails = true } label: {
+            Label(status.label, systemImage: status.symbol)
+                .font(GianTheme.Typography.caption)
+                .foregroundStyle(status.isError ? GianTheme.Colors.failure : GianTheme.Colors.secondaryLabel)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Connection status: \(status.label)")
+        .accessibilityHint("Shows status details")
+        .popover(isPresented: $showsDetails) {
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(Array(status.details.enumerated()), id: \.offset) { _, detail in
+                    Text(detail).font(GianTheme.Typography.caption)
+                }
+                if status.retryConnection {
+                    Button("Retry connection") { showsDetails = false; onRetryConnection() }
+                }
+                if status.retryMessages {
+                    Button("Retry messages") { showsDetails = false; onRetryMessages() }
+                }
+            }
+            .padding(16)
+            .frame(minWidth: 220, idealWidth: 260, maxWidth: 300, alignment: .leading)
+            .presentationCompactAdaptation(.popover)
+        }
     }
 }
 
@@ -131,6 +127,7 @@ struct TopStatusStack: View {
 /// resync). Never raw error text, URLs or payloads.
 struct DiagnosticBar: View {
     let diagnostic: DiagnosticPresentation
+    var onRetrySynchronization: (() -> Void)? = nil
 
     var body: some View {
         switch diagnostic {
@@ -139,11 +136,19 @@ struct DiagnosticBar: View {
         case .connectionClosed(let message):
             row(icon: "wifi.exclamationmark", text: message, color: GianTheme.Colors.warning)
         case .resyncRequired(let reason):
-            row(
-                icon: "arrow.triangle.2.circlepath",
-                text: "A resync is required (\(reason)).",
-                color: GianTheme.Colors.warning
-            )
+            HStack(spacing: GianTheme.Metrics.paddingSmall) {
+                Label("Sync required", systemImage: "arrow.triangle.2.circlepath")
+                    .font(GianTheme.Typography.caption)
+                    .foregroundStyle(GianTheme.Colors.warning)
+                    .accessibilityHint("Reason: \(reason)")
+                if let onRetrySynchronization {
+                    Button("Retry", action: onRetrySynchronization)
+                        .font(GianTheme.Typography.caption.weight(.semibold))
+                        .gianHitTarget()
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .background(GianTheme.Colors.card)
         }
     }
 
@@ -168,10 +173,10 @@ struct DiagnosticBar: View {
                 title: "iOS client design board",
                 summary: "Task completed",
                 eventCount: 2
-            ),
-            connectivity: .resyncing
+            )
         )
-        TopStatusStack(banner: nil, connectivity: .offlineHistory)
+        ConversationStatusView(status: .make(connectivity: .offlineHistory, diagnostic: .none, transcriptSync: .idle)!,
+                               onRetryConnection: {}, onRetryMessages: {})
     }
     .padding()
 }

@@ -17,7 +17,7 @@ private func phaseKind(_ phase: SendPhase) -> String {
 @MainActor
 struct ContractTests {
     @Test func serverAddressAndEnrollmentTokenConnectWithoutAnyAccount() async throws {
-        #expect(GianCore.contractRevision == "0.1.0-contract.2")
+        #expect(GianCore.contractRevision == "0.1.0-contract.3")
         #expect(RemoteBaseline.inspectedCommit == "0c0f2f5c92bc70f78269b105e4e0b98cf99770d0")
         #expect(RemoteBaseline.serverIdentityProofType == "gian.remote.server_identity/1")
         #expect(KnownWireFeature.conversationTranslation.rawValue == "wire.conversation_translation")
@@ -123,9 +123,8 @@ struct ContractTests {
     @Test func legacyDirectoryHidesReposAndSearch() async throws {
         let (store, service, clock) = makeHarness()
         _ = try await signIn(store, clock: clock)
-        #expect(store.state.directory.tasks.contains { section in
-            section.title == "Paint the harbor" && section.conversations.contains { $0.title == "Mooring notes" }
-        })
+        #expect(store.state.directory.tasks.contains { $0.title == "Paint the harbor" })
+        #expect(!conversationTitles(store).contains("Mooring notes"))
         #expect(store.state.directory.repos.isEmpty)
         #expect(store.state.directory.reposSupport == .unsupported(.reposDirectory))
         #expect(store.state.directory.searchSupport == .unsupported(.olderSearch))
@@ -155,7 +154,9 @@ struct ContractTests {
     }
 
     @Test func draftsSurviveNavigationLogoutAndStayScoped() async throws {
-        let (store, service, clock) = makeHarness()
+        var script = PreviewScript.legacyContract
+        script.directory.sessions[0].status = .new
+        let (store, service, clock) = makeHarness(script: script)
         _ = try await signIn(store, clock: clock)
         #expect((await store.dispatch(.openNewChat)).isApplied)
         #expect((await store.dispatch(.editDraftText("harbor draft"))).isApplied)
@@ -343,7 +344,9 @@ struct ContractTests {
     }
 
     @Test func canonicalGapsAndGenerationAreNotApplied() async throws {
-        let (store, _, clock) = makeHarness()
+        var script = PreviewScript.legacyContract
+        script.directory.sessions[0].status = .new
+        let (store, _, clock) = makeHarness(script: script)
         _ = try await signIn(store, clock: clock)
         let scope = try clientScope(store)
         var shifted = try #require(store.sessions.first { $0.id == PreviewFixtures.sessionID })
@@ -367,7 +370,7 @@ struct ContractTests {
         #expect(store.state.sync.needsSnapshot)
         #expect(!conversationTitles(store).contains("Late title"))
 
-        let ordered = makeHarness()
+        let ordered = makeHarness(script: script)
         _ = try await signIn(ordered.0, clock: ordered.2)
         let orderedScope = try clientScope(ordered.0)
         var applied = try #require(ordered.0.sessions.first { $0.id == PreviewFixtures.sessionID })
@@ -389,7 +392,7 @@ struct ContractTests {
         #expect(conversationTitles(ordered.0).contains("Applied title"))
         #expect(!conversationTitles(ordered.0).contains("Duplicate title"))
 
-        let restarted = makeHarness()
+        let restarted = makeHarness(script: script)
         _ = try await signIn(restarted.0, clock: restarted.2)
         var renamed = try #require(restarted.0.sessions.first { $0.id == PreviewFixtures.sessionID })
         renamed.title = "Other generation"
@@ -415,6 +418,30 @@ struct ContractTests {
             event: .canonical(sequence: 5, generation: PreviewFixtures.generationID, body: .session(shifted))
         ))
         #expect(foreign == .rejected(.scopeMismatch))
+    }
+
+    @Test func openingBannerNavigatesToItsOwnConversation() async throws {
+        let (store, _, clock) = makeHarness()
+        _ = try await signIn(store, clock: clock)
+        let scope = try clientScope(store)
+        let first = makeSession(id: "banner-first", title: "First conversation", taskID: nil)
+        let second = makeSession(id: "banner-second", title: "Second conversation", taskID: nil)
+        store.sessions.append(contentsOf: [first, second])
+        _ = await store.dispatch(.selectConversation(PreviewFixtures.sessionID))
+        _ = await store.dispatch(.editDraftText("Unsent fictional draft"))
+
+        for session in [first, second] {
+            let item = transcriptItem(id: "message-\(session.id.rawValue)", turn: 1, text: session.title)
+            #expect(store.ingest(InboundEnvelope(scope: scope, event: .transcript(sessionID: session.id, item: item))).isApplied)
+        }
+        let firstBanner = try #require(store.state.banners.first { $0.sessionID == first.id })
+        #expect((await store.dispatch(.openBanner(firstBanner.id))).isApplied)
+        #expect(store.state.navigation.destination == .conversation(first.id))
+        #expect(store.state.conversation?.session.id == first.id)
+        #expect(store.state.banners.contains { $0.sessionID == second.id })
+
+        _ = await store.dispatch(.selectConversation(PreviewFixtures.sessionID))
+        #expect(store.state.composer.draft.text == "Unsent fictional draft")
     }
 
     @Test func bannersAreForegroundCrossChatAndCoalesced() async throws {

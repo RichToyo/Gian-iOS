@@ -28,8 +28,37 @@ public final class GianClientStore {
     @ObservationIgnored var searchSequence = 0
     @ObservationIgnored var directorySequence = 0
     @ObservationIgnored var directoryRequestSequence = 0
+    @ObservationIgnored var transcriptSyncSequence = 0
     @ObservationIgnored var directoryRequests: [DirectoryCollection: Int] = [:]
+    @ObservationIgnored var manualDirectoryRecoveries: [DirectoryCollection: Set<Int>] = [:]
+    @ObservationIgnored var manualDirectoryRecoverySequence = 0
     @ObservationIgnored var directoryViews: [DirectoryCollection: StoredDirectoryView] = [:]
+    @ObservationIgnored var tasksTimeFilter: DirectoryTimeFilter = .last7Days
+    @ObservationIgnored var reposTimeFilter: DirectoryTimeFilter = .last7Days
+    @ObservationIgnored var temporarySearchResultID: SessionID?
+    @ObservationIgnored var temporarySearchGeneration = 0
+    @ObservationIgnored var locallyCreatedSessions: Set<SessionID> = []
+    @ObservationIgnored var locallyCreatedWithActivity: Set<SessionID> = []
+    @ObservationIgnored var pendingSessionAccess: [SessionID: Int] = [:]
+    @ObservationIgnored var deniedSessionAccess: Set<SessionID> = []
+    @ObservationIgnored var sessionAccessOverflow = false
+    @ObservationIgnored var sessionAccessSequence = 0
+    @ObservationIgnored var directoryExpiryTask: Task<Void, Never>?
+    @ObservationIgnored var retentionRecoveryTasks: [ClientScope: Task<Void, Never>] = [:]
+    @ObservationIgnored var retentionExpiryTask: Task<Void, Never>?
+    @ObservationIgnored var retentionExpiryDeadline: Date?
+    @ObservationIgnored var retentionExpiryScope: ClientScope?
+    @ObservationIgnored var retentionExpiryEpoch: Int?
+    @ObservationIgnored var retentionExpiryGeneration: UInt64 = 0
+    @ObservationIgnored var retentionExpirySleep: (UInt64) async throws -> Void = { seconds in
+        try await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+    }
+    @ObservationIgnored var retentionRecoverySleep: (UInt64) async throws -> Void = { seconds in
+        try await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+    }
+    @ObservationIgnored var retentionRecoveryYield: () async -> Void = { await Task.yield() }
+    @ObservationIgnored var translationPageRequests: Set<TranslationRecordID> = []
+    @ObservationIgnored var translationStatusRequests: Set<TranslationRequestID> = []
     @ObservationIgnored var directoryRefreshPending = false
     @ObservationIgnored var invalidatedAuthorizations: [DataScope: Date] = [:]
     @ObservationIgnored var serverPins: [ServerAddress: String] = [:]
@@ -76,7 +105,7 @@ public final class GianClientStore {
         self.service = service
         self.clock = clock
         self.ids = ids
-        self.memory = ScopedMemory(storage: storage)
+        self.memory = ScopedMemory(storage: storage, retentionClock: clock)
         self.state = .signedOut()
     }
 
@@ -122,12 +151,31 @@ public final class GianClientStore {
         case .selectHost(let id): return await selectHost(id)
         case .selectDirectoryView(let view):
             state.navigation.directoryView = view
+            reproject()
             if negotiatedDirectory { return await loadDirectory(view == .tasks ? .tasks : .repos, reset: false) }
             return .applied
+        case .setDirectoryTimeFilter(let view, let filter):
+            guard readyScope() != nil else { return reject(.notAuthorized) }
+            if view == .tasks { tasksTimeFilter = filter } else { reposTimeFilter = filter }
+            reproject()
+            return persistenceResult()
         case .selectConversation(let id): return await selectConversation(id)
+        case .selectSearchResult(let id):
+            guard state.directory.searchResults.contains(where: { $0.id == id }) else { return reject(.notFound) }
+            guard let session = (sessions + searchHits).first(where: { $0.id == id && $0.authorized && !$0.archived }),
+                  !taskRecords.contains(where: { $0.id == session.taskID && $0.status != .open }) else { return reject(.notFound) }
+            temporarySearchResultID = id
+            temporarySearchGeneration += 1
+            directoryRequests[.search] = nil
+            directoryViews[.search] = nil
+            state.directory.searchQuery = ""
+            reproject()
+            return await selectConversation(id)
         case .openNewChat:
+            temporarySearchResultID = nil
             navigationEpoch += 1
             state.navigation.destination = .newChat
+            reproject()
             loadDraft(for: .newConversation)
             return .applied
         case .returnHome:
@@ -135,6 +183,7 @@ public final class GianClientStore {
             navigationEpoch += 1
             state.navigation.destination = .home
             state.navigation.settingsOpen = false
+            reproject()
             return persistenceResult()
         case .openSettings:
             state.navigation.settingsOpen = true
@@ -145,8 +194,7 @@ public final class GianClientStore {
         case .search(let query): return await search(query)
         case .loadMoreDirectory(let view): return await loadDirectory(view, reset: false)
         case .refreshDirectoryView(let view):
-            if view == .tasks, !negotiatedDirectory { return await refresh() }
-            return await loadDirectory(view, reset: true)
+            return await manualRefreshDirectory(view)
         case .clearSearch:
             directoryRequests[.search] = nil
             directoryViews[.search] = nil
@@ -156,6 +204,9 @@ public final class GianClientStore {
             reproject()
             return readyScope() == nil ? .applied : persistenceResult()
         case .pageOlderTranscript: return await pageOlder()
+        case .retryTranscriptSync:
+            guard let session = currentSessionID else { return reject(.notFound) }
+            return await selectConversation(session)
         case .editDraftText(let text): return editDraft(text)
         case .addDraftAttachment(let input): return await addAttachment(input)
         case .removeDraftAttachment(let id): return removeAttachment(id)
@@ -186,6 +237,8 @@ public final class GianClientStore {
             return persistenceResult()
         case .send: return await performSend(explicitOriginal: false, reusedRequestID: nil)
         case .stop: return await stop()
+        case .mutateQueue(let mutation): return await mutateQueue(mutation)
+        case .recoverQueueCommand: return await recoverQueueCommand()
         case .recoverUncertainOperation: return await recover()
         case .retryUncertainCreate: return await retryCreate()
         case .respondToInteraction(let id, let actionID, let values):
@@ -193,6 +246,7 @@ public final class GianClientStore {
         case .setAutoTranslation(let enabled): return await setAuto(enabled)
         case .requestReadingTranslation(let sourceID, let text):
             return await requestReading(sourceID: sourceID, text: text)
+        case .recoverReadingTranslation(let sourceID): return await recoverReading(sourceID)
         case .cancelReadingTranslation(let sourceID): return await cancelReading(sourceID)
         case .retryTranslationText(let id): return await pageTranslation(id)
         case .retryTranslationSend: return await retryTranslation()
@@ -212,6 +266,8 @@ public final class GianClientStore {
             return result
         case .setForeground(let presence):
             state.foreground = presence
+            if presence == .background { cancelRetentionExpiry() }
+            if readyScope() != nil { reproject() }
             if presence == .background {
                 if state.phase == .serverEntered, state.account.status == .pending {
                     epoch += 1
@@ -223,6 +279,9 @@ public final class GianClientStore {
             }
             return recoverLocalStorage()
         case .refreshDirectory: return await refresh()
+        case .retrySynchronization:
+            guard let eventCoordinator else { return reject(.capabilityUnsupported) }
+            return await eventCoordinator.refreshConnection()
         case .clearAttachmentCache: return clearCache()
         }
     }
@@ -242,11 +301,12 @@ public final class GianClientStore {
             guard negotiatedDirectory, generation == state.sync.cursor?.hostGeneration else { return reject(.staleOperation) }
             invalidateDirectoryViews()
             directoryRefreshPending = true
-            markTranscriptCatchUp()
-            return persistenceResult()
+            schedulePersistence()
+            return .applied
         case .sessionMetadata(let session, let interactions):
             guard negotiatedDirectory, session.hostID == scope.host, session.id == currentSessionID,
                   interactions.allSatisfy({ $0.sessionID == session.id }) else { return reject(.staleOperation) }
+            guard !deniedSessionAccess.contains(session.id), pendingSessionAccess[session.id] == nil else { return .applied }
             upsertSession(session)
             state.conversation?.session = sessions.first { $0.id == session.id } ?? session
             let prior = state.interactions
@@ -259,7 +319,18 @@ public final class GianClientStore {
             return persistenceResult()
         case .sessionUnavailable(let session):
             guard negotiatedDirectory else { return reject(.staleOperation) }
+            recordSessionDenial(session)
+            pendingSessionAccess.removeValue(forKey: session)
+            invalidateDirectoryViews()
+            directoryRefreshPending = true
+            for collection in directoryViews.keys {
+                directoryViews[collection]?.entries.removeAll { $0.session.id == session }
+            }
+            if let scope = readyScope() { memory.clearRetentionActivity(scope: scope, session: session) }
             if let index = sessions.firstIndex(where: { $0.id == session }) { sessions[index].authorized = false }
+            if let index = searchHits.firstIndex(where: { $0.id == session }) { searchHits[index].authorized = false }
+            if temporarySearchResultID == session { temporarySearchResultID = nil }
+            locallyCreatedSessions.remove(session); locallyCreatedWithActivity.remove(session)
             state.interactions.removeAll { $0.sessionID == session }
             if currentSessionID == session {
                 navigationEpoch += 1; state.conversation = nil; state.navigation.destination = .home
@@ -268,6 +339,8 @@ public final class GianClientStore {
             return persistenceResult()
         case .canonical(let sequence, let generation, let body):
             return applyCanonical(sequence: sequence, generation: generation, body: body)
+        case .statePatch(let sequence, let generation, let base, let revision, let patch):
+            return applyStatePatch(sequence: sequence, generation: generation, baseRevision: base, revision: revision, patch: patch)
         case .transcript(let sessionID, let item):
             guard !state.sync.needsSnapshot else { return .applied }
             return applyTranscript(sessionID: sessionID, item: item)
@@ -328,10 +401,16 @@ public final class GianClientStore {
     }
 
     func mutationsAllowed() -> Bool {
-        guard directoryReadyForRecovery(), let scope = readyScope() else { return false }
+        guard directoryReadyForRecovery(), !sessionAccessOverflow, let scope = readyScope() else { return false }
+        if let bound = state.composer.draft.boundSessionID,
+           pendingSessionAccess[bound] != nil || deniedSessionAccess.contains(bound) { return false }
+        if case .conversation(let draftSession) = state.composer.draft.target,
+           pendingSessionAccess[draftSession] != nil || deniedSessionAccess.contains(draftSession) { return false }
         if let session = currentSessionID {
             return state.conversation?.session.id == session
+                && pendingSessionAccess[session] == nil && !deniedSessionAccess.contains(session)
                 && state.conversation?.hydratedFromCache == false
+                && state.conversation?.transcriptSync == .idle
                 && memory.bundle(for: scope).transcriptCursors[session]?.catchUp == nil
         }
         return true
@@ -427,9 +506,28 @@ public final class GianClientStore {
             evaluatedAt: evaluated,
             legacyLimitations: projection.limitations
         )
-        if state.directory.authority == .negotiatedDirectoryV1 { projectDirectoryMembership() }
+        state.directory.tasksTimeFilter = tasksTimeFilter
+        state.directory.reposTimeFilter = reposTimeFilter
+        state.directory.temporarySearchGeneration = temporarySearchGeneration
+        if state.directory.authority == .negotiatedDirectoryV1 {
+            projectDirectoryMembership(now: evaluated)
+        } else {
+            state.directory.tasks = state.directory.tasks.filter { section in
+                section.conversations.contains { summary in
+                    sessions.contains { $0.id == summary.id && tasksTimeFilter.includes($0, now: evaluated) }
+                }
+            }
+        }
+        if let id = temporarySearchResultID,
+           let session = (sessions + searchHits).first(where: { $0.id == id && $0.authorized && !$0.archived }),
+           directoryViews[.tasks]?.status.phase != .denied,
+           !taskRecords.contains(where: { $0.id == session.taskID && $0.status != .open }) {
+            let names = state.workspaces.reduce(into: [WorkspaceID: String]()) { $0[$1.id] = $1.name }
+            state.directory.temporarySearchResult = DirectoryFilter.summary(session, names: names)
+        }
         projectDirectoryStatus()
         state.openTasks = taskRecords.filter { $0.status == .open }.sorted { $0.id.rawValue < $1.id.rawValue }
+        scheduleDirectoryExpiry(now: evaluated)
     }
 
     @discardableResult
@@ -445,6 +543,14 @@ public final class GianClientStore {
             // Home, switching Hosts (or relaunching) must not land in New chat.
             bundle.activeDraftID = state.navigation.destination == .home ? nil : state.composer.draft.id
             bundle.drafts = state.drafts.filter { $0.hostID == host }
+            for draft in bundle.drafts + Array(bundle.submittedDrafts.values) {
+                let owner: SessionID?
+                if case .conversation(let id) = draft.target { owner = id }
+                else { owner = draft.boundSessionID }
+                if let owner {
+                    for attachment in draft.attachments { bundle.noteDownloadOwner(attachment.id, session: owner) }
+                }
+            }
             bundle.sessions = sessions
             bundle.tasks = taskRecords
             bundle.workspaces = state.workspaces
@@ -459,6 +565,18 @@ public final class GianClientStore {
             bundle.host = state.hosts.first { $0.id == host }
             bundle.searchHits = searchHits
             bundle.directoryViews = directoryViews
+            bundle.tasksTimeFilter = tasksTimeFilter
+            bundle.reposTimeFilter = reposTimeFilter
+            bundle.pendingSessionAccessIDs = pendingSessionAccess.isEmpty ? nil : pendingSessionAccess.keys.sorted { $0.rawValue < $1.rawValue }
+            bundle.deniedSessionAccessIDs = deniedSessionAccess.isEmpty ? nil : deniedSessionAccess.sorted { $0.rawValue < $1.rawValue }
+            bundle.sessionAccessOverflow = sessionAccessOverflow ? true : nil
+            let pendingQueue = state.queueCommands.compactMapValues { value -> CommandID? in
+                switch value {
+                case .pending(let id), .uncertain(let id): id
+                case .failed: nil
+                }
+            }
+            bundle.pendingQueueCommands = pendingQueue.isEmpty ? nil : pendingQueue
             bundle.selections[state.composer.draft.id] = state.composer.selection
             bundle.pendingStop = state.pendingStop
             if let intent = state.composer.send.intent, state.composer.send.isInFlight || isUncertain(state.composer.send) {
@@ -472,13 +590,13 @@ public final class GianClientStore {
             } else {
                 bundle.operations[state.composer.draft.id] = state.composer.send
             }
-            let referenced = Set((bundle.drafts + Array(bundle.submittedDrafts.values)).flatMap { $0.attachments.map(\.id) })
-            bundle.draftBytes = bundle.draftBytes.filter { referenced.contains($0.key) }
         }
         do {
             try memory.commit(scope)
             storageWritesBlocked = false
             state.storageError = nil
+            if memory.needsRetentionRecovery(scope) { scheduleRetentionRecovery(scope) }
+            scheduleRetentionExpiry(scope)
             return true
         } catch {
             let wasBlocked = storageWritesBlocked
@@ -487,6 +605,7 @@ public final class GianClientStore {
             state.sync.needsSnapshot = true
             state.connection = .offline
             state.storageError = "Local storage is unavailable. Changes have not been saved."
+            if (error as? GianStorageError) == .unavailable, memory.needsRetentionRecovery(scope) { scheduleRetentionRecovery(scope) }
             if !wasBlocked { eventCoordinator?.storageBecameUnavailable() }
             return false
         }
@@ -519,6 +638,7 @@ public final class GianClientStore {
         catch {
             storageLoadFailed = true
             state.storageError = "Local history could not be opened. No data was replaced."
+            if (error as? GianStorageError) == .unavailable, memory.needsRetentionRecovery(scope) { scheduleRetentionRecovery(scope) }
             return false
         }
         storageLoadFailed = false
@@ -526,6 +646,15 @@ public final class GianClientStore {
         memory.update(scope) { $0 = $0.recovered() }
         let bundle = memory.bundle(for: scope)
         sessions = bundle.sessions.filter { $0.hostID == host }
+        let restoredDenials = Set(sessions.filter { !$0.authorized }.map(\.id) + bundle.searchHits.filter { !$0.authorized }.map(\.id))
+            .union(bundle.deniedSessionAccessIDs ?? [])
+        deniedSessionAccess = Set(restoredDenials.sorted { $0.rawValue < $1.rawValue }.prefix(4_096))
+        sessionAccessOverflow = bundle.sessionAccessOverflow == true || restoredDenials.count > 4_096
+        pendingSessionAccess = [:]
+        for id in bundle.pendingSessionAccessIDs ?? [] {
+            sessionAccessSequence += 1
+            pendingSessionAccess[id] = sessionAccessSequence
+        }
         taskRecords = bundle.tasks
         state.workspaces = bundle.workspaces
         state.agents = bundle.agents
@@ -539,6 +668,10 @@ public final class GianClientStore {
         searchHits = bundle.searchHits
         directorySequence += 1
         directoryViews = bundle.directoryViews ?? [:]
+        temporarySearchResultID = nil
+        tasksTimeFilter = bundle.tasksTimeFilter ?? .last7Days
+        reposTimeFilter = bundle.reposTimeFilter ?? .last7Days
+        state.queueCommands = (bundle.pendingQueueCommands ?? [:]).mapValues { .uncertain($0) }
         state.directory.searchQuery = directoryViews[.search]?.query ?? ""
         state.drafts = bundle.drafts.filter { $0.hostID == host }
         state.composer.draft = DraftDocument.placeholder(now: clock.now())
@@ -568,10 +701,15 @@ public final class GianClientStore {
             }
         }
         reproject()
+        // Apply expired-cache retention even when the Host stays offline.
+        _ = persist()
         return true
     }
 
     func upsertSession(_ session: SessionRecord) {
+        guard !deniedSessionAccess.contains(session.id),
+              sessions.first(where: { $0.id == session.id })?.authorized != false,
+              !sessionAccessOverflow || sessions.contains(where: { $0.id == session.id && $0.authorized }) else { return }
         if let index = sessions.firstIndex(where: { $0.id == session.id }) {
             let previous = sessions[index]
             sessions[index] = session
@@ -583,6 +721,19 @@ public final class GianClientStore {
         } else {
             sessions.append(session)
         }
+        noteRetentionActivity(session)
+    }
+
+    func recordSessionDenial(_ id: SessionID) {
+        if deniedSessionAccess.contains(id) || deniedSessionAccess.count < 4_096 { deniedSessionAccess.insert(id) }
+        else { sessionAccessOverflow = true }
+    }
+
+    func noteRetentionActivity(_ session: SessionRecord) {
+        guard session.authorized, !session.archived, session.activityIsMessageOrExecution,
+              let at = session.lastActivityAt, at.timeIntervalSince1970.isFinite,
+              let scope = readyScope(), session.hostID == scope.host else { return }
+        memory.noteRetentionActivity(session, scope: scope, at: at)
     }
 
     private func isUncertain(_ phase: SendPhase) -> Bool {
@@ -679,6 +830,12 @@ public final class GianClientStore {
         taskRecords = []
         searchHits = []
         directoryViews = [:]
+        manualDirectoryRecoveries = [:]
+        temporarySearchResultID = nil
+        locallyCreatedSessions = []; locallyCreatedWithActivity = []
+        pendingSessionAccess = [:]; deniedSessionAccess = []; sessionAccessOverflow = false
+        directoryExpiryTask?.cancel(); directoryExpiryTask = nil
+        cancelRetentionExpiry()
         directoryRefreshPending = false
         memory.discardCommitted()
         storageLoadFailed = false
@@ -746,6 +903,12 @@ public final class GianClientStore {
         taskRecords = []
         searchHits = []
         directoryViews = [:]
+        manualDirectoryRecoveries = [:]
+        temporarySearchResultID = nil
+        locallyCreatedSessions = []; locallyCreatedWithActivity = []
+        pendingSessionAccess = [:]; deniedSessionAccess = []; sessionAccessOverflow = false
+        directoryExpiryTask?.cancel(); directoryExpiryTask = nil
+        cancelRetentionExpiry()
         directoryRefreshPending = false
         storageLoadFailed = false
         state.server = authorization.server
@@ -866,6 +1029,7 @@ public final class GianClientStore {
         serviceDiagnostic = nil
         state.navigation = .home
         state.banners = []
+        state.queueCommands = [:]
         state.conversation = nil
         state.composer = ComposerProjection(selection: ComposerSelection(), draft: .placeholder(now: clock.now()), send: .idle, notice: .none)
         state.drafts = []
@@ -876,6 +1040,12 @@ public final class GianClientStore {
         taskRecords = []
         searchHits = []
         directoryViews = [:]
+        manualDirectoryRecoveries = [:]
+        temporarySearchResultID = nil
+        locallyCreatedSessions = []; locallyCreatedWithActivity = []
+        pendingSessionAccess = [:]; deniedSessionAccess = []; sessionAccessOverflow = false
+        directoryExpiryTask?.cancel(); directoryExpiryTask = nil
+        cancelRetentionExpiry()
         directoryRefreshPending = false
         guard restore(host: id) else { return reject(.mutationsDisabled) }
         if let previousStorageError { state.storageError = previousStorageError }
@@ -887,8 +1057,10 @@ public final class GianClientStore {
 
     func selectConversation(_ id: SessionID) async -> GianDispatchResult {
         guard let scope = readyScope(), let session = (sessions + searchHits).first(where: { $0.id == id && $0.authorized && !$0.archived }) else { return reject(.notFound) }
+        if temporarySearchResultID != id { temporarySearchResultID = nil }
         navigationEpoch += 1
         state.navigation.destination = .conversation(id)
+        reproject()
         state.navigation.settingsOpen = false
         loadDraft(for: .conversation(id))
         let cached = memory.bundle(for: scope).transcripts[id] ?? []
@@ -899,13 +1071,21 @@ public final class GianClientStore {
             items: cached,
             cursor: savedCursor?.cursor,
             hasOlder: savedCursor?.hasOlder ?? true,
-            hydratedFromCache: !cached.isEmpty
+            hydratedFromCache: !cached.isEmpty,
+            transcriptSync: .syncing
         )
+        let sync = beginTranscriptSync(session: id)
         let token = epoch
         let navigation = navigationEpoch
         let page = await service.pageTranscript(scope: scope, sessionID: id, cursor: nil)
-        guard responseIsCurrent(token), state.currentHostID == scope.host else { return reject(.staleOperation) }
-        guard !page.failed else { return .applied }
+        guard responseIsCurrent(token), state.currentHostID == scope.host else {
+            finishTranscriptSync(sync, session: id, state: .failed)
+            return reject(.staleOperation)
+        }
+        guard !page.failed else {
+            finishTranscriptSync(sync, session: id, state: .failed)
+            return .applied
+        }
         let current = memory.bundle(for: scope).transcripts[id] ?? []
         let anchors = Set(cached.suffix(256).map(\.id))
         let reachedRetainedHistory = anchors.isEmpty || !page.hasOlder || !anchors.isDisjoint(with: page.items.map(\.id))
@@ -929,7 +1109,27 @@ public final class GianClientStore {
                 $0.transcriptCursors[id]?.catchUp = StoredTranscriptCatchUp(anchorIDs: Array(anchors).sorted { $0.rawValue < $1.rawValue })
             }
         }
-        return persistenceResult()
+        if navigation == navigationEpoch, currentSessionID == id,
+           (sessions + searchHits).contains(where: { $0.id == id && $0.authorized && !$0.archived }),
+           let tail = memory.retentionTailIDs(scope, session: id) {
+            let reachedTail = tail.isEmpty || !page.hasOlder || !tail.isDisjoint(with: page.items.map(\.id))
+            memory.noteRetentionItems(page.items, session: id, scope: scope, hydrated: reachedTail && current == cached)
+        }
+        let result = persistenceResult()
+        finishTranscriptSync(sync, session: id, state: result.isApplied ? (needsCatchUp ? .syncing : .idle) : .failed)
+        return result
+    }
+
+    func beginTranscriptSync(session: SessionID) -> (sequence: Int, epoch: Int) {
+        transcriptSyncSequence += 1
+        if currentSessionID == session { state.conversation?.transcriptSync = .syncing }
+        return (transcriptSyncSequence, epoch)
+    }
+
+    func finishTranscriptSync(_ ticket: (sequence: Int, epoch: Int), session: SessionID, state value: TranscriptSyncState) {
+        guard ticket.sequence == transcriptSyncSequence, ticket.epoch == epoch, currentSessionID == session,
+              state.conversation?.session.id == session else { return }
+        state.conversation?.transcriptSync = value
     }
 
     private func openBanner(_ id: BannerID) async -> GianDispatchResult {

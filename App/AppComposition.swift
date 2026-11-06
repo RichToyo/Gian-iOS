@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import GianCore
 
 /// Application composition.
@@ -73,7 +74,28 @@ enum GianAppComposition {
         else { return nil }
         switch arguments[flagIndex + 1] {
         case "legacyContract": return makePreviewStore(script: .legacyContract)
-        case "fullDirectory": return makePreviewStore(script: .fullDirectory)
+        case "fullDirectory":
+            var script = PreviewScript.fullDirectory
+            if arguments.contains("-previewHostName") { script.directory.host.name = "Work Gian" }
+            if arguments.contains("-previewSentTranslation"),
+               let itemID = TranscriptItemID(rawValue: "preview-translated-user"),
+               let turnID = TurnID(rawValue: "preview-translated-turn"),
+               let translationID = TranslationRecordID(rawValue: "preview-sent-translation") {
+                let text = "Hello there."
+                let digest = SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+                let sent = SentTranslation(id: translationID, presentableText: text, textLength: text.utf16.count,
+                                           textSHA256: digest, targetLanguage: "en", integrity: .inlineVerified)
+                script.transcript.append(TranscriptItem(id: itemID, turnID: turnID, turn: 10,
+                    timestamp: PreviewFixtures.instant, body: .user(text: "Hello.", deliveryID: nil, attachmentIDs: [], translation: sent)))
+            }
+            if arguments.contains("-previewQueue"),
+               let index = script.directory.sessions.firstIndex(where: { $0.id == PreviewFixtures.sessionID }) {
+                script.directory.sessions[index].status = .running
+                script.directory.sessions[index].queue = SessionQueue(revision: "preview-queue-1", entries: [
+                    QueuedMessage(id: "preview-queued-1", text: "Fictional queued message")
+                ])
+            }
+            return makePreviewStore(script: script)
         default: return nil
         }
     }

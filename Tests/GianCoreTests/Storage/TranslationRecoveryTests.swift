@@ -4,6 +4,64 @@ import Testing
 
 @MainActor
 struct TranslationRecoveryTests {
+    @Test func canonicalReadingReusesHostRecordAndDoesNotDuplicatePendingWork() async throws {
+        let service = ControlledService()
+        let clock = ManualGianClock(instant: PreviewFixtures.instant)
+        let store = GianClientStore(service: service, clock: clock, ids: SequenceIDGenerator(), storage: InMemoryGianStorage())
+        _ = try await signIn(store, clock: clock)
+        _ = await store.dispatch(.selectConversation(PreviewFixtures.sessionID))
+        store.state.conversation?.items = [TranscriptItem(id: PreviewFixtures.id("canonical-item", TranscriptItemID.self),
+            turnID: PreviewFixtures.id("canonical-turn", TurnID.self), turn: 3, timestamp: PreviewFixtures.instant,
+            body: .assistant(text: "Final answer", delta: false))]
+        var translation = translationState(revision: 1, configRevision: 1)
+        translation.readingLanguage = "zh"
+        translation.automatic["turn:3"] = AutomaticProgress(pending: true)
+        store.state.translations[PreviewFixtures.sessionID] = translation
+        #expect(await store.dispatch(.requestReadingTranslation(sourceID: "turn:3", text: "Final answer")) == .rejected(.operationInFlight))
+        #expect(service.base.translationRequestCount == 0)
+        translation.automatic = [:]
+        store.state.translations[PreviewFixtures.sessionID] = translation
+        #expect(await store.dispatch(.requestReadingTranslation(sourceID: "turn:3", text: "Earlier fragment")) == .rejected(.staleOperation))
+        #expect(service.base.translationRequestCount == 0)
+        let text = "Translated answer"
+        let record = TranslationReducer.verifiedRecord(id: PreviewFixtures.id("canonical-read", TranslationRecordID.self),
+            sourceID: "turn:3", targetLanguage: "zh", text: nil, textLength: text.utf16.count,
+            textSHA256: SHA256Hex.digest(Data(text.utf8)), sourceSHA256: SHA256Hex.digest(Data("Final answer".utf8)), paged: false)
+        translation.records = [record]
+        store.state.translations[PreviewFixtures.sessionID] = translation
+        #expect((await store.dispatch(.requestReadingTranslation(sourceID: "turn:3", text: "Final answer"))).isApplied)
+        service.translationPages = [.page(text: text, nextOffset: nil)]
+        #expect((await store.dispatch(.retryTranslationText(record.id))).isApplied)
+        #expect(store.state.translations[PreviewFixtures.sessionID]?.records.first?.presentableText == text)
+        #expect(service.base.translationRequestCount == 0)
+    }
+
+    @Test func canonicalUnknownOutcomeNeverStartsASecondPaidRequest() async throws {
+        let service = ControlledService()
+        service.base.script.translationUnknown = true
+        let clock = ManualGianClock(instant: PreviewFixtures.instant)
+        let store = GianClientStore(service: service, clock: clock, ids: SequenceIDGenerator(), storage: InMemoryGianStorage())
+        _ = try await signIn(store, clock: clock)
+        _ = await store.dispatch(.selectConversation(PreviewFixtures.sessionID))
+        store.state.conversation?.items = [TranscriptItem(id: PreviewFixtures.id("canonical-item", TranscriptItemID.self),
+            turnID: PreviewFixtures.id("canonical-turn", TurnID.self), turn: 3, timestamp: PreviewFixtures.instant,
+            body: .assistant(text: "Final answer", delta: false))]
+        store.state.translations[PreviewFixtures.sessionID] = translationState(revision: 1, configRevision: 1)
+        _ = await store.dispatch(.requestReadingTranslation(sourceID: "turn:3", text: "Final answer"))
+        #expect(service.translationRequest?.sourceID == "turn:3")
+        #expect(await store.dispatch(.requestReadingTranslation(sourceID: "turn:3", text: "Final answer")) == .rejected(.uncertainOutcome))
+        #expect(service.base.translationRequestCount == 1)
+        let requestID = try #require(store.state.translations[PreviewFixtures.sessionID]?.reading["turn:3"]?.requestID)
+        let result = "Recovered translation"
+        let record = TranslationReducer.verifiedRecord(id: PreviewFixtures.id("canonical-recovered", TranslationRecordID.self),
+            sourceID: "turn:3", targetLanguage: "es", text: result, textLength: result.utf16.count,
+            textSHA256: SHA256Hex.digest(Data(result.utf8)), sourceSHA256: SHA256Hex.digest(Data("Final answer".utf8)), paged: false)
+        service.translationStatus = .settled(requestID, record: record, error: nil)
+        #expect((await store.dispatch(.recoverReadingTranslation(sourceID: "turn:3"))).isApplied)
+        #expect(store.state.translations[PreviewFixtures.sessionID]?.records.first?.presentableText == result)
+        #expect(service.base.translationRequestCount == 1)
+    }
+
     @Test func unknownPaidSendRecoversDescriptorAndPagesTextWithoutAnotherModelCall() async throws {
         let service = ControlledService()
         service.base.script.translationUnknown = true
@@ -54,6 +112,8 @@ struct TranslationRecoveryTests {
         let saved = try #require(try storage.load(scope: fictionalScope()))
         #expect(saved.readingIntents[PreviewFixtures.sessionID]?["source-id"]?.sourceText == "Original source")
         #expect(saved.translations[PreviewFixtures.sessionID]?.reading["source-id"]?.uncertain == true)
+        #expect(saved.translations[PreviewFixtures.sessionID]?.reading["source-id"]?.sourceSHA256 == SHA256Hex.digest(Data("Original source".utf8)))
+        #expect(saved.translations[PreviewFixtures.sessionID]?.reading["source-id"]?.targetLanguage == "es")
         #expect(await store.dispatch(.requestReadingTranslation(sourceID: "source-id", text: "Original source")) == .rejected(.uncertainOutcome))
         let translated = "Verified reading"
         let record = TranslationReducer.verifiedRecord(id: PreviewFixtures.id("reading-record", TranslationRecordID.self),

@@ -7,13 +7,19 @@ import GianCore
 struct TranscriptView: View {
     let rows: [TranscriptRow]
     var translationEnabled: Bool = false
+    var translationAvailable: Bool = false
+    var translationRecoveryEnabled: Bool = false
 
     var onRespondToInteraction: (InteractionID, ActionID, [String: InteractionValue]) -> Void = { _, _, _ in }
-    var onRequestTranslation: (TranscriptItemID, String) -> Void = { _, _ in }
-    var onCancelTranslation: (TranscriptItemID) -> Void = { _ in }
-    var onRetryTranslation: (TranscriptItemID, String) -> Void = { _, _ in }
+    var onRequestTranslation: (String, String) -> Void = { _, _ in }
+    var onCancelTranslation: (String) -> Void = { _ in }
+    var onRetryTranslation: (String, String) -> Void = { _, _ in }
+    var onRecoverTranslation: (String) -> Void = { _ in }
     var onPageTranslation: (TranslationRecordID) -> Void = { _ in }
     var attachmentPresentation: (AttachmentID) -> AttachmentFilePresentation = { _ in .unknown }
+    var attachmentIsImage: (AttachmentID) -> Bool = { _ in false }
+    var attachmentData: (AttachmentID) -> Data? = { _ in nil }
+    var autoLoadImages: Bool = false
     var onDownloadAttachment: (AttachmentID) -> Void = { _ in }
     var onPreviewAttachment: (AttachmentID) -> Void = { _ in }
 
@@ -36,6 +42,9 @@ struct TranscriptView: View {
                     UserMessageView(
                         row: userRow,
                         attachmentPresentation: attachmentPresentation,
+                        attachmentIsImage: attachmentIsImage,
+                        attachmentData: attachmentData,
+                        autoLoadImages: autoLoadImages,
                         onDownloadAttachment: onDownloadAttachment,
                         onPreviewAttachment: onPreviewAttachment
                     )
@@ -43,14 +52,19 @@ struct TranscriptView: View {
                     AssistantMessageView(
                         row: assistantRow,
                         translationEnabled: translationEnabled,
+                        translationAvailable: translationAvailable,
+                        recoveryEnabled: translationRecoveryEnabled,
                         onRequestTranslation: {
-                            onRequestTranslation(assistantRow.id, assistantRow.markdown)
+                            onRequestTranslation(assistantRow.translationSourceID ?? assistantRow.id.rawValue, assistantRow.markdown)
                         },
                         onRetryTranslation: {
-                            onRetryTranslation(assistantRow.id, assistantRow.markdown)
+                            onRetryTranslation(assistantRow.translationSourceID ?? assistantRow.id.rawValue, assistantRow.markdown)
                         },
                         onCancelTranslation: {
-                            onCancelTranslation(assistantRow.id)
+                            onCancelTranslation(assistantRow.translationSourceID ?? assistantRow.id.rawValue)
+                        },
+                        onRecoverTranslation: {
+                            onRecoverTranslation(assistantRow.translationSourceID ?? assistantRow.id.rawValue)
                         },
                         onPageTranslation: {
                             if case .needsPaging(let record) = assistantRow.reading {
@@ -80,6 +94,7 @@ struct TranscriptView: View {
                 }
             }
         }
+        .scrollTargetLayout()
         .padding(.horizontal, GianTheme.Metrics.paddingMedium)
         .padding(.vertical, GianTheme.Metrics.paddingSmall)
     }

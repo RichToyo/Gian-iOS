@@ -137,6 +137,11 @@ public struct DirectoryProjection: Sendable, Equatable {
     public var tasksPage: DirectoryPageStatus
     public var reposPage: DirectoryPageStatus
     public var searchPage: DirectoryPageStatus
+    public var tasksTimeFilter: DirectoryTimeFilter = .last7Days
+    public var reposTimeFilter: DirectoryTimeFilter = .last7Days
+    public var temporarySearchResult: ConversationSummary?
+    public var temporarySearchGeneration: Int = 0
+    public var temporaryCreatedResults: [ConversationSummary] = []
 
     public init(
         authority: DirectoryAuthority,
@@ -179,25 +184,38 @@ public struct DirectoryProjection: Sendable, Equatable {
     )
 }
 
+public enum TranscriptSyncState: Sendable, Equatable {
+    case idle, syncing, failed
+}
+
+public enum QueueCommandState: Sendable, Equatable {
+    case pending(CommandID)
+    case uncertain(CommandID)
+    case failed(String)
+}
+
 public struct ConversationProjection: Sendable, Equatable {
     public var session: SessionRecord
     public var items: [TranscriptItem]
     public var cursor: String?
     public var hasOlder: Bool
     public var hydratedFromCache: Bool
+    public var transcriptSync: TranscriptSyncState
 
     public init(
         session: SessionRecord,
         items: [TranscriptItem],
         cursor: String?,
         hasOlder: Bool,
-        hydratedFromCache: Bool
+        hydratedFromCache: Bool,
+        transcriptSync: TranscriptSyncState = .idle
     ) {
         self.session = session
         self.items = items
         self.cursor = cursor
         self.hasOlder = hasOlder
         self.hydratedFromCache = hydratedFromCache
+        self.transcriptSync = transcriptSync
     }
 }
 
@@ -280,6 +298,7 @@ public struct SyncProjection: Sendable, Equatable {
 }
 
 public struct GianClientState: Sendable, Equatable {
+    public var queueCommands: [SessionID: QueueCommandState] = [:]
     /// Static, non-sensitive diagnostic. No database path or payload is exposed.
     public var storageError: String? = nil
     public var phase: ClientPhase

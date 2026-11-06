@@ -13,6 +13,11 @@ class ControlledService: GianClientServicing {
     var send: CheckedContinuation<CommandDispatchResponse, Never>?
     var translation: CheckedContinuation<TranslationCommandResponse, Never>?
     var sendRequest: SessionSendRequest?
+    var queueRequests: [QueueMutationRequest] = []
+    var queueReturnsUnknown = false
+    var holdNextQueue = false
+    var queueContinuation: CheckedContinuation<CommandDispatchResponse, Never>?
+    var queueStatus: CommandStatusResponse?
     var translationRequest: TranslationRequest?
     var translationStatus: TranslationCommandResponse?
     var translationPages: [TranslationTextPageResponse] = []
@@ -89,7 +94,19 @@ class ControlledService: GianClientServicing {
         return await base.sendMessage(scope: scope, request: request)
     }
     func stopSession(scope: ClientScope, request: SessionStopRequest) async -> CommandDispatchResponse { await base.stopSession(scope: scope, request: request) }
-    func queryCommand(scope: ClientScope, commandID: CommandID) async -> CommandStatusResponse { await base.queryCommand(scope: scope, commandID: commandID) }
+    func mutateQueue(scope: ClientScope, request: QueueMutationRequest) async -> CommandDispatchResponse {
+        queueRequests.append(request)
+        if holdNextQueue {
+            holdNextQueue = false
+            return await withCheckedContinuation { queueContinuation = $0 }
+        }
+        if queueReturnsUnknown { return .unknownOutcome(request.commandID) }
+        return await base.mutateQueue(scope: scope, request: request)
+    }
+    func queryCommand(scope: ClientScope, commandID: CommandID) async -> CommandStatusResponse {
+        if let queueStatus { return queueStatus }
+        return await base.queryCommand(scope: scope, commandID: commandID)
+    }
     func respondToInteraction(scope: ClientScope, request: InteractionRespondRequest) async -> CommandDispatchResponse { await base.respondToInteraction(scope: scope, request: request) }
     func setAutoTranslation(scope: ClientScope, request: TranslationAutoRequest) async -> TranslationCommandResponse { await base.setAutoTranslation(scope: scope, request: request) }
     func requestTranslation(scope: ClientScope, request: TranslationRequest) async -> TranslationCommandResponse {

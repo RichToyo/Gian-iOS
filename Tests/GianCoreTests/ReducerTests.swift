@@ -20,12 +20,12 @@ struct ReducerTests {
             makeSession(id: "session-early", title: "Early", taskID: nil, activity: cutoff.addingTimeInterval(-1), real: true, now: now),
             makeSession(id: "session-running", title: "Running late", taskID: nil, status: .running, activity: cutoff.addingTimeInterval(-10), real: true, now: now),
             makeSession(id: "session-pending", title: "Pending late", taskID: nil, status: .pending, activity: cutoff.addingTimeInterval(-10), real: true, now: now),
-            makeSession(id: "session-viewed", title: "Only viewed", taskID: PreviewFixtures.taskID, activity: now, real: false, now: now),
+            makeSession(id: "session-viewed", title: "Only viewed", taskID: PreviewFixtures.taskID, status: .new, activity: now, real: false, now: now),
             makeSession(id: "session-archived", title: "Archived log", taskID: PreviewFixtures.taskID, status: .running, archived: true, activity: now, real: true, now: now),
             makeSession(id: "session-closed-attention", title: "Completed attention", taskID: nil, attention: .completed, activity: cutoff.addingTimeInterval(-10), real: true, now: now),
             makeSession(id: "session-failed-attention", title: "Failed attention", taskID: nil, attention: .failed, activity: cutoff.addingTimeInterval(-10), real: true, now: now),
             makeSession(id: "session-interaction", title: "Needs a person", taskID: nil, attention: .interaction, activity: cutoff.addingTimeInterval(-10), real: false, now: now),
-            makeSession(id: "session-open-task", title: "Mooring notes", taskID: PreviewFixtures.taskID, activity: now, real: true, now: now),
+            makeSession(id: "session-open-task", title: "Mooring notes", taskID: PreviewFixtures.taskID, status: .new, activity: now, real: true, now: now),
             makeSession(id: "session-done-task", title: "Finished work", taskID: done.id, activity: now, real: true, now: now),
             makeSession(id: "session-unauthorized", title: "Hidden", taskID: PreviewFixtures.taskID, authorized: false, activity: now, real: true, now: now),
         ]
@@ -69,6 +69,24 @@ struct ReducerTests {
         #expect(legacyTitles.tasks == Set(["Mooring notes", "Only viewed"]))
         #expect(!legacyTitles.tasks.contains("Finished work"))
         #expect(!legacyTitles.repos.contains("Exact"))
+    }
+
+    @Test func tasksHideCompletedConversationsWithoutFilteringReposOrSearch() {
+        let now = PreviewFixtures.instant
+        let task = TaskRecord(id: PreviewFixtures.taskID, title: "Open task", status: .open, updatedAt: now)
+        var finished = makeSession(id: "finished", title: "Finished", taskID: task.id, status: .new, activity: now, real: true, now: now)
+        finished.completedAt = "2026-01-01T00:00:00Z"
+        let idle = makeSession(id: "idle", title: "Idle", taskID: task.id, status: .done, activity: now, real: true, now: now)
+        let running = makeSession(id: "running", title: "Running", taskID: task.id, status: .running, activity: now, real: true, now: now)
+        for authority in [DirectoryAuthority.fullAuthorizedDirectory, .legacyOpenDoingTasksOnly] {
+            let projection = DirectoryFilter.project(now: now, authority: authority, tasks: [task], sessions: [finished, idle, running],
+                workspaces: [], query: "Finished", searchCandidates: [finished])
+            #expect(Set(projection.tasks.first?.conversations.map(\.title) ?? []) == Set(["Idle", "Running"]))
+            if authority == .fullAuthorizedDirectory {
+                #expect(projection.repos.contains { $0.title == "Finished" })
+                #expect(projection.searchResults.map(\.title) == ["Finished"])
+            }
+        }
     }
 
     @Test func translationRevisionsAndIntegrity() {
@@ -188,6 +206,12 @@ struct ReducerTests {
         let kept = TranslationReducer.applyState(current: withText, incoming: descriptorState, authoritative: true)
         #expect(kept.records.first?.presentableText == hello)
         #expect(kept.records.first?.integrity == .inlineVerified)
+        var second = verified
+        second.id = PreviewFixtures.id("aaa-newer-translation", TranslationRecordID.self)
+        withText.records = [verified, second]
+        descriptorState.records = []
+        let ordered = TranslationReducer.applyState(current: withText, incoming: descriptorState, authoritative: true)
+        #expect(ordered.records.map(\.id) == [verified.id, second.id])
     }
 
     @Test func transcriptDedupOrderAndSequence() {

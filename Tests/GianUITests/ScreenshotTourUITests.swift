@@ -71,9 +71,8 @@ final class ScreenshotTourUITests: XCTestCase {
             sleep(1)
             more.tap()
             if destination == "chat" {
-                // The preview Host has no translation set up: one grayed-out
-                // row, read as "Translate, Off".
-                let translate = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Translate'")).firstMatch
+                // The preview Host has no translation set up.
+                let translate = app.switches["Translate"]
                 XCTAssertTrue(translate.waitForExistence(timeout: 5), "Translate missing")
                 XCTAssertFalse(translate.isEnabled, "Unavailable Translate should be grayed out")
             }

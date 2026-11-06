@@ -39,6 +39,7 @@ struct ComposerView: View {
     var onRetryUncertainCreate: () -> Void = {}
     var onRemoveAttachment: (AttachmentID) -> Void = { _ in }
     var onRetryAttachmentUpload: (AttachmentID) -> Void = { _ in }
+    var onFocusChange: (Bool) -> Void = { _ in }
     var attachmentPicker: AttachmentPickerButton = AttachmentPickerButton(onPicked: { _, _ in })
 
     @FocusState private var isFocused: Bool
@@ -86,6 +87,7 @@ struct ComposerView: View {
                 style: .continuous
             )
         )
+        .onChange(of: isFocused) { _, focused in onFocusChange(focused) }
     }
 
     /// + · text · ⋯ · Send/Stop. One line by default; Return adds a line and
@@ -120,7 +122,7 @@ struct ComposerView: View {
 
     @ViewBuilder
     private var trailingButton: some View {
-        if isTurnActive {
+        if isTurnActive && !canSend {
             Button(action: onStop) {
                 Image(systemName: "stop.fill")
                     .font(.footnote.weight(.bold))
@@ -129,7 +131,10 @@ struct ComposerView: View {
             .disabled(!remoteReady)
             .accessibilityLabel("Stop")
         } else {
-            Button(action: onSend) {
+            Button {
+                isFocused = false
+                onSend()
+            } label: {
                 Image(systemName: "arrow.up")
                     .font(.body.weight(.bold))
             }

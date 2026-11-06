@@ -3,9 +3,9 @@ import GianCore
 
 /// Adaptive root for the ready phase: narrow (compact, folded Duo) is a
 /// navigation stack whose path follows the store's destination (home → new
-/// chat or chat, so a created conversation replaces new chat in place); wide (regular,
-/// unfolded Duo, tablet) is a split view with the directory as sidebar and
-/// chat or new chat in the detail column. Drafts live in the store (per
+/// chat or chat, so a created conversation replaces new chat in place).
+/// Expanded portrait uses the same navigation; wide landscape uses a split
+/// view with the directory beside the detail column. Drafts live in the store (per
 /// conversation target), so they survive layout changes and navigation by
 /// construction. Back and new-chat dismissal dispatch `.returnHome`; no device
 /// dimensions are hardcoded.
@@ -34,7 +34,9 @@ struct AdaptiveRoot: View {
     // Dispatch closures (wired to `GianClientAction` by AppRootView).
     var onSelectHost: (HostID) -> Void = { _ in }
     var onSelectDirectoryView: (DirectoryView) -> Void = { _ in }
+    var onSelectTimeFilter: (DirectoryTimeFilter) -> Void = { _ in }
     var onSelectConversation: (SessionID) -> Void = { _ in }
+    var onSelectSearchResult: (SessionID) -> Void = { _ in }
     var onOpenNewChat: () -> Void = {}
     var onOpenSettings: () -> Void = {}
     var onCloseSettings: () -> Void = {}
@@ -45,10 +47,14 @@ struct AdaptiveRoot: View {
     var onPullToRefresh: (DirectoryCollection) async -> Void = { _ in }
     var onBannerTap: (BannerID) -> Void = { _ in }
     var onBannerDismiss: (BannerID) -> Void = { _ in }
+    var onRetrySynchronization: () -> Void = {}
+    var onRetryTranscriptSync: () -> Void = {}
     var onToggleAutomaticTranslation: (Bool) -> Void = { _ in }
     var onEditDraft: (String) -> Void = { _ in }
     var onSend: () -> Void = {}
     var onStop: () -> Void = {}
+    var onMutateQueue: (QueueMutation) -> Void = { _ in }
+    var onRecoverQueue: () -> Void = {}
     var onRetryTranslationSend: () -> Void = {}
     var onSendOriginal: () -> Void = {}
     var onCancelTranslationSend: () -> Void = {}
@@ -59,8 +65,9 @@ struct AdaptiveRoot: View {
     var onPickAttachment: (AttachmentDraftInput, Image?) -> Void = { _, _ in }
     var onPageOlder: () -> Void = {}
     var onRespondToInteraction: (InteractionID, ActionID, [String: InteractionValue]) -> Void = { _, _, _ in }
-    var onRequestTranslation: (TranscriptItemID, String) -> Void = { _, _ in }
-    var onCancelReadingTranslation: (TranscriptItemID) -> Void = { _ in }
+    var onRequestTranslation: (String, String) -> Void = { _, _ in }
+    var onCancelReadingTranslation: (String) -> Void = { _ in }
+    var onRecoverReadingTranslation: (String) -> Void = { _ in }
     var onPageTranslation: (TranslationRecordID) -> Void = { _ in }
     var onSelectWorkspace: (WorkspaceID) -> Void = { _ in }
     var onSelectAgent: (AgentID) -> Void = { _ in }
@@ -87,6 +94,7 @@ struct AdaptiveRoot: View {
     var onChangeServer: (String, String) -> Void = { _, _ in }
     var onEvictAttachmentCache: () -> Void = {}
     var attachmentPresentation: (AttachmentID) -> AttachmentFilePresentation = { _ in .unknown }
+    var attachmentIsImage: (AttachmentID) -> Bool = { _ in false }
     var onDownloadAttachment: (AttachmentID) -> Void = { _ in }
     var attachmentData: (AttachmentID) -> Data? = { _ in nil }
     var attachmentDescriptorName: (AttachmentID) -> String = { _ in "Attachment" }
@@ -96,7 +104,7 @@ struct AdaptiveRoot: View {
 
     @State private var showsSearch = false
     @State private var showsAddHost = false
-    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var keyboardIndependentSize: CGSize = .zero
     @State private var appearance: SettingsScreen.Appearance = .system
     @AppStorage("gian.appearance") private var storedAppearance: String = SettingsScreen.Appearance.system.rawValue
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -104,12 +112,25 @@ struct AdaptiveRoot: View {
     private var isWide: Bool { horizontalSizeClass == .regular }
 
     var body: some View {
-        Group {
-            if isWide {
-                wideLayout
-            } else {
-                narrowLayout
+        GeometryReader { geometry in
+            let measured = keyboardIndependentSize == .zero ? geometry.size : keyboardIndependentSize
+            Group {
+                if WideLayoutOrientation.usesSplitView(size: measured, isRegularWidth: isWide) {
+                    wideLayout
+                } else {
+                    narrowLayout(isExpandedPortrait: isWide)
+                }
             }
+        }
+        .background {
+            GeometryReader { geometry in
+                Color.clear.preference(key: WideLayoutSizeKey.self, value: geometry.size)
+            }
+            .ignoresSafeArea(.keyboard)
+            .allowsHitTesting(false)
+        }
+        .onPreferenceChange(WideLayoutSizeKey.self) { size in
+            if size.width > 0, size.height > 0 { keyboardIndependentSize = size }
         }
         .preferredColorScheme(colorScheme)
         .onAppear {
@@ -124,7 +145,7 @@ struct AdaptiveRoot: View {
                 onQueryChange: onSearch,
                 onSelectConversation: { id in
                     showsSearch = false
-                    onSelectConversation(id)
+                    onSelectSearchResult(id)
                 },
                 onLoadMore: onLoadMoreDirectory,
                 onRefresh: onRefreshDirectory,
@@ -187,7 +208,7 @@ struct AdaptiveRoot: View {
 
     // MARK: - Layouts
 
-    private var narrowLayout: some View {
+    private func narrowLayout(isExpandedPortrait: Bool) -> some View {
         NavigationStack(path: narrowPath) {
             home(selectedConversationID: nil, isSidebar: false, onToggleSidebar: nil)
                 .background(GianTheme.Colors.background)
@@ -202,66 +223,23 @@ struct AdaptiveRoot: View {
                     }
                 }
         }
-        // Folded: the vertical bar pins the global pair to its bottom.
-        .environment(\.globalActionsAtBottom, true)
+        .environment(\.globalActionsAtBottom, !isExpandedPortrait)
+        .environment(\.directoryActionsLeading, isExpandedPortrait)
     }
 
-    /// Landscape keeps the sidebar open beside the chat (nothing to collapse,
-    /// no toggle). Portrait shows it as a wider overlay, collapsible from a
-    /// toggle on its far left. Size classes are regular both ways on the inner
-    /// display, so the split view's own aspect ratio decides.
+    /// Expanded landscape keeps the list beside the conversation.
     private var wideLayout: some View {
-        GeometryReader { geometry in
-            let isLandscape = geometry.size.width > geometry.size.height
-            NavigationSplitView(columnVisibility: isLandscape ? .constant(.all) : $columnVisibility) {
-                // The detail column's bar (vertical on the unfolded Duo)
-                // carries the global actions, so the sidebar keeps list actions.
-                home(
-                    selectedConversationID: conversation?.id,
-                    isSidebar: true,
-                    onToggleSidebar: isLandscape ? nil : { withAnimation { columnVisibility = .detailOnly } }
-                )
-                // Tiled in landscape; in portrait the overlay is the system's
-                // 320 pt (wider than the ~250 pt a tiled portrait column got).
+        NavigationSplitView(columnVisibility: .constant(.all)) {
+            home(selectedConversationID: conversation?.id, isSidebar: true, onToggleSidebar: nil)
                 .navigationSplitViewColumnWidth(min: 280, ideal: 320, max: 380)
                 .toolbar(removing: .sidebarToggle)
-            } detail: {
-                // Removing the system toggle from the sidebar removes it here
-                // too, so portrait supplies its own Show sidebar on the far left.
-                NavigationStack {
-                    detailContent
-                        .toolbar {
-                            if !isLandscape, columnVisibility == .detailOnly {
-                                ToolbarItem(placement: .topBarLeading) {
-                                    Button("Show sidebar", systemImage: "sidebar.left") {
-                                        withAnimation { columnVisibility = .all }
-                                    }
-                                }
-                            }
-                        }
-                }
+        } detail: {
+            NavigationStack {
+                detailContent
             }
-            .modifier(SplitStyleModifier(isLandscape: isLandscape))
-            // Landscape's detail column gets the vertical bar (global pair at
-            // its bottom); expanded portrait keeps horizontal bars unchanged.
-            .environment(\.globalActionsAtBottom, isLandscape)
-            // Portrait overlay: show the list when nothing is open, get out of
-            // the way once a conversation (or new chat) is.
-            // The split view picks its own visibility on first layout, so
-            // re-apply after it settles (and on rotation).
-            .task(id: isLandscape) {
-                try? await Task.sleep(for: .milliseconds(350))
-                syncPortraitSidebar(isLandscape: isLandscape)
-            }
-            .onChange(of: navigation.destination) { _, _ in syncPortraitSidebar(isLandscape: isLandscape) }
         }
-    }
-
-    private func syncPortraitSidebar(isLandscape: Bool) {
-        guard !isLandscape else { return }
-        withAnimation {
-            columnVisibility = navigation.destination == .home ? .all : .detailOnly
-        }
+        .navigationSplitViewStyle(.balanced)
+        .environment(\.globalActionsAtBottom, true)
     }
 
     private func home(selectedConversationID: SessionID?, isSidebar: Bool, onToggleSidebar: (() -> Void)?) -> some View {
@@ -275,6 +253,7 @@ struct AdaptiveRoot: View {
             onOpenSearch: { showsSearch = true },
             onSelectHost: onSelectHost,
             onSelectDirectoryView: onSelectDirectoryView,
+            onSelectTimeFilter: onSelectTimeFilter,
             onSelectConversation: onSelectConversation,
             onLoadMoreDirectory: onLoadMoreDirectory,
             onRefreshDirectory: onRefreshDirectory,
@@ -354,10 +333,14 @@ struct AdaptiveRoot: View {
                 thumbnail: thumbnail,
                 onBannerTap: onBannerTap,
                 onBannerDismiss: onBannerDismiss,
+                onRetrySynchronization: onRetrySynchronization,
+                onRetryTranscriptSync: onRetryTranscriptSync,
                 onToggleAutomaticTranslation: onToggleAutomaticTranslation,
                 onEditDraft: onEditDraft,
                 onSend: onSend,
                 onStop: onStop,
+                onMutateQueue: onMutateQueue,
+                onRecoverQueue: onRecoverQueue,
                 onRetryTranslationSend: onRetryTranslationSend,
                 onSendOriginal: onSendOriginal,
                 onCancelTranslationSend: onCancelTranslationSend,
@@ -368,8 +351,10 @@ struct AdaptiveRoot: View {
                 onRespondToInteraction: onRespondToInteraction,
                 onRequestTranslation: onRequestTranslation,
                 onCancelReadingTranslation: onCancelReadingTranslation,
+                onRecoverReadingTranslation: onRecoverReadingTranslation,
                 onPageTranslation: onPageTranslation,
                 attachmentPresentation: attachmentPresentation,
+                attachmentIsImage: attachmentIsImage,
                 onDownloadAttachment: onDownloadAttachment,
                 attachmentData: attachmentData,
                 attachmentDescriptorName: attachmentDescriptorName,
@@ -402,6 +387,18 @@ struct AdaptiveRoot: View {
     }
 }
 
+enum WideLayoutOrientation {
+    static func isLandscape(_ size: CGSize) -> Bool { size.width > size.height }
+    static func usesSplitView(size: CGSize, isRegularWidth: Bool) -> Bool {
+        isRegularWidth && isLandscape(size)
+    }
+}
+
+private struct WideLayoutSizeKey: PreferenceKey {
+    static let defaultValue: CGSize = .zero
+    static func reduce(value: inout CGSize, nextValue: () -> CGSize) { value = nextValue() }
+}
+
 /// The detail placeholder's global pair, placed for the layout.
 private struct PlaceholderToolbar: ViewModifier {
     @Environment(\.globalActionsAtBottom) private var atBottom
@@ -410,19 +407,5 @@ private struct PlaceholderToolbar: ViewModifier {
 
     func body(content: Content) -> some View {
         content.toolbar { GlobalToolbarActions(atBottom: atBottom, onNewChat: onNewChat, onSettings: onSettings) }
-    }
-}
-
-/// Side-by-side columns in landscape; an overlay sidebar in portrait so it can
-/// be wider than a tiled column without squeezing the conversation.
-private struct SplitStyleModifier: ViewModifier {
-    let isLandscape: Bool
-
-    func body(content: Content) -> some View {
-        if isLandscape {
-            content.navigationSplitViewStyle(.balanced)
-        } else {
-            content.navigationSplitViewStyle(.prominentDetail)
-        }
     }
 }

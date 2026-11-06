@@ -2,6 +2,127 @@ import Foundation
 
 @MainActor
 enum RemoteMapping {
+    static func attention(_ values: [WireValue]) throws -> [SessionID: AttentionKind] {
+        var result: [SessionID: AttentionKind] = [:]
+        for value in values {
+            try value.closed(["session_id", "kind", "updated_at"])
+            let id: SessionID = try value.scoped("session_id")
+            _ = try date(value.string("updated_at"))
+            guard result[id] == nil else { throw RemoteClientError.invalidPayload }
+            result[id] = try enumeration(value, "kind")
+        }
+        return result
+    }
+
+    static func statePatch(_ value: WireValue, host: HostID) throws -> CanonicalStatePatch {
+        try value.closed([], optional: ["sessions", "tasks", "interactions", "attention", "queues"])
+        var result = CanonicalStatePatch()
+        func changes(_ key: String) throws -> ([WireValue], [String])? {
+            guard case .object(let fields) = value, let collection = fields[key] else { return nil }
+            try collection.closed(["upsert", "remove_ids"])
+            let updates = try collection.array("upsert")
+            let removed = try collection.array("remove_ids").map { item -> String in
+                guard case .string(let raw) = item else { throw RemoteClientError.invalidPayload }
+                return try RemoteWire.id(raw)
+            }
+            guard Set(removed).count == removed.count else { throw RemoteClientError.invalidPayload }
+            return (updates, removed)
+        }
+        if let (updates, removed) = try changes("sessions") {
+            result.sessions = try updates.map { value in
+                try value.closed(["id", "revision", "name", "task_id", "workspace_id", "agent", "status", "queue", "updated_at"],
+                    optional: ["model", "thinking", "service_tier", "approval_mode", "context_tokens_used", "context_window_tokens", "context_usage_updated_at", "unread", "active_turn"])
+                try value["agent"].closed(["id", "name", "proxy"])
+                try value["queue"].closed(["revision", "entries"])
+                _ = try value["queue"].string("revision", maximum: 256)
+                for entry in try value["queue"].array("entries", maximum: 64) {
+                    try entry.closed(["id", "session_id", "text", "created_at"], optional: ["items", "context_items", "composer_document", "delivery_id"])
+                    _ = try entry.identifier("id")
+                    guard try entry.identifier("session_id") == value.identifier("id") else { throw RemoteClientError.invalidPayload }
+                    _ = try entry.string("text"); _ = try entry.string("created_at")
+                    if case .object(let fields) = entry {
+                        for key in ["items", "context_items", "composer_document", "delivery_id"] where fields[key]?.isNull == true {
+                            throw RemoteClientError.invalidPayload
+                        }
+                    }
+                    if !entry["items"].isNull {
+                        for item in try entry.array("items", maximum: 32) {
+                            switch try item.string("type") {
+                            case "text": try item.closed(["type", "text"]); _ = try item.string("text")
+                            case "compiled_text", "attachment": try item.closed(["type", "attachment_id"]); _ = try item.identifier("attachment_id")
+                            default: throw RemoteClientError.invalidPayload
+                            }
+                        }
+                    }
+                    if !entry["context_items"].isNull {
+                        for item in try entry.array("context_items", maximum: 32) {
+                            switch try item.string("type") {
+                            case "pasted_text": try item.closed(["type", "text"]); _ = try item.string("text")
+                            case "file_ref": try item.closed(["type", "handle_id"]); _ = try item.identifier("handle_id")
+                            default: throw RemoteClientError.invalidPayload
+                            }
+                        }
+                    }
+                    if !entry["composer_document"].isNull {
+                        let document = entry["composer_document"]
+                        try document.closed(["type", "nodes"])
+                        guard try document.string("type") == "document" else { throw RemoteClientError.invalidPayload }
+                        for node in try document.array("nodes") {
+                            switch try node.string("type") {
+                            case "text": try node.closed(["type", "text"]); _ = try node.string("text")
+                            case "reference": try node.closed(["type", "handle_id"]); _ = try node.identifier("handle_id")
+                            default: throw RemoteClientError.invalidPayload
+                            }
+                        }
+                    }
+                    if !entry["delivery_id"].isNull { _ = try entry.identifier("delivery_id") }
+                }
+                if case .object(let fields) = value, fields["active_turn"]?.isNull == true { throw RemoteClientError.invalidPayload }
+                if !value["active_turn"].isNull {
+                    try value["active_turn"].closed(["id", "turn_number"])
+                    _ = try value["active_turn"].identifier("id")
+                    _ = try value["active_turn"].integer("turn_number", range: 1...9_007_199_254_740_991)
+                }
+                for key in ["context_tokens_used", "context_window_tokens"] where !value[key].isNull { _ = try value.integer(key) }
+                if !value["context_usage_updated_at"].isNull { _ = try value.string("context_usage_updated_at") }
+                return try session(value, host: host)
+            }
+            result.removedSessions = try removed.map { guard let id = SessionID(rawValue: $0) else { throw RemoteClientError.invalidPayload }; return id }
+            let ids = result.sessions.map(\.id)
+            guard Set(ids).count == ids.count, Set(ids).isDisjoint(with: result.removedSessions) else { throw RemoteClientError.invalidPayload }
+        }
+        if let (updates, removed) = try changes("tasks") {
+            result.tasks = try updates.map { task in
+                try task.closed(["id", "name", "updated_at", "session_ids"])
+                let ids = try task.array("session_ids").map { value -> String in
+                    guard case .string(let raw) = value else { throw RemoteClientError.invalidPayload }
+                    return try RemoteWire.id(raw)
+                }
+                guard Set(ids).count == ids.count else { throw RemoteClientError.invalidPayload }
+                return TaskRecord(id: try task.scoped("id"), title: try task.string("name", maximum: 256),
+                                  status: .open, updatedAt: try date(task.string("updated_at")))
+            }
+            result.removedTasks = try removed.map { guard let id = TaskID(rawValue: $0) else { throw RemoteClientError.invalidPayload }; return id }
+            let ids = result.tasks.map(\.id)
+            guard Set(ids).count == ids.count, Set(ids).isDisjoint(with: result.removedTasks) else { throw RemoteClientError.invalidPayload }
+        }
+        if let (updates, removed) = try changes("interactions") {
+            result.interactions = try updates.map(interaction)
+            result.removedInteractions = try removed.map { guard let id = InteractionID(rawValue: $0) else { throw RemoteClientError.invalidPayload }; return id }
+            let ids = result.interactions.map(\.id)
+            guard Set(ids).count == ids.count, Set(ids).isDisjoint(with: result.removedInteractions) else { throw RemoteClientError.invalidPayload }
+        }
+        if case .object(let fields) = value, fields["attention"] != nil { result.attention = try attention(value.array("attention")) }
+        if case .object(let fields) = value, fields["queues"] != nil {
+            for update in try value.array("queues") {
+                try update.closed(["session_id", "queue_revision", "entries"])
+                let session: SessionID = try update.scoped("session_id")
+                guard result.queues[session] == nil, !result.removedSessions.contains(session) else { throw RemoteClientError.invalidPayload }
+                result.queues[session] = try queue(.object(["revision": update["queue_revision"], "entries": update["entries"]]), session: session)
+            }
+        }
+        return result
+    }
     static func date(_ string: String) throws -> Date {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -28,7 +149,61 @@ enum RemoteMapping {
         record.thinking = try value.optionalString("thinking", maximum: 256)
         record.serviceTier = try value.optionalString("service_tier", maximum: 256)
         record.approvalMode = try value.optionalString("approval_mode", maximum: 256)
+        if !value["queue"].isNull { record.queue = try queue(value["queue"], session: id) }
         return record
+    }
+
+    static func queue(_ value: WireValue, session: SessionID) throws -> SessionQueue {
+        try value.closed(["revision", "entries"])
+        let revision = try value.string("revision", maximum: 256)
+        let entries = try value.array("entries", maximum: 64).map { entry in
+            try entry.closed(["id", "session_id", "text", "created_at"], optional: ["items", "context_items", "composer_document", "delivery_id"])
+            let id = try entry.identifier("id")
+            let entrySession: SessionID = try entry.scoped("session_id")
+            guard entrySession == session else { throw RemoteClientError.invalidPayload }
+            let text = try entry.string("text")
+            _ = try date(entry.string("created_at"))
+            if case .object(let fields) = entry {
+                for key in ["items", "context_items", "composer_document", "delivery_id"] where fields[key]?.isNull == true {
+                    throw RemoteClientError.invalidPayload
+                }
+            }
+            let items = entry["items"].isNull ? [] : try entry.array("items", maximum: 32)
+            let attachments = try items.filter { item in
+                let type = try item.string("type")
+                switch type {
+                case "text": try item.closed(["type", "text"]); _ = try item.string("text")
+                case "attachment", "compiled_text": try item.closed(["type", "attachment_id"]); _ = try item.identifier("attachment_id")
+                default: throw RemoteClientError.invalidPayload
+                }
+                return type == "attachment" || type == "compiled_text"
+            }.count
+            if !entry["context_items"].isNull {
+                for item in try entry.array("context_items", maximum: 32) {
+                    switch try item.string("type") {
+                    case "pasted_text": try item.closed(["type", "text"]); _ = try item.string("text")
+                    case "file_ref": try item.closed(["type", "handle_id"]); _ = try item.identifier("handle_id")
+                    default: throw RemoteClientError.invalidPayload
+                    }
+                }
+            }
+            if !entry["composer_document"].isNull {
+                let document = entry["composer_document"]
+                try document.closed(["type", "nodes"])
+                guard try document.string("type") == "document" else { throw RemoteClientError.invalidPayload }
+                for node in try document.array("nodes") {
+                    switch try node.string("type") {
+                    case "text": try node.closed(["type", "text"]); _ = try node.string("text")
+                    case "reference": try node.closed(["type", "handle_id"]); _ = try node.identifier("handle_id")
+                    default: throw RemoteClientError.invalidPayload
+                    }
+                }
+            }
+            if !entry["delivery_id"].isNull { _ = try entry.identifier("delivery_id") }
+            return QueuedMessage(id: id, text: text, attachmentCount: attachments)
+        }
+        guard Set(entries.map(\.id)).count == entries.count else { throw RemoteClientError.invalidPayload }
+        return SessionQueue(revision: revision, entries: entries)
     }
 
     /// `catalog.agent`: `specialCatalogs` names the option ids for thinking,

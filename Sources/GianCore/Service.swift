@@ -15,6 +15,7 @@ public protocol GianClientServicing: AnyObject {
     func createSession(scope: ClientScope, request: SessionCreateRequest) async -> CommandDispatchResponse
     func sendMessage(scope: ClientScope, request: SessionSendRequest) async -> CommandDispatchResponse
     func stopSession(scope: ClientScope, request: SessionStopRequest) async -> CommandDispatchResponse
+    func mutateQueue(scope: ClientScope, request: QueueMutationRequest) async -> CommandDispatchResponse
     func queryCommand(scope: ClientScope, commandID: CommandID) async -> CommandStatusResponse
     func respondToInteraction(scope: ClientScope, request: InteractionRespondRequest) async -> CommandDispatchResponse
     func setAutoTranslation(scope: ClientScope, request: TranslationAutoRequest) async -> TranslationCommandResponse
@@ -37,6 +38,30 @@ extension GianClientServicing {
     public func updateSession(scope: ClientScope, request: SessionUpdateRequest) async -> SessionUpdateResponse { .unsupported }
     public func agentOptions(scope: ClientScope, request: AgentOptionsRequest) async -> AgentOptionsResponse { .unavailable }
     public func agentLogo(scope: ClientScope, pluginID: String, variant: AgentLogoVariant) async -> AgentLogoResponse { .unsupported }
+    public func mutateQueue(scope: ClientScope, request: QueueMutationRequest) async -> CommandDispatchResponse {
+        .failed(request.commandID, message: "Queue changes are not supported by this Host.")
+    }
+}
+
+public enum QueueMutation: Sendable, Equatable {
+    case update(id: String, text: String)
+    case remove(id: String)
+    case clear
+    case sendNow
+}
+
+public struct QueueMutationRequest: Sendable, Equatable {
+    public var commandID: CommandID
+    public var sessionID: SessionID
+    public var revision: String
+    public var mutation: QueueMutation
+
+    public init(commandID: CommandID, sessionID: SessionID, revision: String, mutation: QueueMutation) {
+        self.commandID = commandID
+        self.sessionID = sessionID
+        self.revision = revision
+        self.mutation = mutation
+    }
 }
 
 /// One conversation setting change. The Host accepts these mid-run and
@@ -192,11 +217,13 @@ public struct CommandSuccess: Sendable, Equatable {
     public var commandID: CommandID
     public var session: SessionRecord?
     public var deliveryID: String?
+    public var queue: SessionQueue?
 
-    public init(commandID: CommandID, session: SessionRecord? = nil, deliveryID: String? = nil) {
+    public init(commandID: CommandID, session: SessionRecord? = nil, deliveryID: String? = nil, queue: SessionQueue? = nil) {
         self.commandID = commandID
         self.session = session
         self.deliveryID = deliveryID
+        self.queue = queue
     }
 }
 

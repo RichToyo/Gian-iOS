@@ -4,6 +4,30 @@ import Testing
 
 @MainActor
 struct TranscriptCatchUpTests {
+    @Test func transcriptSyncReportsLoadingFailureAndSafeRetry() async throws {
+        let service = ControlledService()
+        let clock = ManualGianClock(instant: PreviewFixtures.instant)
+        let store = GianClientStore(service: service, clock: clock, storage: InMemoryGianStorage())
+        _ = try await signIn(store, clock: clock)
+        service.holdNextPage = true
+        let pending = Task { await store.dispatch(.selectConversation(PreviewFixtures.sessionID)) }
+        for _ in 0..<100 where service.page == nil { await Task.yield() }
+        let completion = try #require(service.page)
+        service.page = nil
+        #expect(store.state.conversation?.transcriptSync == .syncing)
+        #expect(!store.mutationsReady)
+        completion.resume(returning: TranscriptPageResponse(items: [], cursor: nil, hasOlder: false, failed: true))
+        _ = await pending.value
+        #expect(store.state.conversation?.transcriptSync == .failed)
+        #expect(!store.mutationsReady)
+        service.transcriptPages = [TranscriptPageResponse(items: [], cursor: nil, hasOlder: false)]
+        #expect((await store.dispatch(.retryTranscriptSync)).isApplied)
+        #expect(store.state.conversation?.transcriptSync == .idle)
+        #expect(store.mutationsReady)
+        #expect(service.base.sendCount == 0)
+        #expect(service.base.translationRequestCount == 0)
+    }
+
     @Test func liveChunkDuringCatchUpCannotHideMissingMiddleBehindLiveWinsMerge() async throws {
         let service = ControlledService()
         let clock = ManualGianClock(instant: PreviewFixtures.instant)

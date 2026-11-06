@@ -7,7 +7,7 @@ import GianCore
 /// icon plus the current value (the Agent's logo marks Model), with no
 /// headers or explanations, to stay short on the folded Duo. Model, Thinking
 /// and Approval open a `ChoiceList` (checkmark at the end of the row; iOS
-/// menus can only put it at the start); Fast and Translate show On/Off.
+/// menus can only put it at the start); Fast and Translate use switches.
 /// Changes apply from the next turn; every selection dispatches through a
 /// typed callback.
 struct ComposerMoreMenu: View {
@@ -31,6 +31,7 @@ struct ComposerMoreMenu: View {
     }
 
     @State private var openSetting: Setting?
+    @State private var showsMenu = false
 
     /// Nothing to offer: the caller hides the ⋯ button.
     var isEmpty: Bool {
@@ -38,32 +39,44 @@ struct ComposerMoreMenu: View {
     }
 
     var body: some View {
-        Menu {
-            if let settings, !settings.isEmpty {
-                conversationSection(settings)
-            }
-            if let translation {
-                translationSection(translation)
-            }
-        } label: {
+        Button { showsMenu = true } label: {
             Image(systemName: "ellipsis")
                 .font(.body.weight(.semibold))
                 .foregroundStyle(GianTheme.Colors.label)
                 .frame(width: GianTheme.Metrics.minHitTarget, height: GianTheme.Metrics.minHitTarget)
                 .contentShape(Rectangle())
         }
-        .menuOrder(.fixed)
+        .buttonStyle(.plain)
         .accessibilityLabel("More options")
-        .popover(item: $openSetting) { setting in
-            if let settings { choices(setting, settings) }
+        .popover(isPresented: $showsMenu) {
+            if let setting = openSetting, let settings {
+                choices(setting, settings)
+            } else {
+                options
+            }
         }
+        .onChange(of: showsMenu) { _, shown in if !shown { openSetting = nil } }
+    }
+
+    private var options: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let settings, !settings.isEmpty { conversationSection(settings) }
+            if let translation {
+                if let settings, !settings.isEmpty { Divider().padding(.vertical, 4) }
+                translationSection(translation)
+            }
+        }
+        .padding(.vertical, 6)
+        .frame(minWidth: 220, idealWidth: 260, maxWidth: 320, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
+        .presentationCompactAdaptation(.popover)
     }
 
     @ViewBuilder
     private func conversationSection(_ settings: ConversationSettingsPresentation) -> some View {
-        Section {
+        Group {
             if !settings.models.isEmpty {
-                Button { openSetting = .model } label: {
+                optionButton(action: { openSetting = .model }) {
                     Label {
                         Text(label(of: settings.model, in: settings.models) ?? "Model")
                     } icon: {
@@ -74,40 +87,56 @@ struct ComposerMoreMenu: View {
                 }
             }
             if !settings.thinking.isEmpty {
-                Button { openSetting = .thinking } label: {
+                optionButton(action: { openSetting = .thinking }) {
                     Label(label(of: settings.currentThinking, in: settings.thinking) ?? "Default", systemImage: "brain")
                 }
             }
             // Fast appears only where the current model offers it.
             if case .available(let isOn) = settings.fast {
-                Button { onSetFast(!isOn) } label: {
-                    Label("Fast", systemImage: isOn ? "hare.fill" : "hare")
-                    Text(isOn ? "On" : "Off")
+                Toggle(isOn: Binding(get: { isOn }, set: { if $0 != isOn { onSetFast($0) } })) {
+                    Label("Fast", systemImage: "hare")
                 }
+                .toggleStyle(.switch)
+                .padding(.horizontal, 16)
+                .frame(minHeight: GianTheme.Metrics.minHitTarget)
             }
             if !settings.approval.isEmpty {
-                Button { openSetting = .approval } label: {
+                if !settings.models.isEmpty || !settings.thinking.isEmpty || settings.showsFast {
+                    Divider().padding(.vertical, 4)
+                }
+                optionButton(action: { openSetting = .approval }) {
                     Label(label(of: settings.currentApproval, in: settings.approval) ?? "Approval", systemImage: "checkmark.shield")
                 }
             }
             if let notice = settings.notice {
                 Text(notice)
+                    .font(GianTheme.Typography.caption)
+                    .padding(.horizontal, 16)
             }
         }
         .disabled(!settings.isEnabled)
     }
 
-    /// One row: on/off where the Host has translation set up, grayed out
-    /// where it doesn't.
     private func translationSection(_ state: SessionTranslationPresentation) -> some View {
         let isOn = state.capability == .configured && state.isAutomatic
-        return Section {
-            Button { onToggleAutomaticTranslation(!isOn) } label: {
+        return Toggle(isOn: Binding(get: { isOn }, set: { if $0 != isOn { onToggleAutomaticTranslation($0) } })) {
                 Label("Translate", systemImage: "translate")
-                Text(isOn ? "On" : "Off")
-            }
-            .disabled(state.capability != .configured || !translationEnabled)
         }
+        .toggleStyle(.switch)
+        .padding(.horizontal, 16)
+        .frame(minHeight: GianTheme.Metrics.minHitTarget)
+        .disabled(state.capability != .configured || !translationEnabled)
+    }
+
+    private func optionButton<LabelContent: View>(action: @escaping () -> Void,
+                                                   @ViewBuilder label: () -> LabelContent) -> some View {
+        Button(action: action) {
+            label()
+                .frame(maxWidth: .infinity, minHeight: GianTheme.Metrics.minHitTarget, alignment: .leading)
+                .padding(.horizontal, 16)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private func label(of value: String?, in choices: [AgentOptionChoice]) -> String? {

@@ -9,6 +9,245 @@ final class GianUITests: XCTestCase {
         continueAfterFailure = false
     }
 
+    /// Run on an unfolded Duo in portrait with the software keyboard enabled.
+    func testExpandedPortraitComposerKeepsKeyboardAndDraft() throws {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments += ["-previewScript", "fullDirectory", "-previewReady",
+                                "-previewDestination", "chat"]
+        app.launch()
+        XCTAssertGreaterThan(app.windows.firstMatch.frame.width, 600, "Run this test with the Duo unfolded")
+
+        let field = app.textFields["Message"]
+        let message = field.waitForExistence(timeout: 30) ? field : app.textViews["Message"]
+        XCTAssertTrue(message.waitForExistence(timeout: 5))
+        message.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "The composer should show the software keyboard")
+        message.typeText("Fictional draft")
+        XCTAssertTrue(app.keyboards.firstMatch.exists, "The keyboard should remain visible while editing")
+        let typed = app.textFields.firstMatch.exists ? app.textFields.firstMatch : app.textViews.firstMatch
+        XCTAssertTrue((typed.value as? String ?? "").contains("Fictional draft"))
+    }
+
+    func testExpandedPortraitUsesFullPageConversationNavigation() throws {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments += ["-previewScript", "fullDirectory", "-previewReady", "-previewHostName"]
+        app.launch()
+        XCTAssertGreaterThan(app.windows.firstMatch.frame.width, 600, "Run this test with the Duo unfolded")
+        let host = app.buttons["Work Gian, Online"]
+        XCTAssertTrue(host.waitForExistence(timeout: 30))
+        let search = app.buttons["Search conversations"]
+        let options = app.buttons["Directory views"]
+        let newChat = app.buttons["Start a new chat"]
+        let settings = app.buttons["Settings"]
+        XCTAssertTrue(search.exists && options.exists && newChat.exists && settings.exists)
+        XCTAssertLessThan(search.frame.maxX, host.frame.minX)
+        XCTAssertLessThan(options.frame.maxX, host.frame.minX)
+        XCTAssertGreaterThan(newChat.frame.minX, host.frame.maxX)
+        XCTAssertGreaterThan(settings.frame.minX, host.frame.maxX)
+        XCTAssertFalse(app.textFields["Message"].exists, "The directory should use the whole page")
+        let conversation = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Mooring notes")).firstMatch
+        XCTAssertTrue(conversation.waitForExistence(timeout: 10))
+        conversation.tap()
+        XCTAssertTrue(app.textFields["Message"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["Show sidebar"].exists)
+        let title = app.descendants(matching: .any)["conversation-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        XCTAssertGreaterThan(app.buttons["Start a new chat"].frame.minX, title.frame.maxX)
+        XCTAssertGreaterThan(app.buttons["Settings"].frame.minX, title.frame.maxX)
+        app.buttons["Back"].firstMatch.tap()
+        XCTAssertTrue(host.waitForExistence(timeout: 10))
+    }
+
+    func testSentTranslationBubbleIsRightAlignedAndContentSized() throws {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments += ["-previewScript", "fullDirectory", "-previewReady",
+                                "-previewDestination", "chat", "-previewSentTranslation"]
+        app.launch()
+        let translated = app.staticTexts["Hello there."]
+        XCTAssertTrue(translated.waitForExistence(timeout: 30))
+        let original = app.staticTexts["Hello."]
+        let tag = app.staticTexts["sent-translation-label"]
+        let bubble = app.descendants(matching: .any).matching(identifier: "user-message-bubble")
+            .containing(.staticText, identifier: "Hello.").firstMatch
+        XCTAssertTrue(bubble.exists && original.exists && tag.exists)
+        XCTAssertLessThan(bubble.frame.width, app.windows.firstMatch.frame.width * 0.8)
+        XCTAssertLessThan(abs(original.frame.maxX - translated.frame.maxX), 4)
+        XCTAssertLessThan(abs(tag.frame.maxX - translated.frame.maxX), 4)
+    }
+
+    func testBannerOpensItsConversationInExpandedPortrait() throws {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments += ["-previewScript", "fullDirectory", "-previewReady",
+                                "-previewDestination", "chatWithBanner"]
+        app.launch()
+        XCTAssertGreaterThan(app.windows.firstMatch.frame.width, 600, "Run this test with the Duo unfolded")
+
+        let banner = app.buttons["transient-banner"]
+        XCTAssertTrue(banner.waitForExistence(timeout: 30))
+        XCTAssertTrue(banner.isHittable)
+        banner.coordinate(withNormalizedOffset: CGVector(dx: 0.55, dy: 0.5)).tap()
+        let target = app.descendants(matching: .any).matching(identifier: "conversation-title").matching(
+            NSPredicate(format: "label == %@", "Night watch")
+        ).firstMatch
+        XCTAssertTrue(target.waitForExistence(timeout: 10), "The banner should open its own conversation. \(app.debugDescription)")
+    }
+
+    func testDismissingBannerStaysInCurrentConversation() throws {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments += ["-previewScript", "fullDirectory", "-previewReady",
+                                "-previewDestination", "chatWithBanner"]
+        app.launch()
+        let banner = app.buttons["transient-banner"]
+        XCTAssertTrue(banner.waitForExistence(timeout: 30))
+        app.buttons["Dismiss notification"].tap()
+        XCTAssertTrue(banner.waitForNonExistence(timeout: 5))
+        let title = app.descendants(matching: .any).matching(identifier: "conversation-title").matching(
+            NSPredicate(format: "label == %@", "Mooring notes")
+        ).firstMatch
+        XCTAssertTrue(title.exists, "Dismissing the banner should not navigate")
+    }
+
+    func testKeyboardKeepsLatestMessageVisibleAndSendDismissesIt() throws {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments += ["-previewScript", "fullDirectory", "-previewReady",
+                                "-previewDestination", "chatLong"]
+        app.launch()
+        let message = app.textFields["Message"]
+        XCTAssertTrue(message.waitForExistence(timeout: 30))
+        let latest = app.staticTexts["Preview message 30"]
+        XCTAssertTrue(latest.waitForExistence(timeout: 10))
+        message.tap()
+        let keyboard = app.keyboards.firstMatch
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5), "Keyboard did not remain visible. \(app.debugDescription)")
+        XCTAssertTrue(latest.isHittable, "The latest message must stay visible above the keyboard")
+        XCTAssertLessThanOrEqual(latest.frame.maxY, message.frame.minY, "The composer must not cover the latest message")
+        message.typeText("Fictional draft")
+        app.buttons["Send"].tap()
+        XCTAssertTrue(keyboard.waitForNonExistence(timeout: 5), "Sending should dismiss the keyboard")
+    }
+
+    func testRunningConversationQueuesAndCanSendQueueNow() throws {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments += ["-previewScript", "fullDirectory", "-previewReady",
+                                "-previewDestination", "chat", "-previewQueue"]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["Fictional queued message"].waitForExistence(timeout: 30))
+        let message = app.textFields["Message"]
+        XCTAssertTrue(message.waitForExistence(timeout: 5))
+        message.tap()
+        message.typeText("Second fictional message")
+        app.buttons["Send"].tap()
+        XCTAssertTrue(app.staticTexts["Second fictional message"].waitForExistence(timeout: 10))
+        app.buttons["Send queue now"].tap()
+        let confirm = app.buttons["Send now"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        confirm.tap()
+        XCTAssertTrue(app.staticTexts["Second fictional message"].waitForNonExistence(timeout: 10))
+    }
+
+    func testFocusingComposerReturnsFromHistoryToLatest() throws {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments += ["-previewScript", "fullDirectory", "-previewReady",
+                                "-previewDestination", "chatLong"]
+        app.launch()
+        let latest = app.staticTexts["Preview message 30"]
+        XCTAssertTrue(latest.waitForExistence(timeout: 30))
+        let history = app.scrollViews.firstMatch
+        history.swipeDown()
+        history.swipeDown()
+        XCTAssertFalse(latest.isHittable, "The user should be reading earlier messages")
+        let message = app.textFields["Message"]
+        message.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(latest.waitForExistence(timeout: 5))
+        XCTAssertTrue(latest.isHittable, "Focusing the composer should return to the latest message")
+    }
+
+    func testStreamingDoesNotPullReaderOutOfHistory() throws {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments += ["-previewScript", "fullDirectory", "-previewReady",
+                                "-previewDestination", "chatLongStream"]
+        app.launch()
+        let latest = app.staticTexts["Preview message 30"]
+        XCTAssertTrue(latest.waitForExistence(timeout: 30))
+        let history = app.scrollViews.firstMatch
+        history.swipeDown()
+        history.swipeDown()
+        let jump = app.buttons["Jump to latest"]
+        XCTAssertTrue(jump.waitForExistence(timeout: 5))
+        sleep(2)
+        XCTAssertTrue(jump.exists, "Streaming updates should not force the reader to the bottom")
+        XCTAssertFalse(latest.isHittable)
+        jump.tap()
+        XCTAssertTrue(jump.waitForNonExistence(timeout: 5))
+    }
+
+    func testHistoryPositionSurvivesRotation() throws {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments += ["-previewScript", "fullDirectory", "-previewReady",
+                                "-previewDestination", "chatLong"]
+        app.launch()
+        let latest = app.staticTexts["Preview message 30"]
+        XCTAssertTrue(latest.waitForExistence(timeout: 30))
+        let history = app.scrollViews.firstMatch
+        history.swipeDown()
+        history.swipeDown()
+        XCTAssertTrue(app.buttons["Jump to latest"].waitForExistence(timeout: 5))
+        XCUIDevice.shared.orientation = .landscapeLeft
+        XCTAssertTrue(app.buttons["Jump to latest"].waitForExistence(timeout: 5), "Rotation should preserve the reading position")
+        XCTAssertFalse(latest.isHittable)
+        XCUIDevice.shared.orientation = .portrait
+    }
+
+    func testKeyboardKeepsFocusWhileMessagesStream() throws {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments += ["-previewScript", "fullDirectory", "-previewReady",
+                                "-previewDestination", "chatStream"]
+        app.launch()
+        let message = app.textFields["Message"]
+        XCTAssertTrue(message.waitForExistence(timeout: 30))
+        XCTAssertFalse(app.buttons["Hide sidebar"].exists, "The sidebar should not cover the composer. \(app.debugDescription)")
+        message.tap()
+        let keyboard = app.keyboards.firstMatch
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5), "The keyboard should open while updates arrive. \(app.debugDescription)")
+        message.typeText("Draft during updates")
+        XCTAssertTrue(keyboard.exists, "Streaming updates should not dismiss the keyboard")
+        let typed = app.textFields.firstMatch.exists ? app.textFields.firstMatch : app.textViews.firstMatch
+        XCTAssertTrue((typed.value as? String ?? "").contains("Draft during updates"))
+    }
+
+    func testQueuedMessageCanBeEditedAndRemoved() throws {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments += ["-previewScript", "fullDirectory", "-previewReady",
+                                "-previewDestination", "chat", "-previewQueue"]
+        app.launch()
+        let edit = app.buttons["Edit queued message"]
+        XCTAssertTrue(edit.waitForExistence(timeout: 30))
+        edit.tap()
+        let field = app.alerts.textFields.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        field.typeText(" revised")
+        let edited = try XCTUnwrap(field.value as? String)
+        XCTAssertTrue(edited.contains("revised"))
+        app.alerts.buttons["Save"].tap()
+        XCTAssertTrue(app.staticTexts[edited].waitForExistence(timeout: 10))
+        app.buttons["Remove queued message"].tap()
+        XCTAssertTrue(app.staticTexts[edited].waitForNonExistence(timeout: 10))
+    }
+
     /// Full setup flow against the scripted preview service: server address
     /// and enrollment token (no account sign-in) → Host pairing with the
     /// one-time code → home directory with the scripted task and conversation.

@@ -15,7 +15,7 @@ public enum RemoteBaseline {
 
 public enum GianCore {
     /// Bump only when a public signature changes. UI binds this revision.
-    public static let contractRevision = "0.1.0-contract.2"
+    public static let contractRevision = "0.1.0-contract.3"
 }
 
 public enum RemoteLimits {

@@ -4,6 +4,18 @@ public enum CanonicalBody: Sendable, Equatable {
     case session(SessionRecord)
     case interaction(InteractionRecord)
     case attention(sessionID: SessionID, kind: AttentionKind?)
+    case attentions([SessionID: AttentionKind])
+}
+
+public struct CanonicalStatePatch: Sendable, Equatable {
+    var sessions: [SessionRecord] = []
+    var removedSessions: [SessionID] = []
+    var tasks: [TaskRecord] = []
+    var removedTasks: [TaskID] = []
+    var interactions: [InteractionRecord] = []
+    var removedInteractions: [InteractionID] = []
+    var attention: [SessionID: AttentionKind]?
+    var queues: [SessionID: SessionQueue] = [:]
 }
 
 public enum TranslationInbound: Sendable, Equatable {
@@ -18,6 +30,7 @@ public enum InboundEvent: Sendable, Equatable {
     case sessionMetadata(SessionRecord, interactions: [InteractionRecord])
     case sessionUnavailable(SessionID)
     case canonical(sequence: Int, generation: HostGenerationID, body: CanonicalBody)
+    case statePatch(sequence: Int, generation: HostGenerationID, baseRevision: String, revision: String, patch: CanonicalStatePatch)
     case transcript(sessionID: SessionID, item: TranscriptItem)
     case translation(sessionID: SessionID, update: TranslationInbound)
     case snapshotRequired(SnapshotRequiredReason)

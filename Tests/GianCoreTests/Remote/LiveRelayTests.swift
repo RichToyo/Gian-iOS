@@ -15,6 +15,24 @@ struct LiveRelayTests {
         #expect(directory.agents.count == 1)
         return (fixture, socket)
     }
+
+    @Test func queueSendNowUsesRevisionAndReconcilesCommandIdentity() async throws {
+        let (fixture, socket) = try await connected()
+        let command = CommandID(rawValue: fixture.service.newID())!
+        let session = SessionID(rawValue: fixture.sessionID)!
+        let request = QueueMutationRequest(commandID: command, sessionID: session, revision: "queue-r1", mutation: .sendNow)
+        guard case .succeeded(let first) = await fixture.service.mutateQueue(scope: fixture.scope, request: request) else {
+            Issue.record("Expected a queue receipt"); await fixture.service.disconnect(); return
+        }
+        #expect(first.queue?.revision == "queue-r2")
+        let wire = try #require(socket.commandRequests.first(where: { (try? $0.string("method")) == "queue.send_now" }))
+        #expect(try wire["params"].string("expected_queue_revision") == "queue-r1")
+        guard case .succeeded = await fixture.service.mutateQueue(scope: fixture.scope, request: request) else {
+            Issue.record("Expected the original command receipt"); await fixture.service.disconnect(); return
+        }
+        #expect(socket.commands.filter { $0 == "queue.send_now" }.count == 1)
+        await fixture.service.disconnect()
+    }
     @Test func realEncryptedLoginPairSubscribeAndSend() async throws {
         let (fixture, socket) = try await connected()
         let cached = try #require(try fixture.service.loadCachedAuthorization(server: fixture.server, account: fixture.account))
@@ -102,6 +120,50 @@ struct LiveRelayTests {
         #expect(socket.commands.filter { $0 == "translation.request" }.count == 1)
         #expect(await fixture.service.pageTranslationText(scope: fixture.scope, request: TranslationTextPageRequest(sessionID: request.sessionID,
             recordID: TranslationRecordID(rawValue: "00000000-0000-7000-8000-000000000031")!, offset: 0)) == .notFound)
+        await fixture.service.disconnect()
+    }
+
+    @Test func invalidPreviouslySettledTranslationStaysUnknownWithoutPaidRetry() async throws {
+        let (fixture, socket) = try await connected()
+        let request = TranslationRequest(requestID: TranslationRequestID(rawValue: fixture.service.newID())!,
+            sessionID: SessionID(rawValue: fixture.sessionID)!, purpose: .read, text: "Final answer", sourceID: "turn:3")
+        socket.translationRecord = .object(["id": .string("00000000-0000-7000-8000-000000000031"),
+            "session_id": .string(fixture.sessionID), "purpose": .string("read"), "source_id": .string("turn:3"),
+            "target_language": .string("zh"), "text": .string("Result"), "text_length": .int(6),
+            "text_sha256": .string(RemoteWire.hash(Data("Result".utf8))),
+            "source_sha256": .string(RemoteWire.hash(Data("Different source".utf8)))])
+        #expect(await fixture.service.requestTranslation(scope: fixture.scope, request: request) == .unknown(request.requestID))
+        #expect(!socket.commands.contains("translation.request"))
+        await fixture.service.disconnect()
+    }
+
+    @Test func historicalPageTranslationKeepsCanonicalTurnIdentity() async throws {
+        let (fixture, _) = try await connected()
+        let session = SessionID(rawValue: fixture.sessionID)!
+        let text = "Translated"
+        let record = WireValue.object(["id": .string("00000000-0000-7000-8000-000000000031"),
+            "session_id": .string(fixture.sessionID), "purpose": .string("read"), "source_id": .string("turn:3"),
+            "target_language": .string("zh"), "text": .string(text), "text_length": .int(text.utf16.count),
+            "text_sha256": .string(RemoteWire.hash(Data(text.utf8))),
+            "source_sha256": .string(RemoteWire.hash(Data("Final answer".utf8)))])
+        if case .object(var wrongPurpose) = record {
+            wrongPurpose["purpose"] = .string("send")
+            #expect(throws: RemoteClientError.invalidPayload) {
+                try fixture.service.applyPageTranslations(.object(["translations": .array([.object(wrongPurpose)])]),
+                                                          sessionID: session, scope: fixture.scope)
+            }
+        }
+        try fixture.service.applyPageTranslations(.object(["translations": .array([record])]), sessionID: session, scope: fixture.scope)
+        fixture.service.eventContinuation.finish()
+        var found = false
+        for await envelope in fixture.service.events {
+            if case .translation(let id, .upsert(let result)) = envelope.event, id == session {
+                #expect(result.sourceID == "turn:3")
+                #expect(result.presentableText == text)
+                found = true
+            }
+        }
+        #expect(found)
         await fixture.service.disconnect()
     }
     @Test func downloadIntegrityAndMailboxCancellationAreFailClosed() async throws {

@@ -7,37 +7,37 @@ import GianCore
 struct UserMessageView: View {
     let row: UserRow
     var attachmentPresentation: (AttachmentID) -> AttachmentFilePresentation = { _ in .unknown }
+    var attachmentIsImage: (AttachmentID) -> Bool = { _ in false }
+    var attachmentData: (AttachmentID) -> Data? = { _ in nil }
+    var autoLoadImages: Bool = false
     var onDownloadAttachment: (AttachmentID) -> Void = { _ in }
     var onPreviewAttachment: (AttachmentID) -> Void = { _ in }
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 4) {
-            ForEach(row.attachmentIDs, id: \.rawValue) { attachmentID in
-                TranscriptAttachmentView(
-                    presentation: attachmentPresentation(attachmentID),
-                    onDownload: { onDownloadAttachment(attachmentID) },
-                    onPreview: { onPreviewAttachment(attachmentID) }
-                )
-            }
-
             if !row.text.isEmpty {
                 VStack(alignment: .trailing, spacing: 6) {
                     Text(row.text)
                         .font(GianTheme.Typography.body)
                         .foregroundStyle(.white)
+                        .multilineTextAlignment(.trailing)
                         .textSelection(.enabled)
 
                     if let sent = row.sentTranslation,
                        let translated = sent.presentableText {
-                        Divider().overlay(Color.white.opacity(0.4))
-                        HStack(spacing: 6) {
-                            LanguageTag(label: "Sent as · \(sent.targetLanguage)")
-                            Spacer(minLength: 0)
+                        VStack(alignment: .trailing, spacing: 6) {
+                            LanguageTag(label: "Sent as · \(sent.targetLanguage)", onColoredBackground: true)
+                                .accessibilityIdentifier("sent-translation-label")
+                            Text(translated)
+                                .font(GianTheme.Typography.body)
+                                .foregroundStyle(.white.opacity(0.9))
+                                .multilineTextAlignment(.trailing)
+                                .textSelection(.enabled)
                         }
-                        Text(translated)
-                            .font(GianTheme.Typography.body)
-                            .foregroundStyle(.white.opacity(0.9))
-                            .textSelection(.enabled)
+                        .padding(.top, 6)
+                        .overlay(alignment: .top) {
+                            Rectangle().fill(Color.white.opacity(0.4)).frame(height: 0.5)
+                        }
                     }
                 }
                 .padding(.horizontal, GianTheme.Metrics.paddingMedium)
@@ -49,6 +49,19 @@ struct UserMessageView: View {
                         style: .continuous
                     )
                 )
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("user-message-bubble")
+            }
+            ForEach(Array(row.attachmentIDs.enumerated()), id: \.element.rawValue) { index, attachmentID in
+                TranscriptAttachmentView(
+                    presentation: attachmentPresentation(attachmentID),
+                    isImage: attachmentIsImage(attachmentID),
+                    imageData: attachmentData(attachmentID),
+                    autoLoadEnabled: autoLoadImages,
+                    attachmentNumber: index + 1,
+                    onDownload: { onDownloadAttachment(attachmentID) },
+                    onPreview: { onPreviewAttachment(attachmentID) }
+                )
             }
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
@@ -56,38 +69,48 @@ struct UserMessageView: View {
     }
 }
 
-/// Assistant message: agent avatar, native markdown, and a reading
-/// translation area. Translate requests, retries, cancels and descriptor
+/// Assistant message: native markdown and a reading translation area.
+/// Translate requests, retries, cancels and descriptor
 /// paging all dispatch typed actions; nothing is re-requested implicitly.
 struct AssistantMessageView: View {
     let row: AssistantRow
     var translationEnabled: Bool = false
+    var translationAvailable: Bool = false
+    var recoveryEnabled: Bool = false
 
     var onRequestTranslation: () -> Void = {}
     var onRetryTranslation: () -> Void = {}
     var onCancelTranslation: () -> Void = {}
+    var onRecoverTranslation: () -> Void = {}
     /// Pages a descriptor-pending record's full verified text.
     var onPageTranslation: () -> Void = {}
 
-    @State private var showsTranslation = true
+    @State private var translationOverride: Bool?
+
+    private var showsTranslation: Bool { translationOverride ?? row.translationExpandedByDefault }
+    private var automaticPageID: TranslationRecordID? {
+        guard row.isFinalResult, translationEnabled, showsTranslation, case .needsPaging(let record) = row.reading else { return nil }
+        return record.id
+    }
 
     var body: some View {
-        HStack(alignment: .top, spacing: GianTheme.Metrics.paddingSmall) {
-            AgentAvatar(logo: row.agent, name: row.agentName, size: GianTheme.Metrics.avatarSmall)
-            VStack(alignment: .leading, spacing: 6) {
-                MarkdownView(source: row.markdown)
-                translationArea
-            }
+        VStack(alignment: .leading, spacing: 6) {
+            MarkdownView(source: row.markdown)
+            if row.isFinalResult { translationArea }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(row.agentName) message")
+        .task(id: automaticPageID) {
+            if automaticPageID != nil { onPageTranslation() }
+        }
     }
 
     @ViewBuilder
     private var translationArea: some View {
         switch row.reading {
         case .none:
-            if translationEnabled {
+            if translationAvailable {
                 Button(action: onRequestTranslation) {
                     Label("Translate", systemImage: "translate")
                         .font(GianTheme.Typography.caption)
@@ -95,12 +118,16 @@ struct AssistantMessageView: View {
                         .gianHitTarget()
                 }
                 .buttonStyle(.plain)
+                .disabled(!translationEnabled)
             }
-        case .translating, .uncertain, .failed:
+        case .translating, .uncertain, .failed, .unavailable:
             ReadingTranslationStatus(
                 presentation: row.reading,
+                canCancel: row.canCancelTranslation,
                 onRetry: onRetryTranslation,
-                onCancel: onCancelTranslation
+                onCancel: onCancelTranslation,
+                onRecover: onRecoverTranslation,
+                canRecover: recoveryEnabled
             )
         case .needsPaging:
             HStack(spacing: 6) {
@@ -111,6 +138,7 @@ struct AssistantMessageView: View {
                     .font(GianTheme.Typography.caption.weight(.semibold))
                     .foregroundStyle(GianTheme.Colors.tint)
                     .gianHitTarget()
+                    .disabled(!recoveryEnabled)
             }
         case .translated(let record):
             if let text = record.presentableText {
@@ -118,7 +146,7 @@ struct AssistantMessageView: View {
                     HStack(spacing: 6) {
                         LanguageTag(label: "Translation · \(record.targetLanguage)")
                         Button(showsTranslation ? "Hide" : "Show") {
-                            showsTranslation.toggle()
+                            translationOverride = !showsTranslation
                         }
                         .font(GianTheme.Typography.caption)
                         .foregroundStyle(GianTheme.Colors.tint)
@@ -165,7 +193,8 @@ struct AssistantMessageView: View {
                     markdown: "Done — Prod is the outlier ([build report](https://example.com)).",
                     reading: .none
                 ),
-                translationEnabled: true
+                translationEnabled: true,
+                translationAvailable: true
             )
         }
         .padding()

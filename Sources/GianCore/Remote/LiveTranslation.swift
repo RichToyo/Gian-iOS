@@ -18,6 +18,7 @@ extension LiveGianClientService {
         }
     }
     public func requestTranslation(scope: ClientScope, request: TranslationRequest) async -> TranslationCommandResponse {
+        var mayHaveBeenDispatched = false
         do {
             try requireTranslation(scope)
             try requireCapability(.sessionSend, scope: scope)
@@ -33,6 +34,7 @@ extension LiveGianClientService {
             ]))
             let state = try status.string("state")
             if state == "succeeded" || state == "failed" {
+                mayHaveBeenDispatched = true
                 if !status["record"].isNull { try validateTranslationSource(status["record"], request: request) }
                 return try await settledTranslation(status, request: request.requestID, session: request.sessionID, scope: scope)
             }
@@ -51,10 +53,12 @@ extension LiveGianClientService {
                 // A lost paid-request ACK stays uncertain even across process restarts.
                 vault.translationAttempts[identity] = fingerprint
                 try saveVault(vault, server: scope.server, account: scope.account, epoch: epoch)
+                mayHaveBeenDispatched = true
                 let accepted = try await rpc(scope: scope, method: "translation.request", params: .object(params))
                 guard try accepted.string("request_id") == request.requestID.rawValue,
                       try accepted.string("status") == "accepted" else { throw RemoteClientError.invalidPayload }
-            } else if state != "pending" { throw RemoteClientError.invalidPayload }
+            } else if state == "pending" { mayHaveBeenDispatched = true }
+            else { throw RemoteClientError.invalidPayload }
             // An accepted receipt is not a settled translation. Wait for the matching subscription event.
             let result = try await mailbox.next(timeout: .seconds(120))
             if !result["upsert"].isNull { try validateTranslationSource(result["upsert"], request: request) }
@@ -64,6 +68,7 @@ extension LiveGianClientService {
                 error: try RemoteMapping.safeTranslationError(result))
         } catch {
             let safe = note(error)
+            if mayHaveBeenDispatched { return .unknown(request.requestID) }
             if safe == .unsupported { return .unavailable }
             if safe == .timeout || safe == .disconnected || safe == .transport || safe == .cancelled { return .unknown(request.requestID) }
             return .failed(safe.safeDescription)

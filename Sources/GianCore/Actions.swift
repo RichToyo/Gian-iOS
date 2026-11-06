@@ -21,7 +21,9 @@ public enum GianClientAction: Sendable {
     case cancelHostPairing
     case selectHost(HostID)
     case selectDirectoryView(DirectoryView)
+    case setDirectoryTimeFilter(DirectoryView, DirectoryTimeFilter)
     case selectConversation(SessionID)
+    case selectSearchResult(SessionID)
     case openNewChat
     case returnHome
     case openSettings
@@ -31,6 +33,7 @@ public enum GianClientAction: Sendable {
     case loadMoreDirectory(DirectoryCollection)
     case refreshDirectoryView(DirectoryCollection)
     case pageOlderTranscript
+    case retryTranscriptSync
     case editDraftText(String)
     case addDraftAttachment(AttachmentDraftInput)
     case removeDraftAttachment(AttachmentID)
@@ -42,11 +45,14 @@ public enum GianClientAction: Sendable {
     case selectTask(TaskID?)
     case send
     case stop
+    case mutateQueue(QueueMutation)
+    case recoverQueueCommand
     case recoverUncertainOperation
     case retryUncertainCreate
     case respondToInteraction(InteractionID, actionID: ActionID, values: [String: InteractionValue])
     case setAutoTranslation(enabled: Bool)
     case requestReadingTranslation(sourceID: String, text: String)
+    case recoverReadingTranslation(sourceID: String)
     case cancelReadingTranslation(sourceID: String)
     case retryTranslationText(TranslationRecordID)
     case retryTranslationSend
@@ -57,6 +63,7 @@ public enum GianClientAction: Sendable {
     case noteLocalConnectivity(LocalConnectivity)
     case setForeground(ForegroundPresence)
     case refreshDirectory
+    case retrySynchronization
     case clearAttachmentCache
     /// Reads an Agent's conversation options (`catalog.agent`).
     case loadAgentOptions(AgentID)

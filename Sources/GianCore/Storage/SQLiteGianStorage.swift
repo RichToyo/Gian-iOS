@@ -1,6 +1,8 @@
 import CSQLite
 import Foundation
 
+enum RetentionStepResult: Equatable { case complete, more, paused, stale }
+
 /// Platform SQLite, FULL-synchronous WAL transactions. No network, Keychain or
 /// implicit user-data location is accessed by the initializer.
 @MainActor
@@ -11,13 +13,20 @@ public final class SQLiteGianStorage: GianStorage {
     private var committed: [ClientScope: StoredHostState] = [:]
     private var componentSizes: [ClientScope: [ComponentKey: Int]] = [:]
     private var headerSizes: [ClientScope: Int] = [:]
+    private var headerHashes: [ClientScope: String] = [:]
+    private var retainedHeaders: [ClientScope: StoredHostState] = [:]
     private var recentScopes: [ClientScope] = []
+    private var retentionGeneration: [ClientScope: Int] = [:]
     private static let maximumTransactionBytes = 32 * 1024 * 1024
     private static let maximumChangedRows = 4_096
     private static let maximumLoadedRows = 50_000
+    private static let maximumRetentionJobs = 250_000
     internal private(set) var lastCommitChangedRowCount = 0
     internal private(set) var lastCommitBytes = 0
     internal var beforeSaveCommit: (() throws -> Void)?
+    internal var beforeRetentionChunkCommit: (() throws -> Void)?
+    internal private(set) var retentionRecoveryScopes: Set<ClientScope> = []
+    internal private(set) var retentionConflicts: Set<ClientScope> = []
     internal var beforeAuthorizationInvalidationCommit: (() throws -> Void)?
     internal var retainedByteLimit = 128 * 1024 * 1024
 
@@ -37,7 +46,7 @@ public final class SQLiteGianStorage: GianStorage {
             guard sqlite3_step(statement) == SQLITE_ROW else { throw GianStorageError.unavailable }
             return sqlite3_column_int(statement, 0)
         }
-        guard (0...2).contains(version) else { throw GianStorageError.unsupportedSchema }
+        guard (0...3).contains(version) else { throw GianStorageError.unsupportedSchema }
         let tables = try statement("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'") { statement in
             var names: Set<String> = []
             while true {
@@ -51,7 +60,7 @@ public final class SQLiteGianStorage: GianStorage {
         }
         if version == 0, !tables.isEmpty { throw GianStorageError.unsupportedSchema }
         if version == 1, tables != Set(["retained", "components"]) { throw GianStorageError.corruptData }
-        if version == 2, tables != Set(["retained", "components", "authorization_invalidations"]) {
+        if version >= 2, tables != Set(["retained", "components", "authorization_invalidations"]) {
             throw GianStorageError.corruptData
         }
         try execute("PRAGMA foreign_keys = ON")
@@ -86,7 +95,7 @@ public final class SQLiteGianStorage: GianStorage {
                     PRIMARY KEY (server, account)
                 ) WITHOUT ROWID
                 """)
-            try execute("PRAGMA user_version = 2")
+            if version < 2 { try execute("PRAGMA user_version = 2") }
         }
         for suffix in ["", "-wal", "-shm"] {
             let url = URL(fileURLWithPath: file.path + suffix)
@@ -150,6 +159,8 @@ public final class SQLiteGianStorage: GianStorage {
     public func load(scope: ClientScope) throws -> StoredHostState? {
         var sizes: [ComponentKey: Int] = [:]
         var headerBytes = 0
+        var loadedHeader: StoredHostState?
+        var loadedHash: String?
         let loaded: StoredHostState? = try transaction {
             let state: StoredHostState? = try statement(
                 "SELECT payload, sha256 FROM retained WHERE server=? AND account=? AND host=?"
@@ -161,11 +172,38 @@ public final class SQLiteGianStorage: GianStorage {
                 let payload = try blob(statement, at: 0, maximum: Self.maximumTransactionBytes)
                 headerBytes = payload.count
                 guard headerBytes <= retainedByteLimit else { throw GianStorageError.unavailable }
-                guard SHA256Hex.digest(payload) == text(statement, at: 1) else { throw GianStorageError.corruptData }
-                do { return try decoder.decode(StoredHostState.self, from: payload) }
+                let digest = text(statement, at: 1)
+                guard SHA256Hex.digest(payload) == digest else { throw GianStorageError.corruptData }
+                do {
+                    let header = try decoder.decode(StoredHostState.self, from: payload)
+                    loadedHeader = header; loadedHash = digest
+                    return header
+                }
                 catch { throw GianStorageError.corruptData }
             }
             guard var state else { return nil }
+            let jobs = state.retentionCleanup ?? []
+            guard jobs.count <= Self.maximumRetentionJobs, Set(jobs).count == jobs.count,
+                  jobs.allSatisfy({ job in
+                      if job.kind == "download" { return AttachmentID(rawValue: job.owner) != nil }
+                      return ["transcript", "translationRecord", "readingIntent"].contains(job.kind) && SessionID(rawValue: job.owner) != nil
+                  }), (state.retentionRevision ?? 0) >= 0, state.retentionRevision != Int.max,
+                  (state.retentionPausedSessions?.count ?? 0) <= 4_096,
+                  (state.retentionSupersededSessions?.count ?? 0) <= 4_096,
+                  (state.retentionTailItemIDs?.count ?? 0) <= 4_096,
+                  (state.retentionTailItemIDs ?? [:]).values.allSatisfy({ $0.count <= 64 && Set($0).count == $0.count }),
+                  (state.retentionTailReadingIDs?.count ?? 0) <= 4_096,
+                  (state.retentionTailReadingIDs ?? [:]).values.allSatisfy({ $0.count <= 64 && Set($0).count == $0.count }),
+                  (state.retentionHydratedSessions?.count ?? 0) <= 4_096,
+                  (state.retentionOwnerAttachments?.count ?? 0) <= 4_096,
+                  (state.retentionActivityBaseline?.count ?? 0) <= 4_096,
+                  (state.retentionRenewedActivity?.count ?? 0) <= 4_096,
+                  (state.retentionActivityBaseline ?? [:]).values.allSatisfy({ $0.timeIntervalSince1970.isFinite }),
+                  (state.retentionRenewedActivity ?? [:]).values.allSatisfy({ $0.timeIntervalSince1970.isFinite }),
+                  (state.retentionProtectedDownloads?.count ?? 0) <= 131_072 else { throw GianStorageError.corruptData }
+            let pending = Set(jobs)
+            let paused = Set(state.retentionPausedSessions ?? [])
+            let hasHiddenTranscripts = jobs.contains { $0.kind == "transcript" }
             try statement("SELECT kind, owner, item, body, sha256 FROM components WHERE server=? AND account=? AND host=? AND kind!='download' LIMIT 50001") { statement in
                 try bind(scope, to: statement)
                 var count = 0
@@ -177,14 +215,27 @@ public final class SQLiteGianStorage: GianStorage {
                     count += 1
                     guard count <= Self.maximumLoadedRows else { throw GianStorageError.unavailable }
                     let key = ComponentKey(kind: text(statement, at: 0), owner: text(statement, at: 1), item: text(statement, at: 2))
-                    let bytes = try blob(statement, at: 3, maximum: Self.maximumTransactionBytes)
-                    totalBytes += bytes.count
+                    let size = Int(sqlite3_column_bytes(statement, 3))
+                    guard size >= 0, size <= Self.maximumTransactionBytes else { throw GianStorageError.unavailable }
+                    totalBytes += size
                     guard totalBytes <= retainedByteLimit else { throw GianStorageError.unavailable }
+                    sizes[key] = size
+                    let protectedIntent = key.kind == "readingIntent" && SessionID(rawValue: key.owner).map { paused.contains($0) } == true
+                    let verifiedTail = key.kind == "transcript" && SessionID(rawValue: key.owner).map { session in
+                        state.retentionSupersededSessions?.contains(session) == true &&
+                            state.retentionTailItemIDs?[session]?.contains(where: { $0.rawValue == key.item }) == true
+                    } == true
+                    let verifiedReading = key.kind == "translationRecord" && SessionID(rawValue: key.owner).map { session in
+                        state.retentionSupersededSessions?.contains(session) == true &&
+                            state.retentionTailReadingIDs?[session]?.contains(where: { $0.rawValue == key.item }) == true
+                    } == true
+                    if pending.contains(StoredRetentionPurge(kind: key.kind, owner: key.owner)) && !protectedIntent && !verifiedTail && !verifiedReading { continue }
+                    let bytes = try blob(statement, at: 3, maximum: Self.maximumTransactionBytes)
                     guard SHA256Hex.digest(bytes) == text(statement, at: 4) else { throw GianStorageError.corruptData }
-                    sizes[key] = bytes.count
                     try apply(bytes, key: key, to: &state)
                 }
             }
+            let retainedRefs = state.retentionDownloadReferences()
             try statement("SELECT item, body, sha256 FROM components WHERE server=? AND account=? AND host=? AND kind='download' ORDER BY item LIMIT 128") { statement in
                 try bind(scope, to: statement)
                 var count = 0
@@ -195,6 +246,7 @@ public final class SQLiteGianStorage: GianStorage {
                     let size = Int(sqlite3_column_bytes(statement, 1))
                     guard let id = AttachmentID(rawValue: text(statement, at: 0)),
                           AttachmentRules.accepts(byteCount: size), count + size <= 32 * 1024 * 1024 else { continue }
+                    if (hasHiddenTranscripts || pending.contains(StoredRetentionPurge(kind: "download", owner: id.rawValue))) && !retainedRefs.contains(id) { continue }
                     let bytes = try blob(statement, at: 1, maximum: RemoteLimits.maxAttachmentBytes)
                     if SHA256Hex.digest(bytes) == text(statement, at: 2) {
                         state.downloads[id] = bytes
@@ -203,8 +255,33 @@ public final class SQLiteGianStorage: GianStorage {
                 }
             }
             state.transcripts = state.transcripts.mapValues { TranscriptLog.merge(existing: [], incoming: $0) }
+            for job in jobs where job.kind == "translationRecord" {
+                guard let id = SessionID(rawValue: job.owner), var translation = state.translations[id] else { continue }
+                let allowed = Set(state.retentionTailReadingIDs?[id] ?? [])
+                translation.records = validTailReadings(translation.records.filter { allowed.contains($0.id) },
+                    transcript: state.transcripts[id] ?? [], language: translation.readingLanguage)
+                state.translations[id] = translation
+            }
+            for job in jobs where job.kind == "transcript" {
+                guard let id = SessionID(rawValue: job.owner), state.retentionSupersededSessions?.contains(id) == true,
+                      state.retentionTailItemIDs?[id]?.isEmpty == false else { continue }
+                var cursor = state.transcriptCursors[id] ?? StoredTranscriptCursor(cursor: nil, hasOlder: true)
+                cursor.cursor = nil; cursor.hasOlder = true
+                if state.retentionHydratedSessions?.contains(id) != true && cursor.catchUp == nil {
+                    cursor.catchUp = StoredTranscriptCatchUp(anchorIDs: state.retentionTailItemIDs?[id] ?? [])
+                }
+                state.transcriptCursors[id] = cursor
+            }
             for session in state.translations.keys {
-                state.translations[session]?.records.sort { $0.id.rawValue < $1.id.rawValue }
+                let order = state.translationRecordOrder?[session] ?? []
+                let ranks = order.enumerated().reduce(into: [TranslationRecordID: Int]()) { result, pair in
+                    if result[pair.element] == nil { result[pair.element] = pair.offset }
+                }
+                state.translations[session]?.records.sort {
+                    let lhs = ranks[$0.id] ?? Int.max
+                    let rhs = ranks[$1.id] ?? Int.max
+                    return lhs == rhs ? $0.id.rawValue < $1.id.rawValue : lhs < rhs
+                }
             }
             try state.validate(scope: scope)
             return state.recovered()
@@ -213,20 +290,139 @@ public final class SQLiteGianStorage: GianStorage {
             committed[scope] = loaded
             componentSizes[scope] = sizes
             headerSizes[scope] = headerBytes
+            headerHashes[scope] = loadedHash
+            retainedHeaders[scope] = loadedHeader
             rememberScope(scope)
+            retentionGeneration[scope, default: 0] += 1
+            if !(loaded.retentionCleanup ?? []).isEmpty { retentionRecoveryScopes.insert(scope) }
+        } else {
+            committed[scope] = nil; componentSizes[scope] = nil; headerSizes[scope] = nil
+            headerHashes[scope] = nil; retainedHeaders[scope] = nil
+            retentionGeneration[scope, default: 0] += 1
+            retentionRecoveryScopes.remove(scope)
         }
         return loaded
     }
 
     public func save(_ state: StoredHostState, scope: ClientScope) throws {
+        guard !retentionConflicts.contains(scope) else { throw GianStorageError.concurrentMutation }
         let prior: StoredHostState
         if let saved = committed[scope] { prior = saved }
         else { prior = try load(scope: scope) ?? StoredHostState() }
         try state.validate(scope: scope, previous: prior)
-        let retained = header(state)
-        let headerChanged = retained != header(prior) || committed[scope] == nil
+        let currentPause = state.retentionPauseSessionIDs()
+        let queuedOwners = Set((prior.retentionCleanup ?? []).compactMap { job in
+            job.kind == "download" ? nil : SessionID(rawValue: job.owner)
+        })
+        var baselines = prior.retentionActivityBaseline ?? [:]
+        var renewed = prior.retentionRenewedActivity ?? [:]
+        if let now = state.retentionReferenceNow {
+            let cutoff = now.addingTimeInterval(-DirectoryTimeFilter.last7Days.duration)
+            renewed = renewed.filter { $0.value >= cutoff }
+        }
+        for (id, at) in state.retentionRecentActivity ?? [:] where queuedOwners.contains(id) {
+            guard at.timeIntervalSince1970.isFinite, baselines[id].map({ at > $0 }) ?? true else { continue }
+            renewed[id] = max(renewed[id] ?? at, at)
+        }
+        let superseded = Set(renewed.keys).intersection(queuedOwners)
+        let paused = state.retentionProtectedSessionIDs()
+            .union(Set(prior.retentionPausedSessions ?? []).intersection(currentPause))
+            .union(state.changedRetentionDraftOwners(since: prior).intersection(queuedOwners))
+        guard paused.union(superseded).count <= 4_096, prior.retentionRevision != Int.max else { throw GianStorageError.unavailable }
+        var pending = Set(prior.retentionCleanup ?? [])
+        // New recovery identities must remain durable even if old intents were queued.
+        pending = pending.filter { job in
+            guard job.kind == "readingIntent", let id = SessionID(rawValue: job.owner) else { return true }
+            return !paused.contains(id) && !superseded.contains(id)
+        }
+        var effective = state
+        var tailIDs = prior.retentionTailItemIDs ?? [:]
+        var tailReadingIDs = prior.retentionTailReadingIDs ?? [:]
+        var hydrated = Set(prior.retentionHydratedSessions ?? [])
+        for job in pending where job.kind == "transcript" || job.kind == "translationRecord" {
+            guard let id = SessionID(rawValue: job.owner) else { throw GianStorageError.corruptData }
+            if job.kind == "transcript" {
+                if superseded.contains(id) {
+                    let allowed = Set(tailIDs[id] ?? []).union(state.retentionVerifiedItems?[id] ?? [])
+                    let candidates = (state.transcripts[id] ?? prior.transcripts[id] ?? []).filter { allowed.contains($0.id) }
+                    let ordered = TranscriptLog.merge(existing: [], incoming: candidates)
+                    let tail = try boundedRetentionTail(ordered)
+                    effective.transcripts[id] = tail
+                    tailIDs[id] = tail.map(\.id)
+                    var cursor = state.transcriptCursors[id] ?? StoredTranscriptCursor(cursor: nil, hasOlder: true)
+                    cursor.cursor = nil; cursor.hasOlder = true
+                    if state.retentionHydratedEvidence?.contains(id) == true {
+                        hydrated.insert(id); cursor.catchUp = nil
+                    } else if !hydrated.contains(id), cursor.catchUp == nil {
+                        cursor.catchUp = StoredTranscriptCatchUp(anchorIDs: tail.map(\.id))
+                    }
+                    effective.transcriptCursors[id] = cursor
+                } else {
+                    effective.transcripts[id] = nil
+                    effective.transcriptCursors[id] = nil
+                }
+            } else {
+                effective.translations[id]?.records = []
+            }
+        }
+        for job in pending where job.kind == "translationRecord" {
+            guard let id = SessionID(rawValue: job.owner), superseded.contains(id),
+                  var translation = state.translations[id] else { continue }
+            let matching = validTailReadings(translation.records, transcript: effective.transcripts[id] ?? [], language: translation.readingLanguage)
+            translation.records = try boundedRetentionTail(matching)
+            tailReadingIDs[id] = translation.records.map(\.id)
+            effective.translations[id] = translation
+        }
+        pending.formUnion(retentionPurges(effective, prior: prior))
+        let purges = pending.sorted { ($0.kind, $0.owner) < ($1.kind, $1.owner) }
+        var ownerAttachments = prior.retentionOwnerAttachments ?? [:]
+        for job in purges where job.kind == "transcript" {
+            guard let id = SessionID(rawValue: job.owner) else { throw GianStorageError.corruptData }
+            if ownerAttachments[id] == nil || superseded.contains(id) {
+                let items = superseded.contains(id) ? (state.transcripts[id] ?? prior.transcripts[id]) : prior.transcripts[id]
+                guard let items else { continue }
+                var refs = Set(ownerAttachments[id] ?? [])
+                for item in items {
+                    if case .user(_, _, let ids, _) = item.body { refs.formUnion(ids) }
+                }
+                for (attachment, owners) in prior.downloadOwners ?? [:] where owners.contains(id) { refs.insert(attachment) }
+                ownerAttachments[id] = refs.sorted { $0.rawValue < $1.rawValue }
+            }
+            if baselines[id] == nil {
+                let records = prior.sessions + prior.searchHits + (prior.directoryViews ?? [:]).values.flatMap { ($0.entries + ($0.pendingEntries ?? [])).map(\.session) }
+                baselines[id] = records.filter { $0.id == id && $0.activityIsMessageOrExecution }.compactMap(\.lastActivityAt).max()
+            }
+        }
+        if purges.isEmpty { ownerAttachments.removeAll(); baselines.removeAll(); renewed.removeAll(); tailIDs.removeAll(); tailReadingIDs.removeAll(); hydrated.removeAll() }
+        guard purges.count <= Self.maximumRetentionJobs else { throw GianStorageError.unavailable }
+        guard purges.isEmpty || effective.downloads.count <= 131_072 else { throw GianStorageError.unavailable }
+        var retained = header(effective)
+        retained.retentionCleanup = purges.isEmpty ? nil : purges
+        retained.retentionPausedSessions = purges.isEmpty ? nil : paused.sorted { $0.rawValue < $1.rawValue }
+        retained.retentionProtectedDownloads = purges.isEmpty ? nil : effective.downloads.keys.sorted { $0.rawValue < $1.rawValue }
+        retained.retentionOwnerAttachments = ownerAttachments.isEmpty ? nil : ownerAttachments
+        retained.retentionActivityBaseline = baselines.isEmpty ? nil : baselines
+        retained.retentionRenewedActivity = renewed.isEmpty ? nil : renewed
+        retained.retentionSupersededSessions = purges.isEmpty || superseded.isEmpty ? nil : superseded.sorted { $0.rawValue < $1.rawValue }
+        retained.retentionTailItemIDs = tailIDs.isEmpty ? nil : tailIDs
+        retained.retentionTailReadingIDs = tailReadingIDs.isEmpty ? nil : tailReadingIDs
+        retained.retentionHydratedSessions = hydrated.isEmpty ? nil : hydrated.sorted { $0.rawValue < $1.rawValue }
+        retained.retentionRevision = prior.retentionRevision != nil || !purges.isEmpty ? (prior.retentionRevision ?? 0) + 1 : nil
+        var priorHeader = header(prior)
+        priorHeader.retentionCleanup = prior.retentionCleanup
+        priorHeader.retentionPausedSessions = prior.retentionPausedSessions
+        priorHeader.retentionProtectedDownloads = prior.retentionProtectedDownloads
+        priorHeader.retentionOwnerAttachments = prior.retentionOwnerAttachments
+        priorHeader.retentionActivityBaseline = prior.retentionActivityBaseline
+        priorHeader.retentionRenewedActivity = prior.retentionRenewedActivity
+        priorHeader.retentionSupersededSessions = prior.retentionSupersededSessions
+        priorHeader.retentionTailItemIDs = prior.retentionTailItemIDs
+        priorHeader.retentionTailReadingIDs = prior.retentionTailReadingIDs
+        priorHeader.retentionHydratedSessions = prior.retentionHydratedSessions
+        priorHeader.retentionRevision = prior.retentionRevision
+        let headerChanged = retained != priorHeader || committed[scope] == nil
         let payload = headerChanged ? try encoder.encode(retained) : Data()
-        let changes = try changedComponents(state, prior: prior)
+        let changes = try changedComponents(effective, prior: prior, purges: Set(purges), superseded: superseded)
         let bytes = changes.values.reduce(payload.count) { $0 + ($1?.count ?? 0) }
         var nextSizes = componentSizes[scope] ?? [:]
         var retainedBytes = (headerChanged ? payload.count : headerSizes[scope] ?? 0) + nextSizes.values.reduce(0, +)
@@ -240,6 +436,9 @@ public final class SQLiteGianStorage: GianStorage {
         }
         guard retainedBytes <= retainedByteLimit, nextSizes.count <= Self.maximumLoadedRows else { throw GianStorageError.unavailable }
         try transaction {
+            try assertRetentionFence(scope)
+            // Older clients cannot preserve cleanup queues or ownership metadata.
+            if !purges.isEmpty || !(effective.downloadOwners ?? [:]).isEmpty { try execute("PRAGMA user_version = 3") }
             if headerChanged {
                 try statement("INSERT OR REPLACE INTO retained VALUES (?, ?, ?, ?, ?)") { statement in
                     try bind(scope, to: statement)
@@ -271,9 +470,30 @@ public final class SQLiteGianStorage: GianStorage {
             }
             try beforeSaveCommit?()
         }
-        committed[scope] = state
+        effective.retentionCleanup = retained.retentionCleanup
+        effective.retentionPausedSessions = retained.retentionPausedSessions
+        effective.retentionProtectedDownloads = retained.retentionProtectedDownloads
+        effective.retentionOwnerAttachments = retained.retentionOwnerAttachments
+        effective.retentionActivityBaseline = retained.retentionActivityBaseline
+        effective.retentionRenewedActivity = retained.retentionRenewedActivity
+        effective.retentionSupersededSessions = retained.retentionSupersededSessions
+        effective.retentionTailItemIDs = retained.retentionTailItemIDs
+        effective.retentionTailReadingIDs = retained.retentionTailReadingIDs
+        effective.retentionHydratedSessions = retained.retentionHydratedSessions
+        effective.retentionRecentActivity = nil
+        effective.retentionReferenceNow = nil
+        effective.retentionVerifiedItems = nil
+        effective.retentionHydratedEvidence = nil
+        effective.retentionRevision = retained.retentionRevision
+        committed[scope] = effective
         componentSizes[scope] = nextSizes
-        if headerChanged { headerSizes[scope] = payload.count }
+        if headerChanged {
+            headerSizes[scope] = payload.count
+            headerHashes[scope] = SHA256Hex.digest(payload)
+            retainedHeaders[scope] = retained
+        }
+        retentionGeneration[scope, default: 0] += 1
+        if purges.isEmpty { retentionRecoveryScopes.remove(scope) } else { retentionRecoveryScopes.insert(scope) }
         rememberScope(scope)
         lastCommitChangedRowCount = changes.count + (headerChanged ? 1 : 0)
         lastCommitBytes = bytes
@@ -281,6 +501,22 @@ public final class SQLiteGianStorage: GianStorage {
 
     private func header(_ state: StoredHostState) -> StoredHostState {
         var result = state
+        result.retentionCleanup = nil
+        result.retentionProtectedDownloads = nil
+        result.retentionPausedSessions = nil
+        result.retentionRevision = nil
+        result.retentionOwnerAttachments = nil
+        result.retentionActivityBaseline = nil
+        result.retentionRenewedActivity = nil
+        result.retentionSupersededSessions = nil
+        result.retentionTailItemIDs = nil
+        result.retentionTailReadingIDs = nil
+        result.retentionHydratedSessions = nil
+        result.retentionRecentActivity = nil
+        result.retentionReferenceNow = nil
+        result.retentionVerifiedItems = nil
+        result.retentionHydratedEvidence = nil
+        result.translationRecordOrder = state.translations.mapValues { $0.records.map(\.id) }
         result.transcripts = [:]
         result.drafts = []
         result.submittedDrafts = [:]
@@ -299,10 +535,327 @@ public final class SQLiteGianStorage: GianStorage {
         let item: String
     }
 
-    private func changedComponents(_ state: StoredHostState, prior: StoredHostState) throws -> [ComponentKey: Data?] {
+    private func boundedRetentionTail<T: Encodable>(_ values: [T]) throws -> [T] {
+        var result: [T] = []
+        var bytes = 0
+        for value in values.reversed().prefix(64) {
+            let size = try encoder.encode(value).count
+            guard size <= Self.maximumTransactionBytes / 2 else { throw GianStorageError.unavailable }
+            if !result.isEmpty && bytes + size > 8 * 1024 * 1024 { break }
+            result.append(value); bytes += size
+        }
+        return Array(result.reversed())
+    }
+
+    private func validTailReadings(_ records: [ReadingTranslation], transcript: [TranscriptItem], language: String) -> [ReadingTranslation] {
+        guard !language.isEmpty else { return [] }
+        let ordered = TranscriptLog.merge(existing: [], incoming: transcript)
+        var finalAssistant: [TurnID: TranscriptItemID] = [:]
+        for item in ordered {
+            if case .assistant(let text, _) = item.body, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                finalAssistant[item.turnID] = item.id
+            }
+        }
+        var sources: [String: Set<String>] = [:]
+        for item in ordered {
+            guard case .assistant(let text, _) = item.body else { continue }
+            let hash = SHA256Hex.digest(Data(text.utf8))
+            sources[item.id.rawValue, default: []].insert(hash)
+            if finalAssistant[item.turnID] == item.id { sources["turn:\(item.turn)", default: []].insert(hash) }
+        }
+        return records.compactMap { record in
+            guard let source = record.sourceID,
+                  sources[source]?.contains(record.sourceSHA256.lowercased()) == true,
+                  record.targetLanguage.caseInsensitiveCompare(language) == .orderedSame,
+                  record.integrity != .hashMismatch, record.integrity != .lengthMismatch,
+                  record.integrity == .descriptorPending || record.presentableText != nil else { return nil }
+            let checked = TranslationReducer.verifiedRecord(id: record.id, sourceID: source,
+                targetLanguage: record.targetLanguage, text: record.presentableText, textLength: record.textLength,
+                textSHA256: record.textSHA256, sourceSHA256: record.sourceSHA256, paged: record.integrity == .pagedVerified)
+            guard checked.integrity != .hashMismatch, checked.integrity != .lengthMismatch else { return nil }
+            return checked
+        }
+    }
+
+    private func assertRetentionFence(_ scope: ClientScope) throws {
+        let current: String? = try statement("SELECT sha256 FROM retained WHERE server=? AND account=? AND host=?") { statement in
+            try bind(scope, to: statement)
+            let code = sqlite3_step(statement)
+            if code == SQLITE_DONE { return nil }
+            guard code == SQLITE_ROW else { throw GianStorageError.unavailable }
+            return text(statement, at: 0)
+        }
+        guard current == headerHashes[scope] else {
+            retentionConflicts.insert(scope)
+            throw GianStorageError.concurrentMutation
+        }
+    }
+
+    private func retentionPurges(_ state: StoredHostState, prior: StoredHostState) -> [StoredRetentionPurge] {
+        var jobs: Set<StoredRetentionPurge> = []
+        for session in prior.transcripts.keys where state.transcripts[session] == nil {
+            jobs.insert(StoredRetentionPurge(kind: "transcript", owner: session.rawValue))
+        }
+        for (session, translation) in prior.translations where state.translations[session] == nil && !translation.records.isEmpty {
+            jobs.insert(StoredRetentionPurge(kind: "translationRecord", owner: session.rawValue))
+        }
+        for session in prior.readingIntents.keys where state.readingIntents[session] == nil {
+            jobs.insert(StoredRetentionPurge(kind: "readingIntent", owner: session.rawValue))
+        }
+        for id in (prior.downloadOwners ?? [:]).keys
+        where state.downloadOwners?[id] == nil && state.downloads[id] == nil {
+            jobs.insert(StoredRetentionPurge(kind: "download", owner: id.rawValue))
+        }
+        return jobs.sorted { ($0.kind, $0.owner) < ($1.kind, $1.owner) }
+    }
+
+    func retentionWorkSnapshot(_ scope: ClientScope) throws -> (StoredHostState, Int)? {
+        guard !retentionConflicts.contains(scope) else { throw GianStorageError.concurrentMutation }
+        if committed[scope] == nil { _ = try load(scope: scope) }
+        guard let state = committed[scope], let jobs = state.retentionCleanup, !jobs.isEmpty else { return nil }
+        let paused = Set(state.retentionPausedSessions ?? []).union(state.retentionSupersededSessions ?? [])
+        guard jobs.contains(where: { job in
+            guard job.kind != "download", let id = SessionID(rawValue: job.owner) else { return true }
+            return !paused.contains(id)
+        }) else { return nil }
+        return (state, retentionGeneration[scope] ?? 0)
+    }
+
+    func retentionPendingSessionIDs(_ scope: ClientScope) -> Set<SessionID> {
+        Set((committed[scope]?.retentionCleanup ?? []).compactMap { job in
+            job.kind == "download" ? nil : SessionID(rawValue: job.owner)
+        })
+    }
+
+    func retentionTailItemIDs(_ scope: ClientScope) -> [SessionID: [TranscriptItemID]]? {
+        committed[scope]?.retentionTailItemIDs
+    }
+
+    func retentionHydratedSessions(_ scope: ClientScope) -> [SessionID]? {
+        committed[scope]?.retentionHydratedSessions
+    }
+
+    func retentionRenewalWatermarks(_ scope: ClientScope) -> [SessionID: Date] {
+        committed[scope]?.retentionRenewedActivity ?? [:]
+    }
+
+    func retentionNextExpiry(_ scope: ClientScope) -> Date? {
+        guard let state = committed[scope] else { return nil }
+        let pending = retentionPendingSessionIDs(scope)
+        return (state.retentionRenewedActivity ?? [:]).compactMap { id, at in
+            pending.contains(id) ? at.addingTimeInterval(DirectoryTimeFilter.last7Days.duration) : nil
+        }.min()
+    }
+
+    func retentionStep(_ scope: ClientScope, generation: Int, protected: Set<AttachmentID>,
+                       protectedSessions: Set<SessionID>, holdDownloads: Bool) throws -> RetentionStepResult {
+        guard retentionGeneration[scope] == generation else { return .stale }
+        var removed: [ComponentKey] = []
+        var updatedJobs: [StoredRetentionPurge] = []
+        var updatedHeaderBytes = 0
+        var updatedRevision: Int?
+        var updatedHeader: StoredHostState?
+        var updatedHash: String?
+        let result: RetentionStepResult = try transaction {
+                do { try assertRetentionFence(scope) }
+                catch GianStorageError.concurrentMutation { return .stale }
+                guard var header = retainedHeaders[scope], let jobs = header.retentionCleanup, !jobs.isEmpty else { return .complete }
+                guard header.retentionRevision == committed[scope]?.retentionRevision else { return .stale }
+                retentionRecoveryScopes.insert(scope)
+                try header.validate(scope: scope)
+                guard jobs.count <= Self.maximumRetentionJobs else { throw GianStorageError.corruptData }
+                if let protected = header.retentionProtectedDownloads {
+                    guard protected.count <= 131_072, Set(protected).count == protected.count else { throw GianStorageError.corruptData }
+                }
+                let paused = Set(header.retentionPausedSessions ?? []).union(header.retentionSupersededSessions ?? []).union(protectedSessions)
+                guard let index = jobs.firstIndex(where: { job in
+                    if job.kind == "download" {
+                        return !holdDownloads && (AttachmentID(rawValue: job.owner).map { !protected.contains($0) } ?? true)
+                    }
+                    return SessionID(rawValue: job.owner).map { !paused.contains($0) } == true
+                }) else { return .paused }
+                let job = jobs[index]
+                    guard ["transcript", "translationRecord", "readingIntent", "download"].contains(job.kind) else {
+                        throw GianStorageError.corruptData
+                    }
+                var exhausted = false
+                var completedCount = 1
+                    if job.kind == "download" {
+                        completedCount = 0
+                        for candidate in jobs[index...].prefix(512) {
+                            guard candidate.kind == "download" else { break }
+                            guard let id = AttachmentID(rawValue: candidate.owner) else { throw GianStorageError.corruptData }
+                            if protected.contains(id) { break }
+                            try statement("DELETE FROM components WHERE server=? AND account=? AND host=? AND kind='download' AND owner='' AND item=?") { statement in
+                                try bind(scope, to: statement)
+                                try bind(id.rawValue, to: statement, at: 4)
+                                try stepDone(statement)
+                            }
+                            completedCount += 1
+                        }
+                        exhausted = true
+                    } else if job.kind == "transcript" {
+                        guard SessionID(rawValue: job.owner) != nil else { throw GianStorageError.corruptData }
+                        let batch = try purgeTranscriptChunk(scope, owner: job.owner, limit: 15,
+                                                              protected: protected, deferDownloads: holdDownloads)
+                        removed += batch.deletedItems.map { ComponentKey(kind: job.kind, owner: job.owner, item: $0) }
+                        for id in batch.deferredDownloads {
+                            let deferred = StoredRetentionPurge(kind: "download", owner: id.rawValue)
+                            if !jobs.contains(deferred) && !updatedJobs.contains(deferred) { updatedJobs.append(deferred) }
+                        }
+                        exhausted = batch.exhausted
+                    } else {
+                        guard SessionID(rawValue: job.owner) != nil else { throw GianStorageError.corruptData }
+                        var items: [String] = []
+                        try statement("SELECT item FROM components WHERE server=? AND account=? AND host=? AND kind=? AND owner=? ORDER BY item LIMIT 512") { statement in
+                            try bind(scope, to: statement)
+                            try bind(job.kind, to: statement, at: 4)
+                            try bind(job.owner, to: statement, at: 5)
+                            while true {
+                                let code = sqlite3_step(statement)
+                                if code == SQLITE_DONE { break }
+                                guard code == SQLITE_ROW else { throw GianStorageError.unavailable }
+                                items.append(text(statement, at: 0))
+                            }
+                        }
+                        for item in items {
+                            try statement("DELETE FROM components WHERE server=? AND account=? AND host=? AND kind=? AND owner=? AND item=?") { statement in
+                                try bind(scope, to: statement)
+                                try bind(job.kind, to: statement, at: 4)
+                                try bind(job.owner, to: statement, at: 5)
+                                try bind(item, to: statement, at: 6)
+                                try stepDone(statement)
+                            }
+                            removed.append(ComponentKey(kind: job.kind, owner: job.owner, item: item))
+                        }
+                        exhausted = items.count < 512
+                    }
+                var nextJobs = jobs
+                if exhausted { nextJobs.removeSubrange(index..<(index + completedCount)) }
+                nextJobs.append(contentsOf: updatedJobs)
+                nextJobs.sort { ($0.kind, $0.owner) < ($1.kind, $1.owner) }
+                guard nextJobs.count <= Self.maximumRetentionJobs else { throw GianStorageError.unavailable }
+                header.retentionCleanup = nextJobs.isEmpty ? nil : nextJobs
+                if nextJobs.isEmpty {
+                    header.retentionProtectedDownloads = nil; header.retentionPausedSessions = nil
+                    header.retentionOwnerAttachments = nil; header.retentionActivityBaseline = nil
+                    header.retentionRenewedActivity = nil; header.retentionSupersededSessions = nil
+                    header.retentionTailItemIDs = nil; header.retentionHydratedSessions = nil
+                    header.retentionTailReadingIDs = nil
+                }
+                guard header.retentionRevision != Int.max else { throw GianStorageError.corruptData }
+                header.retentionRevision = (header.retentionRevision ?? 0) + 1
+                let payload = try encoder.encode(header)
+                guard payload.count <= Self.maximumTransactionBytes else { throw GianStorageError.unavailable }
+                let digest = SHA256Hex.digest(payload)
+                try statement("INSERT OR REPLACE INTO retained VALUES (?, ?, ?, ?, ?)") { statement in
+                    try bind(scope, to: statement)
+                    try bind(payload, to: statement, at: 4)
+                    try bind(digest, to: statement, at: 5)
+                    try stepDone(statement)
+                }
+                try beforeRetentionChunkCommit?()
+                updatedJobs = nextJobs
+                updatedHeaderBytes = payload.count
+                updatedRevision = header.retentionRevision
+                updatedHeader = header
+                updatedHash = digest
+                return nextJobs.isEmpty ? .complete : .more
+        }
+        if result == .complete || result == .more {
+            for key in removed { componentSizes[scope]?[key] = nil }
+            committed[scope]?.retentionCleanup = updatedJobs.isEmpty ? nil : updatedJobs
+            if let updatedRevision { committed[scope]?.retentionRevision = updatedRevision }
+            retainedHeaders[scope] = updatedHeader
+            headerHashes[scope] = updatedHash
+            if result == .complete {
+                committed[scope]?.retentionPausedSessions = nil
+                committed[scope]?.retentionProtectedDownloads = nil
+                committed[scope]?.retentionOwnerAttachments = nil
+                committed[scope]?.retentionActivityBaseline = nil
+                committed[scope]?.retentionRenewedActivity = nil
+                committed[scope]?.retentionSupersededSessions = nil
+                committed[scope]?.retentionTailItemIDs = nil
+                committed[scope]?.retentionTailReadingIDs = nil
+                committed[scope]?.retentionHydratedSessions = nil
+                retentionRecoveryScopes.remove(scope)
+            }
+            if updatedHeaderBytes > 0 { headerSizes[scope] = updatedHeaderBytes }
+        } else if result == .stale {
+            retentionConflicts.insert(scope)
+            committed[scope] = nil; componentSizes[scope] = nil; headerSizes[scope] = nil
+            retainedHeaders[scope] = nil; headerHashes[scope] = nil
+            retentionGeneration[scope, default: 0] += 1
+        }
+        return result
+    }
+
+    private func purgeTranscriptChunk(_ scope: ClientScope, owner: String, limit: Int,
+                                      protected: Set<AttachmentID>, deferDownloads: Bool) throws -> (cost: Int, exhausted: Bool, deletedItems: [String], deferredDownloads: [AttachmentID]) {
+        var rows: [(String, [AttachmentID])] = []
+        var bytesRead = 0
+        var reachedBudget = false
+        try statement("""
+            SELECT item, body, sha256 FROM components
+            WHERE server=? AND account=? AND host=? AND kind='transcript' AND owner=? ORDER BY item LIMIT ?
+            """) { statement in
+            try bind(scope, to: statement)
+            try bind(owner, to: statement, at: 4)
+            guard sqlite3_bind_int(statement, 5, Int32(limit)) == SQLITE_OK else { throw GianStorageError.unavailable }
+            while true {
+                let code = sqlite3_step(statement)
+                if code == SQLITE_DONE { break }
+                guard code == SQLITE_ROW else { throw GianStorageError.unavailable }
+                let key = text(statement, at: 0)
+                let size = Int(sqlite3_column_bytes(statement, 1))
+                guard size >= 0, size <= Self.maximumTransactionBytes else { throw GianStorageError.corruptData }
+                if !rows.isEmpty && bytesRead + size > 8 * 1024 * 1024 { reachedBudget = true; break }
+                let body = try blob(statement, at: 1, maximum: Self.maximumTransactionBytes)
+                bytesRead += body.count
+                guard SHA256Hex.digest(body) == text(statement, at: 2) else { throw GianStorageError.corruptData }
+                let item: TranscriptItem
+                do { item = try decoder.decode(TranscriptItem.self, from: body) }
+                catch { throw GianStorageError.corruptData }
+                guard item.id.rawValue == key else { throw GianStorageError.corruptData }
+                var attachments: [AttachmentID] = []
+                if case .user(_, _, let ids, _) = item.body {
+                    guard ids.count <= 32 else { throw GianStorageError.corruptData }
+                    let candidates = deferDownloads ? Set(ids) : Set(ids).subtracting(protected)
+                    attachments = candidates.sorted { $0.rawValue < $1.rawValue }
+                }
+                rows.append((key, attachments))
+            }
+        }
+        var cost = 0
+        var deferred: Set<AttachmentID> = []
+        for (key, attachments) in rows {
+            try statement("DELETE FROM components WHERE server=? AND account=? AND host=? AND kind='transcript' AND owner=? AND item=?") { statement in
+                try bind(scope, to: statement)
+                try bind(owner, to: statement, at: 4)
+                try bind(key, to: statement, at: 5)
+                try stepDone(statement)
+            }
+            cost += 1
+            for id in attachments {
+                if deferDownloads { deferred.insert(id) }
+                else {
+                    try statement("DELETE FROM components WHERE server=? AND account=? AND host=? AND kind='download' AND owner='' AND item=?") { statement in
+                        try bind(scope, to: statement)
+                        try bind(id.rawValue, to: statement, at: 4)
+                        try stepDone(statement)
+                    }
+                }
+                cost += 1
+            }
+        }
+        return (cost, rows.count < limit && !reachedBudget, rows.map { $0.0 }, Array(deferred).sorted { $0.rawValue < $1.rawValue })
+    }
+
+    private func changedComponents(_ state: StoredHostState, prior: StoredHostState,
+                                   purges: Set<StoredRetentionPurge>, superseded: Set<SessionID>) throws -> [ComponentKey: Data?] {
         var changes: [ComponentKey: Data?] = [:]
         func diff<K: Hashable & CustomStringConvertible, V: Encodable & Equatable>(
-            _ next: [K: V], _ old: [K: V], kind: String, owner: String = ""
+            _ next: [K: V], _ old: [K: V], kind: String, owner: String = "", allowDeletes: Bool = true
         ) throws {
             for (id, value) in next where old[id] != value {
                 guard changes.count < Self.maximumChangedRows else { throw GianStorageError.unavailable }
@@ -310,8 +863,10 @@ public final class SQLiteGianStorage: GianStorage {
                 guard data.count <= Self.maximumTransactionBytes else { throw GianStorageError.unavailable }
                 changes[ComponentKey(kind: kind, owner: owner, item: id.description)] = .some(data)
             }
-            for id in old.keys where next[id] == nil {
-                changes[ComponentKey(kind: kind, owner: owner, item: id.description)] = .some(nil)
+            if allowDeletes {
+                for id in old.keys where next[id] == nil {
+                    changes[ComponentKey(kind: kind, owner: owner, item: id.description)] = .some(nil)
+                }
             }
         }
         func drafts(_ values: [DraftDocument]) -> [DraftID: DraftDocument] {
@@ -323,23 +878,28 @@ public final class SQLiteGianStorage: GianStorage {
         try diff(state.selections, prior.selections, kind: "selection")
         for session in Set(state.transcripts.keys).union(prior.transcripts.keys) {
             if state.transcripts[session] == prior.transcripts[session] { continue }
+            let isPurging = purges.contains(StoredRetentionPurge(kind: "transcript", owner: session.rawValue))
+            if isPurging && !superseded.contains(session) { continue }
             let next = (state.transcripts[session] ?? []).reduce(into: [TranscriptItemID: TranscriptItem]()) { $0[$1.id] = $1 }
             let old = (prior.transcripts[session] ?? []).reduce(into: [TranscriptItemID: TranscriptItem]()) { $0[$1.id] = $1 }
-            try diff(next, old, kind: "transcript", owner: session.rawValue)
+            try diff(next, old, kind: "transcript", owner: session.rawValue, allowDeletes: !isPurging)
         }
         var nextTranslations = state.translations
         var oldTranslations = prior.translations
         for session in Set(state.translations.keys).union(prior.translations.keys) {
-            if state.translations[session]?.records != prior.translations[session]?.records {
+            let isPurging = purges.contains(StoredRetentionPurge(kind: "translationRecord", owner: session.rawValue))
+            if state.translations[session]?.records != prior.translations[session]?.records,
+               !isPurging || superseded.contains(session) {
                 let next = (state.translations[session]?.records ?? []).reduce(into: [TranslationRecordID: ReadingTranslation]()) { $0[$1.id] = $1 }
                 let old = (prior.translations[session]?.records ?? []).reduce(into: [TranslationRecordID: ReadingTranslation]()) { $0[$1.id] = $1 }
-                try diff(next, old, kind: "translationRecord", owner: session.rawValue)
+                try diff(next, old, kind: "translationRecord", owner: session.rawValue, allowDeletes: !isPurging)
             }
             nextTranslations[session]?.records = []
             oldTranslations[session]?.records = []
         }
         try diff(nextTranslations, oldTranslations, kind: "translation")
         for session in Set(state.readingIntents.keys).union(prior.readingIntents.keys) {
+            if purges.contains(StoredRetentionPurge(kind: "readingIntent", owner: session.rawValue)) { continue }
             try diff(state.readingIntents[session] ?? [:], prior.readingIntents[session] ?? [:],
                      kind: "readingIntent", owner: session.rawValue)
         }
@@ -392,6 +952,7 @@ public final class SQLiteGianStorage: GianStorage {
     public func clearDownloadCache(scope: ClientScope) throws {
         try transaction { try deleteDownloads(scope) }
         committed[scope]?.downloads = [:]
+        retentionGeneration[scope, default: 0] += 1
         try? execute("PRAGMA incremental_vacuum(128)")
     }
 
@@ -403,6 +964,8 @@ public final class SQLiteGianStorage: GianStorage {
             committed[evicted] = nil
             componentSizes[evicted] = nil
             headerSizes[evicted] = nil
+            headerHashes[evicted] = nil
+            retainedHeaders[evicted] = nil
         }
     }
 

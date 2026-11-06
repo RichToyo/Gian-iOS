@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import GianCore
 
 /// Pure projections from `GianClientState` into presentation values. Every
@@ -144,22 +145,25 @@ enum StoreProjection {
         let showsTasks = showsRows(for: state.directory.tasksPage)
         let showsRepos = showsRows(for: state.directory.reposPage)
         let showsSearch = showsRows(for: state.directory.searchPage)
+        let temporaryID = state.directory.temporarySearchResult?.id
+        let created = state.directory.temporaryCreatedResults.filter { $0.id != temporaryID }
+        let temporaryIDs = Set(created.map(\.id)).union(temporaryID.map { [$0] } ?? [])
         let taskGroups = showsTasks ? state.directory.tasks.map { section in
             TaskGroupItem(
                 id: section.id,
                 title: section.title,
-                conversations: section.conversations.map(conversationRow)
+                conversations: section.conversations.filter { !temporaryIDs.contains($0.id) }.map(conversationRow)
             )
-        } : []
+        }.filter { !$0.conversations.isEmpty } : []
 
         let repoGroups = showsRepos ? state.directory.repositories.map { section in
             RepoGroupItem(
                 id: section.id,
                 repoName: section.title,
-                conversations: section.conversations.map(conversationRow).sorted(by: activityDescending)
+                conversations: section.conversations.filter { !temporaryIDs.contains($0.id) }.map(conversationRow).sorted(by: activityDescending)
             )
         }
-        .sorted { lhs, rhs in
+        .filter { !$0.conversations.isEmpty }.sorted { lhs, rhs in
             let lhsDate = lhs.conversations.first?.lastActivity ?? .distantPast
             let rhsDate = rhs.conversations.first?.lastActivity ?? .distantPast
             return lhsDate == rhsDate ? lhs.id.rawValue < rhs.id.rawValue : lhsDate > rhsDate
@@ -175,7 +179,11 @@ enum StoreProjection {
             searchAvailability: availability(of: state.directory.searchSupport, in: state.directory.legacyLimitations),
             tasksPage: state.directory.tasksPage,
             reposPage: state.directory.reposPage,
-            searchPage: state.directory.searchPage
+            searchPage: state.directory.searchPage,
+            timeFilter: state.navigation.directoryView == .tasks ? state.directory.tasksTimeFilter : state.directory.reposTimeFilter,
+            temporarySearchResult: state.directory.temporarySearchResult.map(conversationRow),
+            temporarySearchGeneration: state.directory.temporarySearchGeneration,
+            temporaryCreatedResults: created.map(conversationRow)
         )
     }
 
@@ -275,6 +283,7 @@ enum StoreProjection {
         agent: AgentLogo,
         agentName: String,
         now: Date,
+        isTurnActive: Bool = false,
         calendar: Calendar = .current
     ) -> [TranscriptRow] {
         var rows: [TranscriptRow] = []
@@ -286,6 +295,16 @@ enum StoreProjection {
         /// Index of each turn's emitted work card, so a terminal turn outcome
         /// can correct the card phase (Failed/Stopped) after flush.
         var workCardIndexByTurn: [TurnID: Int] = [:]
+        var finalAssistantByNumber: [Int: TranscriptItemID] = [:]
+        var terminalOutcomes: [Int: TurnOutcome] = [:]
+        var failedTurns = Set<Int>()
+        for item in items {
+            if case .assistant(let text, _) = item.body, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                finalAssistantByNumber[item.turn] = item.id
+            }
+            if case .turnEnd(let outcome) = item.body, terminalOutcomes[item.turn] == nil { terminalOutcomes[item.turn] = outcome }
+            if case .error = item.body { failedTurns.insert(item.turn) }
+        }
 
         func flushWork() {
             guard let turnID = pendingWorkTurn, !pendingWork.isEmpty else {
@@ -297,6 +316,8 @@ enum StoreProjection {
                 phase = .failed
             } else if pendingWork.contains(where: { $0.outcome == .running }) {
                 phase = .working
+            } else if pendingWork.contains(where: { $0.outcome == .unknown }) {
+                phase = .unknown
             } else {
                 phase = .worked
             }
@@ -329,12 +350,23 @@ enum StoreProjection {
                 )))
             case .assistant(let text, _):
                 flushWork(); pendingWorkTurn = nil
+                let canonicalID = finalAssistantByNumber[item.turn] == item.id ? "turn:\(item.turn)" : item.id.rawValue
+                let canonical = readingPresentation(sourceID: canonicalID, translation: translation, sourceText: text)
+                let legacy: ReadingTranslationPresentation = canonicalID == item.id.rawValue ? .none : readingPresentation(sourceID: item.id.rawValue, translation: translation, sourceText: text)
+                let canonicalUnavailable: Bool = if case .unavailable = canonical { true } else { false }
+                let usesLegacy = (canonical == .none || canonicalUnavailable) && legacy != .none
+                let sourceID = usesLegacy ? item.id.rawValue : canonicalID
                 rows.append(.assistant(AssistantRow(
                     id: item.id,
                     agent: agent,
                     agentName: agentName,
                     markdown: text,
-                    reading: readingPresentation(sourceID: item.id.rawValue, translation: translation)
+                    reading: usesLegacy ? legacy : canonical,
+                    translationSourceID: sourceID,
+                    translationExpandedByDefault: translation?.enabled ?? false,
+                    canCancelTranslation: translation?.reading[sourceID]?.pending == true && translation?.reading[sourceID]?.uncertain == false,
+                    isFinalResult: terminalOutcomes[item.turn] == .worked && !failedTurns.contains(item.turn)
+                        && finalAssistantByNumber[item.turn] == item.id
                 )))
             case .command(let status, let exitCode):
                 pendingWorkTurn = item.turnID
@@ -404,20 +436,35 @@ enum StoreProjection {
                 flushWork(); pendingWorkTurn = nil
                 rows.append(.severeError(id: item.id))
             case .notice(let severity, let code):
+                if severity == .info, let kind = legacyRemoteActivityKind(code) {
+                    pendingWorkTurn = item.turnID
+                    pendingWork.append(WorkEventItem(
+                        id: item.id, kind: kind,
+                        title: kind == .subagent ? "Agent activity" : "Tool activity",
+                        outcome: .unknown, statusText: "Details unavailable"
+                    ))
+                    continue
+                }
+                if code == "guardianWarning", severity == .warning {
+                    pendingWorkTurn = item.turnID
+                    pendingWork.append(WorkEventItem(
+                        id: item.id, kind: .warning, title: "Guardian warning",
+                        outcome: .done, statusText: "Details unavailable"
+                    ))
+                    continue
+                }
                 flushWork(); pendingWorkTurn = nil
                 rows.append(.notice(id: item.id, severity: severity, code: code))
             case .classifierDenied(let consecutive, let total):
-                flushWork(); pendingWorkTurn = nil
-                rows.append(.notice(
-                    id: item.id, severity: .warning,
-                    code: "Denied by classifier (\(consecutive) consecutive, \(total) total)"
-                ))
+                pendingWorkTurn = item.turnID
+                pendingWork.append(WorkEventItem(id: item.id, kind: .warning, title: "Denied by classifier",
+                    outcome: .done, statusText: "\(consecutive) consecutive, \(total) total"))
+                continue
             case .circuitBreaker(let trigger, let consecutive, let total):
-                flushWork(); pendingWorkTurn = nil
-                rows.append(.notice(
-                    id: item.id, severity: .error,
-                    code: "Circuit breaker (\(trigger.rawValue)): \(consecutive) consecutive, \(total) total"
-                ))
+                pendingWorkTurn = item.turnID
+                pendingWork.append(WorkEventItem(id: item.id, kind: .warning, title: "Circuit breaker (\(trigger.rawValue))",
+                    outcome: .failed, statusText: "\(consecutive) consecutive, \(total) total"))
+                continue
             }
             lastRowIndexByTurn[item.turnID] = rows.count - 1
         }
@@ -432,15 +479,142 @@ enum StoreProjection {
                 rows.append(.interaction(interaction))
             }
         }
-        return rows
+        return coalesceWorkCards(rows, items: items, isTurnActive: isTurnActive)
+    }
+
+    private static func coalesceWorkCards(_ rows: [TranscriptRow], items: [TranscriptItem], isTurnActive: Bool) -> [TranscriptRow] {
+        var turnsByItem: [TranscriptItemID: Int] = [:]
+        var turnsByID: [TurnID: Int] = [:]
+        var endings: [Int: (TurnOutcome, Date)] = [:]
+        var failedTurns = Set<Int>()
+        var finalAssistants: [Int: TranscriptItemID] = [:]
+        var times: [TranscriptItemID: Date] = [:]
+        for item in items {
+            turnsByItem[item.id] = item.turn
+            turnsByID[item.turnID] = item.turn
+            times[item.id] = item.timestamp
+            if case .turnEnd(let outcome) = item.body, endings[item.turn] == nil { endings[item.turn] = (outcome, item.timestamp) }
+            if case .error = item.body { failedTurns.insert(item.turn) }
+            if case .assistant(let text, _) = item.body, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                finalAssistants[item.turn] = item.id
+            }
+        }
+        func turn(of row: TranscriptRow) -> Int? {
+            switch row {
+            case .user(let value): turnsByItem[value.id]
+            case .assistant(let value): turnsByItem[value.id]
+            case .work(let value): value.events.first.flatMap { turnsByItem[$0.id] }
+            case .interaction(let value): turnsByID[value.turnID]
+            case .turnOutcome(let id, _), .severeError(let id), .notice(let id, _, _): turnsByItem[id]
+            case .timeMarker: nil
+            }
+        }
+        var cards: [Int: WorkCard] = [:]
+        var lastIndex: [Int: Int] = [:]
+        var pendingInteractionIndex: [Int: Int] = [:]
+        var firstWorkIndex: [Int: Int] = [:]
+        var resultIndex: [Int: Int] = [:]
+        var outcomeIndex: [Int: Int] = [:]
+        for (index, row) in rows.enumerated() {
+            guard let number = turn(of: row) else { continue }
+            lastIndex[number] = index
+            switch row {
+            case .work(let card):
+                if firstWorkIndex[number] == nil { firstWorkIndex[number] = index }
+                if cards[number] == nil { cards[number] = card }
+                else { cards[number]?.events.append(contentsOf: card.events) }
+            case .assistant(let assistant) where finalAssistants[number] == assistant.id:
+                resultIndex[number] = index
+            case .turnOutcome:
+                outcomeIndex[number] = index
+            case .interaction(let interaction) where [.pending, .responding, .uncertain].contains(interaction.phase):
+                if pendingInteractionIndex[number] == nil { pendingInteractionIndex[number] = index }
+            default: break
+            }
+        }
+        var insertions: [Int: [(Int, WorkCard)]] = [:]
+        let latestTurn = items.map(\.turn).max()
+        for (number, var card) in cards {
+            let ending = endings[number]
+            if let ending {
+                switch ending.0 {
+                case .worked: card.phase = failedTurns.contains(number) ? .failed : .worked
+                case .failed: card.phase = .failed
+                case .stopped: card.phase = .stopped
+                }
+                card.finishedAt = ending.1
+            } else if isTurnActive && latestTurn == number {
+                card.phase = .working
+            } else if card.events.contains(where: { $0.outcome == .failed }) {
+                card.phase = .failed
+            } else if card.events.contains(where: { $0.outcome == .running }) {
+                card.phase = .working
+            } else if card.events.contains(where: { $0.outcome == .unknown }) {
+                card.phase = .unknown
+            } else {
+                card.phase = .worked
+            }
+            card.startedAt = card.events.compactMap { times[$0.id] }.min()
+            let anchor: Int
+            if ending?.0 == .worked, !failedTurns.contains(number), let index = resultIndex[number] { anchor = index }
+            else if let index = outcomeIndex[number] { anchor = index }
+            else if let index = pendingInteractionIndex[number] { anchor = index }
+            else if !isTurnActive, let index = firstWorkIndex[number] { anchor = index }
+            else { anchor = (lastIndex[number] ?? rows.count - 1) + 1 }
+            insertions[anchor, default: []].append((number, card))
+        }
+        var movedInteractions = Set<Int>()
+        var interactionsBefore: [Int: [TranscriptRow]] = [:]
+        for (index, row) in rows.enumerated() {
+            guard case .interaction(let interaction) = row,
+                  [.pending, .responding, .uncertain].contains(interaction.phase),
+                  let number = turn(of: row), let ending = endings[number] else { continue }
+            let anchor = ending.0 == .worked && !failedTurns.contains(number) ? resultIndex[number] : outcomeIndex[number]
+            guard let anchor, index > anchor else { continue }
+            movedInteractions.insert(index)
+            interactionsBefore[anchor, default: []].append(row)
+        }
+        var result: [TranscriptRow] = []
+        for index in 0...rows.count {
+            for (_, card) in (insertions[index] ?? []).sorted(by: { $0.0 < $1.0 }) { result.append(.work(card)) }
+            result.append(contentsOf: interactionsBefore[index] ?? [])
+            guard index < rows.count else { break }
+            if movedInteractions.contains(index) { continue }
+            if case .work = rows[index] { continue }
+            result.append(rows[index])
+        }
+        return result
+    }
+
+    private static func legacyRemoteActivityKind(_ code: String) -> WorkEventItem.Kind? {
+        switch code {
+        case "command", "file-change", "file-read", "file-search", "web-search", "tool": .tool
+        case "agent": .subagent
+        default: nil
+        }
     }
 
     static func readingPresentation(
         sourceID: String,
-        translation: TranslationSessionState?
+        translation: TranslationSessionState?,
+        sourceText: String? = nil
     ) -> ReadingTranslationPresentation {
         guard let translation else { return .none }
-        if let record = translation.records.first(where: { $0.sourceID == sourceID }) {
+        let needsHash = translation.reading[sourceID] != nil || translation.records.contains { $0.sourceID == sourceID }
+        let sourceHash = needsHash ? sourceText.map { SHA256.hash(data: Data($0.utf8)).map { String(format: "%02x", $0) }.joined() } : nil
+        if let reading = translation.reading[sourceID] {
+            let matches = sourceText == nil || (sourceHash != nil && reading.sourceSHA256?.lowercased() == sourceHash
+                && !translation.readingLanguage.isEmpty && reading.targetLanguage?.caseInsensitiveCompare(translation.readingLanguage) == .orderedSame)
+            if reading.uncertain || (!matches && reading.pending) { return .uncertain }
+            if matches && reading.pending { return .translating }
+            if matches, let error = reading.error { return .failed(error) }
+        }
+        let candidates = translation.records.reversed().filter { record in
+            record.sourceID == sourceID
+                && ((sourceText == nil && translation.readingLanguage.isEmpty) ||
+                    (!translation.readingLanguage.isEmpty && record.targetLanguage.caseInsensitiveCompare(translation.readingLanguage) == .orderedSame))
+        }
+        if let record = candidates.first(where: { record in sourceHash.map { record.sourceSHA256.lowercased() == $0 } ?? true }) {
             switch record.integrity {
             case .inlineVerified, .pagedVerified:
                 if record.presentableText != nil { return .translated(record) }
@@ -448,17 +622,15 @@ enum StoreProjection {
             case .descriptorPending:
                 return .needsPaging(record)
             case .hashMismatch, .lengthMismatch:
-                return .failed("Translation failed integrity checks.")
+                return .needsPaging(record)
             }
-        }
-        if let reading = translation.reading[sourceID] {
-            if reading.uncertain { return .uncertain }
-            if reading.pending { return .translating }
-            if let error = reading.error { return .failed(error) }
         }
         if let automatic = translation.automatic[sourceID] {
             if automatic.pending { return .translating }
             if let error = automatic.error { return .failed(error) }
+        }
+        if !candidates.isEmpty, sourceHash != nil {
+            return .unavailable("Translation does not match the displayed source.")
         }
         return .none
     }
@@ -487,13 +659,22 @@ enum StoreProjection {
                 translation: translationState,
                 agent: agent,
                 agentName: session.agentName,
-                now: Date()
+                now: Date(),
+                isTurnActive: isTurnActive
             ),
             hasOlderPages: conversation.hasOlder,
             connectivity: ConnectivityPresentation(state.connection),
             banner: banner(state),
             translation: translationPresentation,
-            isTurnActive: isTurnActive
+            isTurnActive: isTurnActive,
+            transcriptSync: conversation.transcriptSync,
+            queue: state.capabilities.state(of: .queueRead) == .supported ? session.queue : nil,
+            queueCommand: state.queueCommands[sessionID],
+            canUpdateQueue: state.capabilities.state(of: .queueUpdate) == .supported,
+            canRemoveQueue: state.capabilities.state(of: .queueRemove) == .supported,
+            canClearQueue: state.capabilities.state(of: .queueClear) == .supported,
+            canSendQueueNow: state.capabilities.state(of: .queueSendNow) == .supported
+                && (!isTurnActive || state.capabilities.state(of: .turnSteer) == .supported)
         )
     }
 

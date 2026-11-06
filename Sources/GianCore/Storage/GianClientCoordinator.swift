@@ -22,10 +22,18 @@ public final class GianClientCoordinator {
     private var refreshTask: Task<GianDispatchResult, Never>?
     private var reconciliationTask: Task<Void, Never>?
     private var directoryTask: Task<Void, Never>?
+    private var accessTask: Task<Void, Never>?
     private var invalidationTask: Task<Void, Never>?
     private var refreshID = 0
     private var reconciliationID = 0
     private var directoryID = 0
+    private var accessID = 0
+    var accessRevalidationSleep: (UInt64) async throws -> Void = { milliseconds in
+        try await Task.sleep(nanoseconds: milliseconds * 1_000_000)
+    }
+    var directoryRefreshSleep: (UInt64) async throws -> Void = { milliseconds in
+        try await Task.sleep(nanoseconds: milliseconds * 1_000_000)
+    }
     private var stopped = false
 
     public convenience init(store: GianClientStore, service: LiveGianClientService) throws {
@@ -53,6 +61,7 @@ public final class GianClientCoordinator {
         refreshTask?.cancel()
         reconciliationTask?.cancel()
         directoryTask?.cancel()
+        accessTask?.cancel()
         invalidationTask?.cancel()
     }
 
@@ -69,8 +78,10 @@ public final class GianClientCoordinator {
                 if result.isApplied {
                     if case .directory = envelope.event { self.queueReconciliation() }
                     if case .directoryChanged = envelope.event { self.queueDirectoryRefresh() }
+                    if self.store.directoryRefreshPending { self.queueDirectoryRefresh() }
                 }
                 self.queueRefreshIfNeeded()
+                self.queueSessionAccessRevalidation()
                 self.queuePendingInvalidation()
             }
             if let self, self.isRunning {
@@ -223,14 +234,20 @@ public final class GianClientCoordinator {
         case .setForeground(.background), .noteLocalConnectivity(.unavailable):
             cancelNetworkEffects()
         case .setForeground(.foreground), .noteLocalConnectivity(.available):
-            if result.isApplied { queueRefreshIfNeeded() }
+            if result.isApplied { queueRefreshIfNeeded(); queueDirectoryRefresh() }
         case .refreshDirectory:
-            if result.isApplied { queueReconciliation(); queueDirectoryRefresh() }
-            else if result == .rejected(.staleOperation) { queueRefreshIfNeeded() }
-        case .selectConversation, .openBanner, .selectHost, .refreshHostPairing, .beginHostPairingFromQR:
             if result.isApplied { queueReconciliation() }
+            if result == .rejected(.staleOperation) { queueRefreshIfNeeded() }
+            queueDirectoryRefresh()
+        case .selectDirectoryView, .loadMoreDirectory, .refreshDirectoryView, .search:
+            queueDirectoryRefresh()
+        case .send, .recoverUncertainOperation:
+            queueDirectoryRefresh()
+        case .selectConversation, .retryTranscriptSync, .selectSearchResult, .openBanner, .selectHost, .refreshHostPairing, .beginHostPairingFromQR:
+            if result.isApplied { queueReconciliation(); queueDirectoryRefresh() }
         default: break
         }
+        queueSessionAccessRevalidation()
     }
 
     func willDispatch(_ action: GianClientAction) {
@@ -244,7 +261,7 @@ public final class GianClientCoordinator {
             }
         case .selectHost(let host):
             if store.state.phase == .ready, store.state.hosts.contains(where: { $0.id == host }) { cancelNetworkEffects() }
-        case .selectConversation, .openBanner, .openNewChat, .returnHome:
+        case .selectConversation, .retryTranscriptSync, .selectSearchResult, .openBanner, .openNewChat, .returnHome:
             reconciliationID += 1
             reconciliationTask?.cancel()
             reconciliationTask = nil
@@ -253,6 +270,8 @@ public final class GianClientCoordinator {
     }
 
     func didChangeServiceEpoch() {
+        accessID += 1
+        accessTask?.cancel(); accessTask = nil
         directoryID += 1
         directoryTask?.cancel(); directoryTask = nil
         reconciliationID += 1
@@ -271,6 +290,8 @@ public final class GianClientCoordinator {
     }
 
     private func cancelNetworkEffects() {
+        accessID += 1
+        accessTask?.cancel(); accessTask = nil
         directoryID += 1
         directoryTask?.cancel(); directoryTask = nil
         refreshID += 1
@@ -285,6 +306,58 @@ public final class GianClientCoordinator {
             guard let self else { return }
             defer { self.invalidationTask = nil }
             await self.store.finishPendingRemoteLogout()
+        }
+    }
+
+    private func queueSessionAccessRevalidation() {
+        guard isRunning, !stopped, accessTask == nil, !store.pendingSessionAccess.isEmpty,
+              store.directoryReadyForRecovery(), let scope = store.readyScope(),
+              let checker = runtime as? any SessionAccessRevalidating else { return }
+        let ownerEpoch = store.epoch
+        let serviceEpoch = runtime.eventEpoch
+        accessID += 1
+        let request = accessID
+        accessTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.accessID == request {
+                    self.accessTask = nil
+                    if !Task.isCancelled, self.store.readyScope() == scope, self.store.epoch == ownerEpoch {
+                        self.queueSessionAccessRevalidation()
+                    }
+                }
+            }
+            var delay: UInt64 = 250
+            var previous: SessionID?
+            while !Task.isCancelled, self.accessID == request, self.store.readyScope() == scope,
+                  self.store.epoch == ownerEpoch, self.runtime.eventEpoch == serviceEpoch,
+                  self.store.directoryReadyForRecovery(), !self.store.pendingSessionAccess.isEmpty {
+                do { try await self.accessRevalidationSleep(delay) } catch { return }
+                guard !Task.isCancelled, self.accessID == request, self.store.readyScope() == scope,
+                      self.store.epoch == ownerEpoch, self.runtime.eventEpoch == serviceEpoch,
+                      self.store.directoryReadyForRecovery() else { return }
+                let ids = self.store.pendingSessionAccess.keys.sorted { $0.rawValue < $1.rawValue }
+                let preferred = self.store.currentSessionID.flatMap { id in
+                    self.store.pendingSessionAccess[id] != nil && (previous != id || ids.count == 1) ? id : nil
+                }
+                guard let id = preferred ?? ids.first(where: { candidate in previous.map { candidate.rawValue > $0.rawValue } ?? true }) ?? ids.first,
+                      let version = self.store.pendingSessionAccess[id] else { return }
+                previous = id
+                let membership = (self.runtime as? any DirectoryMembershipEpoch)?.directoryMembershipGeneration
+                let cursor = self.store.state.sync.cursor
+                let directoryGeneration = self.store.directorySequence
+                let result = await checker.revalidateSessionAccess(scope: scope, session: id)
+                guard !Task.isCancelled, self.accessID == request, self.store.readyScope() == scope,
+                      self.store.epoch == ownerEpoch, self.runtime.eventEpoch == serviceEpoch,
+                      self.store.directoryReadyForRecovery(), self.store.state.sync.cursor == cursor,
+                      self.store.directorySequence == directoryGeneration,
+                      membership == (self.runtime as? any DirectoryMembershipEpoch)?.directoryMembershipGeneration else {
+                    delay = min(delay * 2, 30_000); continue
+                }
+                self.store.resolveSessionAccess(result, session: id, version: version, scope: scope)
+                if result == .unavailable { self.queueDirectoryRefresh() }
+                delay = result == .retry ? min(delay * 2, 30_000) : 250
+            }
         }
     }
 
@@ -308,11 +381,32 @@ public final class GianClientCoordinator {
         directoryTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { if self.directoryID == request { self.directoryTask = nil } }
-            for _ in 0..<3 {
-                guard !Task.isCancelled, self.directoryID == request, self.store.readyScope() == scope, self.runtime.eventEpoch == serviceEpoch else { return }
+            var retryDelay: UInt64 = 250
+            // Coalesce a short burst of Host hints, but do not postpone reads
+            // indefinitely when updates continue to arrive.
+            for _ in 0..<4 {
+                let observed = self.store.directorySequence
+                do { try await self.directoryRefreshSleep(250) } catch { return }
+                guard !Task.isCancelled, self.directoryID == request, self.store.readyScope() == scope,
+                      self.runtime.eventEpoch == serviceEpoch else { return }
+                if self.store.directorySequence == observed { break }
+            }
+            while !Task.isCancelled, self.directoryID == request, self.store.readyScope() == scope,
+                  self.runtime.eventEpoch == serviceEpoch, self.store.directoryReadyForRecovery(), self.store.directoryRefreshPending {
+                let generation = self.store.directorySequence
                 let result = await self.store.refreshLoadedDirectoryViews()
-                if result.isApplied { self.queueReconciliation(); return }
-                if result != .rejected(.staleOperation) { return }
+                guard !Task.isCancelled, self.directoryID == request, self.store.readyScope() == scope,
+                      self.runtime.eventEpoch == serviceEpoch else { return }
+                switch result {
+                case .complete:
+                    if generation == self.store.directorySequence && !self.store.directoryRefreshPending {
+                        self.queueReconciliation(); return
+                    }
+                case .blocked: return
+                case .incomplete: retryDelay = 250
+                case .stale, .failed: retryDelay = min(retryDelay * 2, 30_000)
+                }
+                do { try await self.directoryRefreshSleep(retryDelay) } catch { return }
             }
         }
     }

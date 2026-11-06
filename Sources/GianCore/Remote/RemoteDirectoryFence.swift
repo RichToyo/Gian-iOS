@@ -30,4 +30,9 @@ extension LiveGianClientService {
         catalog = nil
         stagedSnapshot = nil
     }
+
+    func invalidateInFlightDirectoryRead() {
+        directoryInvalidationGeneration += 1
+        stagedSnapshot = nil
+    }
 }

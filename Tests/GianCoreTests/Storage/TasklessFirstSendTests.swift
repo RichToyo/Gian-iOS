@@ -4,6 +4,53 @@ import Testing
 
 @MainActor
 struct TasklessFirstSendTests {
+    @Test func confirmedFirstSendHasTransientRepoRowWithoutFabricatedActivity() async throws {
+        let service = DirectoryFixtureService()
+        service.createWithoutActivity = true
+        service.pages[.tasks] = [directoryPage(.tasks)]
+        service.pages[.repos] = [directoryPage(.repos)]
+        let clock = ManualGianClock(instant: PreviewFixtures.instant)
+        let store = GianClientStore(service: service, clock: clock)
+        _ = try await signIn(store, clock: clock)
+        _ = await store.dispatch(.selectDirectoryView(.repos))
+        await prepareComposer(store, text: "First message", task: false)
+        _ = await store.dispatch(.send)
+        let id = try #require(store.state.composer.send.intent?.sessionID)
+        #expect(store.state.directory.temporaryCreatedResults.map(\.id) == [id])
+        #expect(store.sessions.first(where: { $0.id == id })?.lastActivityAt == nil)
+        #expect(store.sessions.first(where: { $0.id == id })?.activityIsMessageOrExecution == false)
+        var idle = try #require(store.sessions.first(where: { $0.id == id }))
+        idle.status = .done
+        _ = store.ingest(InboundEnvelope(scope: try clientScope(store), event: .sessionMetadata(idle, interactions: [])))
+        #expect(store.state.directory.temporaryCreatedResults.map(\.id) == [id])
+        idle.lastActivityAt = clock.instant
+        idle.activityIsMessageOrExecution = true
+        let workspace = try #require(store.state.workspaces.first(where: { $0.id == idle.workspaceID }))
+        service.pages[.repos] = [directoryPage(.repos, [DirectoryEntry(session: idle, workspace: workspace, task: nil, searchName: idle.title)])]
+        _ = await store.dispatch(.refreshDirectoryView(.repos))
+        #expect(store.state.directory.temporaryCreatedResults.isEmpty)
+        #expect(store.state.directory.repos.map(\.id) == [id])
+        store.state.navigation.directoryView = .tasks
+        store.reproject()
+        #expect(store.state.directory.temporaryCreatedResults.isEmpty)
+        #expect(!store.state.directory.tasks.flatMap(\.conversations).contains { $0.id == id })
+    }
+
+    @Test func unknownFirstSendDoesNotPromoteEmptyCreatedSession() async throws {
+        let service = DirectoryFixtureService()
+        service.createWithoutActivity = true
+        service.base.script.commandBehavior = .createSucceedsSendUnknown
+        service.pages[.tasks] = [directoryPage(.tasks)]
+        service.pages[.repos] = [directoryPage(.repos)]
+        let clock = ManualGianClock(instant: PreviewFixtures.instant)
+        let store = GianClientStore(service: service, clock: clock)
+        _ = try await signIn(store, clock: clock)
+        _ = await store.dispatch(.selectDirectoryView(.repos))
+        await prepareComposer(store, text: "First message", task: false)
+        _ = await store.dispatch(.send)
+        #expect(store.state.directory.temporaryCreatedResults.isEmpty)
+        #expect(store.locallyCreatedWithActivity.isEmpty)
+    }
     @Test func tasklessFirstSendFreezesIndependentCreateAndSendBeforeEffects() async throws {
         let service = DirectoryFixtureService()
         service.pages[.tasks] = [directoryPage(.tasks)]

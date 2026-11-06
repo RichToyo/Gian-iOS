@@ -4,6 +4,23 @@ public enum DirectoryCollection: String, Codable, Sendable, CaseIterable {
     case tasks, repos, search
 }
 
+public enum DirectoryTimeFilter: String, Codable, Sendable, CaseIterable {
+    case lastHour, last24Hours, last7Days
+
+    public var duration: TimeInterval {
+        switch self {
+        case .lastHour: 60 * 60
+        case .last24Hours: 24 * 60 * 60
+        case .last7Days: 7 * 24 * 60 * 60
+        }
+    }
+
+    public func includes(_ session: SessionRecord, now: Date) -> Bool {
+        guard session.activityIsMessageOrExecution, let activity = session.lastActivityAt else { return false }
+        return activity >= now.addingTimeInterval(-duration)
+    }
+}
+
 public enum DirectoryPagePhase: String, Codable, Sendable {
     case idle, loading, incomplete, complete, cursorInvalid, failed, denied, unsupported
 }
@@ -35,9 +52,11 @@ public struct DirectoryEntry: Codable, Sendable, Equatable {
     public var session: SessionRecord
     public var workspace: WorkspaceRecord
     public var task: TaskRecord?
+    /// Host-provided name, distinct from the display placeholder for a null name.
+    public var searchName: String?
 
-    public init(session: SessionRecord, workspace: WorkspaceRecord, task: TaskRecord?) {
-        self.session = session; self.workspace = workspace; self.task = task
+    public init(session: SessionRecord, workspace: WorkspaceRecord, task: TaskRecord?, searchName: String? = nil) {
+        self.session = session; self.workspace = workspace; self.task = task; self.searchName = searchName
     }
 }
 
@@ -78,6 +97,10 @@ public enum DirectoryPageResponse: Sendable, Equatable {
     case failed(String)
 }
 
+enum DirectoryRefreshOutcome: Equatable {
+    case complete, incomplete, failed, stale, blocked
+}
+
 /// A traversal is independent of legacy snapshots and canonical replay. Cursors
 /// are opaque and are discarded across reconnects, query changes and restarts.
 public struct StoredDirectoryView: Codable, Sendable, Equatable {
@@ -91,10 +114,15 @@ public struct StoredDirectoryView: Codable, Sendable, Equatable {
     public var status = DirectoryPageStatus()
 
     public init() {}
-    public var visibleEntries: [DirectoryEntry] { entries.isEmpty ? pendingEntries ?? [] : entries }
+    public var visibleEntries: [DirectoryEntry] {
+        guard let pendingEntries else { return entries }
+        var combined = entries.reduce(into: [SessionID: DirectoryEntry]()) { $0[$1.session.id] = $1 }
+        for entry in pendingEntries { combined[entry.session.id] = entry }
+        return combined.values.sorted { $0.session.id.rawValue < $1.session.id.rawValue }
+    }
 
     mutating func invalidate() {
-        if entries.isEmpty { entries = pendingEntries ?? [] }
+        entries = visibleEntries
         pendingEntries = nil; cursor = nil; revision = nil; asOf = nil; visitedCursors = []
         status = DirectoryPageStatus()
     }

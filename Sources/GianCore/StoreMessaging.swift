@@ -1,6 +1,104 @@
 import Foundation
 
 extension GianClientStore {
+    func mutateQueue(_ mutation: QueueMutation) async -> GianDispatchResult {
+        guard let scope = readyScope(), let sessionID = currentSessionID,
+              let session = sessions.first(where: { $0.id == sessionID && $0.authorized && !$0.archived }),
+              let queue = session.queue, !sessionAccessOverflow,
+              pendingSessionAccess[sessionID] == nil, !deniedSessionAccess.contains(sessionID) else { return reject(.notFound) }
+        guard mutationsAllowed() else { return reject(.mutationsDisabled) }
+        if let status = state.queueCommands[sessionID] {
+            switch status {
+            case .pending: return reject(.operationInFlight)
+            case .uncertain: return reject(.uncertainOutcome)
+            case .failed: break
+            }
+        }
+        let capability: BusinessCapability
+        switch mutation {
+        case .update(let id, let text):
+            guard let entry = queue.entries.first(where: { $0.id == id }),
+                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || entry.attachmentCount > 0,
+                  text.utf8.count <= 120_000 else { return reject(.notFound) }
+            capability = .queueUpdate
+        case .remove(let id):
+            guard queue.entries.contains(where: { $0.id == id }) else { return reject(.notFound) }
+            capability = .queueRemove
+        case .clear:
+            guard !queue.entries.isEmpty else { return reject(.notFound) }
+            capability = .queueClear
+        case .sendNow:
+            guard !queue.entries.isEmpty else { return reject(.notFound) }
+            if session.status == .running || session.status == .pending {
+                if let code = requireCapability(.turnSteer) { return reject(code) }
+            }
+            capability = .queueSendNow
+        }
+        if let code = requireCapability(capability) { return reject(code) }
+        let command: CommandID = mint()
+        let token = epoch
+        state.queueCommands[sessionID] = .pending(command)
+        guard persist() else {
+            state.queueCommands[sessionID] = .failed("Local storage is unavailable. No queue change was sent.")
+            return reject(.mutationsDisabled)
+        }
+        let response = await service.mutateQueue(scope: scope, request: QueueMutationRequest(
+            commandID: command, sessionID: sessionID, revision: queue.revision, mutation: mutation
+        ))
+        guard responseIsCurrent(token), readyScope() == scope,
+              state.queueCommands[sessionID] == .pending(command) else { return reject(.staleOperation) }
+        switch response {
+        case .succeeded(let result):
+            guard result.commandID == command, let replacement = result.queue else {
+                state.queueCommands[sessionID] = .uncertain(command)
+                _ = persist()
+                return reject(.uncertainOutcome)
+            }
+            if let index = sessions.firstIndex(where: { $0.id == sessionID && $0.authorized }),
+               sessions[index].queue?.revision == queue.revision {
+                sessions[index].queue = replacement
+                if state.conversation?.session.id == sessionID { state.conversation?.session = sessions[index] }
+            }
+            state.queueCommands[sessionID] = nil
+            reproject()
+            return persistenceResult()
+        case .failed(let id, let message) where id == command:
+            state.queueCommands[sessionID] = .failed(message)
+            _ = persist()
+            return reject(.staleOperation)
+        default:
+            state.queueCommands[sessionID] = .uncertain(command)
+            _ = persist()
+            return reject(.uncertainOutcome)
+        }
+    }
+
+    func recoverQueueCommand() async -> GianDispatchResult {
+        guard let scope = readyScope(), let sessionID = currentSessionID,
+              case .uncertain(let command) = state.queueCommands[sessionID] else { return reject(.notFound) }
+        let token = epoch
+        let response = await service.queryCommand(scope: scope, commandID: command)
+        guard responseIsCurrent(token), readyScope() == scope,
+              state.queueCommands[sessionID] == .uncertain(command) else { return reject(.staleOperation) }
+        guard response.commandID == command else { return reject(.uncertainOutcome) }
+        switch response {
+        case .succeeded:
+            let refreshed = await refresh()
+            guard responseIsCurrent(token), readyScope() == scope,
+                  state.queueCommands[sessionID] == .uncertain(command), refreshed.isApplied,
+                  sessions.first(where: { $0.id == sessionID && $0.authorized && !$0.archived })?.queue != nil
+            else { return reject(.uncertainOutcome) }
+            state.queueCommands[sessionID] = nil
+            return persistenceResult()
+        case .failed(_, let message):
+            state.queueCommands[sessionID] = .failed(message)
+            _ = persist()
+            return reject(.staleOperation)
+        case .notSeen, .accepted, .unknownOutcome, .expired:
+            return reject(.uncertainOutcome)
+        }
+    }
+
     func performSend(explicitOriginal: Bool, reusedRequestID: TranslationRequestID?) async -> GianDispatchResult {
         guard let scope = readyScope() else { return reject(.notAuthorized) }
         if state.localConnectivity == .unavailable || state.connection == .offline {
@@ -303,12 +401,21 @@ extension GianClientStore {
                     state.composer.send = .uncertain(intent)
                     return
                 }
+                if sessionAccessOverflow || deniedSessionAccess.contains(session.id) {
+                    intent.sessionID = session.id
+                    state.composer.draft.boundSessionID = session.id
+                    state.composer.draft.boundCreationID = intent.creationID
+                    state.composer.send = .failed(intent, message: "The conversation is unavailable. The draft was kept.")
+                    rememberDraft()
+                    return
+                }
                 bind(session, intent: &intent)
                 intent.stage = .create
                 state.composer.send = .failed(intent, message: "The conversation was created. The message was not sent.")
             } else {
                 clearSubmittedDraft(intent)
                 state.composer.send = .succeeded(intent)
+                if let session = intent.sessionID { noteCreatedActivity(session) }
                 state.composer.notice = .none
             }
         }
@@ -320,6 +427,7 @@ extension GianClientStore {
             return reject(.notFound)
         }
         let interaction = state.interactions[index]
+        guard pendingSessionAccess[interaction.sessionID] == nil, !deniedSessionAccess.contains(interaction.sessionID) else { return reject(.mutationsDisabled) }
         guard interaction.phase == .pending else { return reject(.interactionNotPending) }
         guard interaction.actions.contains(where: { $0.id == actionID }) else { return reject(.unknownActionID) }
         let knownInputs = Set(interaction.inputs.map(\.id))
@@ -453,12 +561,18 @@ extension GianClientStore {
         guard let attachment = state.composer.draft.attachments.first(where: { $0.id == id }) else {
             return await downloadTranscriptFile(id)
         }
+        let draftID = state.composer.draft.id
+        let owner: SessionID?
+        if case .conversation(let session) = state.composer.draft.target { owner = session }
+        else { owner = state.composer.draft.boundSessionID }
         if let cached = memory.bundle(for: scope).downloads[id],
            cached.count == attachment.byteCount, SHA256Hex.digest(cached) == attachment.sha256 {
             if let index = state.composer.draft.attachments.firstIndex(where: { $0.id == id }) {
                 state.composer.draft.attachments[index].state = .cached
             }
-            return .applied
+            if let owner { memory.update(scope) { $0.noteDownloadOwner(id, session: owner) } }
+            rememberDraft()
+            return persistenceResult()
         }
         if let code = requireCapability(.attachmentRead) { return reject(code) }
         guard let index = state.composer.draft.attachments.firstIndex(where: { $0.id == id }) else { return reject(.notFound) }
@@ -468,7 +582,8 @@ extension GianClientStore {
             scope: scope,
             request: AttachmentDownloadRequest(attachmentID: attachment.remoteID ?? id, sha256: attachment.sha256)
         )
-        guard responseIsCurrent(token), let current = state.composer.draft.attachments.firstIndex(where: { $0.id == id }) else {
+        guard responseIsCurrent(token), state.composer.draft.id == draftID,
+              let current = state.composer.draft.attachments.firstIndex(where: { $0.id == id }) else {
             return reject(.staleOperation)
         }
         switch response {
@@ -476,7 +591,7 @@ extension GianClientStore {
             let actual = SHA256Hex.digest(bytes)
             if actual == sha && actual == attachment.sha256, bytes.count == attachment.byteCount,
                AttachmentRules.accepts(byteCount: bytes.count) {
-                memory.update(scope) { $0.cacheDownload(bytes, id: id) }
+                memory.update(scope) { $0.cacheDownload(bytes, id: id, session: owner) }
                 state.composer.draft.attachments[current].state = .cached
             } else {
                 state.composer.draft.attachments[current].state = .hashMismatch
@@ -588,10 +703,28 @@ extension GianClientStore {
                 persist()
                 return .applied
             }
+            if sessionAccessOverflow || deniedSessionAccess.contains(session.id) {
+                intent.sessionID = session.id
+                state.composer.draft.boundSessionID = session.id
+                state.composer.draft.boundCreationID = intent.creationID
+                state.composer.send = .failed(intent, message: "The conversation is unavailable. The draft was kept.")
+                rememberDraft(); persist()
+                return reject(.notAuthorized)
+            }
             bind(session, intent: &intent)
             draft = state.composer.draft
+            if pendingSessionAccess[session.id] != nil {
+                state.composer.send = .failed(intent, message: "Conversation access is being verified. The draft was kept.")
+                persist()
+                return reject(.mutationsDisabled)
+            }
             await applyNewChatApproval(approvalMode, to: session, scope: scope)
             guard responseIsCurrent(token), navigation == navigationEpoch else { return reject(.staleOperation) }
+            guard mutationsAllowed() else {
+                state.composer.send = .failed(intent, message: "Conversation access is being verified. The draft was kept.")
+                persist()
+                return reject(.mutationsDisabled)
+            }
             return nil
         default:
             state.composer.send = .uncertain(intent)
@@ -613,6 +746,11 @@ extension GianClientStore {
         draft: DraftDocument
     ) async -> GianDispatchResult? {
         guard let sessionID = intent.sessionID else { return reject(.notFound) }
+        guard mutationsAllowed(), pendingSessionAccess[sessionID] == nil, !deniedSessionAccess.contains(sessionID) else {
+            state.composer.send = .failed(intent, message: "Conversation access is being verified. The draft was kept.")
+            persist()
+            return reject(.mutationsDisabled)
+        }
         let translation = state.translations[sessionID] ?? .unsupported
         if !translation.configured {
             state.composer.notice = .translationNeedsChoice
@@ -715,14 +853,19 @@ extension GianClientStore {
 
     private func deliver(scope: ClientScope, intent: inout DurableSendIntent, draft: DraftDocument) async -> GianDispatchResult {
         guard let sessionID = intent.sessionID else { return reject(.notFound) }
-        if let session = sessions.first(where: { $0.id == sessionID }),
-           session.status == .running || session.status == .pending {
-            if let code = requireCapability(.queueAdd) { return reject(code) }
-        }
         if intent.sendDispatched {
             state.composer.send = .uncertain(intent)
             persist()
             return .applied
+        }
+        guard mutationsAllowed(), pendingSessionAccess[sessionID] == nil, !deniedSessionAccess.contains(sessionID) else {
+            state.composer.send = .failed(intent, message: "Conversation access is being verified. The draft was kept.")
+            persist()
+            return reject(.mutationsDisabled)
+        }
+        if let session = sessions.first(where: { $0.id == sessionID }),
+           session.status == .running || session.status == .pending {
+            if let code = requireCapability(.queueAdd) { return reject(code) }
         }
         let sendID: CommandID = mint()
         intent.sendID = sendID
@@ -753,6 +896,7 @@ extension GianClientStore {
         }
         let token = epoch
         let navigation = navigationEpoch
+        let queueRevision = sessions.first(where: { $0.id == sessionID })?.queue?.revision
         let response = await service.sendMessage(
             scope: scope,
             request: request
@@ -763,8 +907,16 @@ extension GianClientStore {
         }
         switch response {
         case .succeeded(let success) where success.commandID == sendID:
+            if let confirmed = success.session, confirmed.id == sessionID, confirmed.hostID == scope.host,
+               confirmed.authorized, !confirmed.archived, let replacement = confirmed.queue,
+               let index = sessions.firstIndex(where: { $0.id == sessionID && $0.authorized }),
+               sessions[index].queue?.revision == queueRevision {
+                sessions[index].queue = replacement
+                if state.conversation?.session.id == sessionID { state.conversation?.session = sessions[index] }
+            }
             clearSubmittedDraft(intent)
             state.composer.send = .succeeded(intent)
+            if let session = intent.sessionID { noteCreatedActivity(session) }
             state.composer.notice = .none
         case .failed(let id, let message) where id == sendID:
             state.composer.send = .failed(intent, message: message)
@@ -779,6 +931,11 @@ extension GianClientStore {
 
     private func bind(_ session: SessionRecord, intent: inout DurableSendIntent) {
         upsertSession(session)
+        if negotiatedDirectory {
+            locallyCreatedSessions.insert(session.id)
+            directoryRefreshPending = true
+            invalidateDirectoryViews()
+        }
         intent.sessionID = session.id
         state.composer.draft.boundSessionID = session.id
         state.composer.draft.boundCreationID = intent.creationID
@@ -804,7 +961,11 @@ extension GianClientStore {
             state.composer.draft.attachments = []
             state.composer.draft.localRevision += 1
         }
-        memory.update(scope) { $0.submittedDrafts[intent.draftID] = nil }
+        let drafts = state.drafts.filter { $0.id != state.composer.draft.id } + [state.composer.draft]
+        memory.update(scope) {
+            $0.submittedDrafts[intent.draftID] = nil
+            $0.releaseConfirmedDraftBytes(submitted, currentDrafts: drafts)
+        }
     }
 
     private func resolveTranslation(_ status: TranslationCommandResponse, intent: DurableSendIntent) {

@@ -34,6 +34,8 @@ extension EnvironmentValues {
     /// everywhere except the expanded portrait layout, whose bars stay
     /// horizontal (set by `AdaptiveRoot`).
     @Entry var globalActionsAtBottom = true
+    /// The full-page expanded portrait directory puts list controls on the left.
+    @Entry var directoryActionsLeading = false
 }
 
 /// New chat and Settings are global, so every screen's bar carries them as one

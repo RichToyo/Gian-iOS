@@ -3,8 +3,8 @@ import Testing
 @testable import GianCore
 
 @MainActor
-func wireDirectoryEntry(_ fixture: RemoteFixture, task: Bool = false) -> WireValue {
-    .object(["id": .string(fixture.sessionID), "revision": .string("session-r1"), "name": .string("Unrelated title"),
+func wireDirectoryEntry(_ fixture: RemoteFixture, task: Bool = false, name: WireValue = .string("Unrelated title")) -> WireValue {
+    .object(["id": .string(fixture.sessionID), "revision": .string("session-r1"), "name": name,
         "workspace": .object(["id": .string(fixture.workspaceID), "name": .string("Repository")]),
         "task": task ? .object(["id": .string(fixture.taskID), "name": .string("Incomplete Task"), "status": .string("open")]) : .null,
         "agent": .object(["id": .string(fixture.agentID), "name": .string("Agent"), "proxy": .string("fixture")]),
@@ -21,6 +21,42 @@ func wireDirectoryPage(_ fixture: RemoteFixture, view: String = "repos", state: 
 
 @MainActor
 struct RemoteDirectoryTests {
+    @Test func accessRevalidationUsesOnePageWithoutChangingSubscription() async throws {
+        let (fixture, socket) = try await connected()
+        let session = try #require(SessionID(rawValue: fixture.sessionID))
+        fixture.service.subscribedSession = session
+        let before = socket.commandRequests.count
+        let outcome = await fixture.service.revalidateSessionAccess(scope: fixture.scope, session: session)
+        #expect(outcome == .authorized)
+        #expect(fixture.service.subscribedSession == session)
+        let commands = Array(socket.commandRequests.dropFirst(before))
+        #expect(commands.count == 1)
+        #expect(try commands.first?.string("method") == "session.page")
+        #expect(try commands.first?["params"].integer("turns") == 1)
+        socket.pageDenied = true
+        #expect(await fixture.service.revalidateSessionAccess(scope: fixture.scope, session: session) == .unavailable)
+        #expect(fixture.service.subscribedSession == session)
+        await fixture.service.disconnect()
+    }
+    @Test func directoryHintDoesNotDiscardActiveTranscriptSubscription() async throws {
+        let (fixture, _) = try await connected()
+        let session = try #require(SessionID(rawValue: fixture.sessionID))
+        fixture.service.subscribedSession = session
+        let before = fixture.service.directoryMembershipGeneration
+        try fixture.service.receive(.object(["type": .string("directory.changed"), "version": .int(1),
+            "host_generation": .string(fixture.generation), "revision": .string("directory-change")]), scope: fixture.scope)
+        #expect(fixture.service.subscribedSession == session)
+        #expect(fixture.service.directoryMembershipGeneration == before + 1)
+        await fixture.service.disconnect()
+    }
+    @Test func nullWireNameDoesNotBecomeASearchablePlaceholder() throws {
+        let fixture = RemoteFixture()
+        let entry = try RemoteMapping.directoryEntry(wireDirectoryEntry(fixture, name: .null),
+                                                     host: fixture.scope.host, asOf: PreviewFixtures.instant)
+        #expect(entry.session.title == "Untitled")
+        #expect(entry.searchName == nil)
+    }
+
     private func connected(enabled: Bool = true) async throws -> (RemoteFixture, FixtureRelaySocket) {
         let fixture = RemoteFixture()
         try await fixture.connectAndClaim()
@@ -43,6 +79,7 @@ struct RemoteDirectoryTests {
         guard case .page(let next) = await fixture.service.listDirectory(scope: fixture.scope,
             request: DirectoryPageRequest(view: .search, query: "old message", cursor: page.nextCursor)) else { Issue.record("Expected continuation"); return }
         #expect(next.entries.first?.session.title == "Unrelated title")
+        #expect(next.entries.first?.searchName == "Unrelated title")
         #expect(next.entries.first?.session.archived == false)
         #expect(next.entries.first?.session.completedAt != nil)
         #expect(next.entries.first?.session.lastActivityAt == nil)

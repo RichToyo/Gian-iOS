@@ -7,11 +7,13 @@ import GianCore
 struct WorkCardView: View {
     let card: WorkCard
     @State private var isExpanded: Bool
+    @State private var followsLatest = true
+    @State private var nearBottom = true
+    @State private var userScrolling = false
 
     init(card: WorkCard) {
         self.card = card
-        // Failures stay expanded; ordinary details collapse.
-        _isExpanded = State(initialValue: card.phase == .failed)
+        _isExpanded = State(initialValue: false)
     }
 
     var body: some View {
@@ -19,11 +21,37 @@ struct WorkCardView: View {
             header
             if isExpanded {
                 Divider().overlay(GianTheme.Colors.separator)
-                VStack(spacing: 0) {
-                    ForEach(card.events) { event in
-                        WorkEventRow(event: event)
-                        if event.id != card.events.last?.id {
-                            Divider().overlay(GianTheme.Colors.separator)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(card.events) { event in
+                                WorkEventRow(event: event).id(event.id)
+                                if event.id != card.events.last?.id {
+                                    Divider().overlay(GianTheme.Colors.separator)
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 160)
+                    .defaultScrollAnchor(.bottom, for: .initialOffset)
+                    .onScrollGeometryChange(for: Bool.self) { geometry in
+                        geometry.contentSize.height - geometry.visibleRect.maxY <= 40
+                    } action: { _, value in
+                        nearBottom = value
+                        if userScrolling { followsLatest = value }
+                    }
+                    .onScrollPhaseChange { _, phase in
+                        switch phase {
+                        case .tracking, .interacting, .decelerating: userScrolling = true
+                        case .idle:
+                            if userScrolling { followsLatest = nearBottom }
+                            userScrolling = false
+                        default: break
+                        }
+                    }
+                    .onChange(of: card.events.count) { _, _ in
+                        if followsLatest, !userScrolling, let last = card.events.last {
+                            proxy.scrollTo(last.id, anchor: .bottom)
                         }
                     }
                 }
@@ -54,10 +82,16 @@ struct WorkCardView: View {
                 Text(headerLabel)
                     .font(GianTheme.Typography.caption.weight(.semibold))
                     .foregroundStyle(headerColor)
+                elapsedLabel
                 Text("· \(card.events.count) step\(card.events.count == 1 ? "" : "s")")
                     .font(GianTheme.Typography.caption)
                     .foregroundStyle(GianTheme.Colors.secondaryLabel)
                     .lineLimit(1)
+                if card.events.contains(where: { $0.kind == .warning }) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(GianTheme.Colors.warning)
+                        .accessibilityLabel("Contains a guardian warning")
+                }
                 Spacer(minLength: 0)
                 Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                     .font(.caption.weight(.semibold))
@@ -77,6 +111,7 @@ struct WorkCardView: View {
         case .worked: "Worked"
         case .failed: "Failed"
         case .stopped: "Stopped"
+        case .unknown: "Activity"
         }
     }
 
@@ -85,7 +120,32 @@ struct WorkCardView: View {
         case .working: GianTheme.Colors.tint
         case .worked: GianTheme.Colors.success
         case .failed, .stopped: GianTheme.Colors.failure
+        case .unknown: GianTheme.Colors.secondaryLabel
         }
+    }
+
+    @ViewBuilder
+    private var elapsedLabel: some View {
+        if let started = card.startedAt {
+            if card.phase == .working {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    Text(Self.elapsed(from: started, to: context.date))
+                        .font(GianTheme.Typography.caption)
+                        .foregroundStyle(GianTheme.Colors.secondaryLabel)
+                }
+            } else if let finished = card.finishedAt {
+                Text(Self.elapsed(from: started, to: finished))
+                    .font(GianTheme.Typography.caption)
+                    .foregroundStyle(GianTheme.Colors.secondaryLabel)
+            }
+        }
+    }
+
+    private static func elapsed(from start: Date, to end: Date) -> String {
+        let interval = end.timeIntervalSince(start)
+        let seconds = interval.isFinite ? Int(max(0, min(interval, 359_999))) : 0
+        if seconds >= 3_600 { return String(format: "%d:%02d:%02d", seconds / 3_600, seconds / 60 % 60, seconds % 60) }
+        return String(format: "%d:%02d", seconds / 60, seconds % 60)
     }
 
     @ViewBuilder
@@ -99,6 +159,9 @@ struct WorkCardView: View {
         case .failed, .stopped:
             Image(systemName: "exclamationmark.circle.fill")
                 .foregroundStyle(GianTheme.Colors.failure)
+        case .unknown:
+            Image(systemName: "info.circle")
+                .foregroundStyle(GianTheme.Colors.secondaryLabel)
         }
     }
 }
@@ -135,6 +198,7 @@ struct WorkEventRow: View {
         case .webSearch: "globe"
         case .tool: "wrench.and.screwdriver"
         case .subagent: "person.2"
+        case .warning: "exclamationmark.triangle"
         }
     }
 
@@ -146,11 +210,15 @@ struct WorkEventRow: View {
         case .done:
             Text(event.statusText.isEmpty ? "Done" : event.statusText)
                 .font(GianTheme.Typography.caption)
-                .foregroundStyle(GianTheme.Colors.success)
+                .foregroundStyle(event.kind == .warning ? GianTheme.Colors.warning : GianTheme.Colors.success)
         case .failed:
             Text(event.statusText.isEmpty ? "Failed" : event.statusText)
                 .font(GianTheme.Typography.caption)
                 .foregroundStyle(GianTheme.Colors.failure)
+        case .unknown:
+            Text(event.statusText.isEmpty ? "Status unavailable" : event.statusText)
+                .font(GianTheme.Typography.caption)
+                .foregroundStyle(GianTheme.Colors.secondaryLabel)
         }
     }
 }

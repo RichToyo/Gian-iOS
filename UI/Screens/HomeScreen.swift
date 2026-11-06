@@ -5,11 +5,10 @@ import GianCore
 /// sidebar. Controls are system toolbar items (symbol + title), so on iPhone
 /// Duo they move into the vertical bar, in two groups: the global New chat +
 /// Settings (also present in every other screen) and the list's own Search +
-/// List options. Nothing sits below the list. The current Host is centered
-/// with a status dot; tap it to switch or add Hosts. As the wide sidebar the
-/// bar reads: sidebar toggle (portrait only) on the far left, the Host
-/// centered, Search + List options on the right; the global group lives in
-/// the detail column's bar instead.
+/// List options. The current Host has a status dot; tap it to switch or add
+/// Hosts. The expanded portrait directory places Search and List options on
+/// the left and global actions on the right; the wide landscape sidebar keeps
+/// its list actions on the right and global actions in the detail column.
 struct HomeScreen: View {
     let hosts: [HostItem]
     let directory: DirectoryPresentation
@@ -25,6 +24,7 @@ struct HomeScreen: View {
     var onOpenSearch: () -> Void = {}
     var onSelectHost: (HostID) -> Void = { _ in }
     var onSelectDirectoryView: (DirectoryView) -> Void = { _ in }
+    var onSelectTimeFilter: (DirectoryTimeFilter) -> Void = { _ in }
     var onSelectConversation: (SessionID) -> Void = { _ in }
     var onLoadMoreDirectory: (DirectoryCollection) -> Void = { _ in }
     var onRefreshDirectory: (DirectoryCollection) -> Void = { _ in }
@@ -36,6 +36,7 @@ struct HomeScreen: View {
     var canLoad: Bool = true
 
     @Environment(\.globalActionsAtBottom) private var globalActionsAtBottom
+    @Environment(\.directoryActionsLeading) private var directoryActionsLeading
 
     private var currentHost: HostItem? {
         hosts.first(where: \.isCurrent)
@@ -62,28 +63,39 @@ struct HomeScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if isSidebar, let onToggleSidebar {
-                ToolbarItem(placement: .topBarLeading) {
+                ToolbarItemGroup(placement: .topBarLeading) {
                     Button("Hide sidebar", systemImage: "sidebar.left", action: onToggleSidebar)
+                    CurrentHostMenu(hosts: hosts, onSelect: onSelectHost, onAddHost: onAddHost, onManage: onOpenSettings)
                 }
-            }
-            ToolbarItem(placement: .principal) {
-                CurrentHostMenu(hosts: hosts, onSelect: onSelectHost, onAddHost: onAddHost, onManage: onOpenSettings)
+            } else {
+                ToolbarItem(placement: .principal) {
+                    CurrentHostMenu(hosts: hosts, onSelect: onSelectHost, onAddHost: onAddHost, onManage: onOpenSettings)
+                }
             }
             if !isSidebar {
                 GlobalToolbarActions(atBottom: globalActionsAtBottom, onNewChat: onOpenNewChat, onSettings: onOpenSettings)
-                if !globalActionsAtBottom {
+                if !globalActionsAtBottom && !directoryActionsLeading {
                     // Keeps the global pair and the list actions as separate groups.
                     ToolbarSpacer(.fixed, placement: .topBarTrailing)
                 }
             }
             // List actions: they operate on this conversation list.
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                Button("Search conversations", systemImage: "magnifyingglass", action: onOpenSearch)
-                DirectoryListMenu(
-                    selection: Binding(get: { directory.view }, set: onSelectDirectoryView),
-                    onRefresh: { onRefreshDirectory(currentCollection) }
-                )
+            if directoryActionsLeading {
+                ToolbarItemGroup(placement: .topBarLeading) { directoryActions }
+            } else {
+                ToolbarItemGroup(placement: .topBarTrailing) { directoryActions }
             }
         }
+    }
+
+    @ViewBuilder
+    private var directoryActions: some View {
+        Button("Search conversations", systemImage: "magnifyingglass", action: onOpenSearch)
+        DirectoryListMenu(
+            selection: Binding(get: { directory.view }, set: onSelectDirectoryView),
+            timeFilter: directory.timeFilter,
+            onSelectTimeFilter: onSelectTimeFilter,
+            onRefresh: { onRefreshDirectory(currentCollection) }
+        )
     }
 }

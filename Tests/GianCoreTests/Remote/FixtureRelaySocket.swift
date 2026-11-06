@@ -34,6 +34,7 @@ final class FixtureRelaySocket: RemoteWebSocket {
     let catalogHeld = RemoteMailbox(limit: 8)
     var splitSnapshots = false
     var pageItems: [WireValue] = []
+    var pageDenied = false
     var downloadKinds: [String] = []
     var sendDeliveryState: String?
     var directoryEnabled = false
@@ -167,7 +168,13 @@ final class FixtureRelaySocket: RemoteWebSocket {
                 var data: [String: WireValue] = ["session": session, "cursor": .string("fixture-cursor")]
                 if directoryEnabled { data["interactions"] = .array(subscriptionInteractions) }
                 result = .object(data)
-            case "session.page": result = .object(["session_id": .string(fixture.sessionID), "has_more": .bool(false), "items": .array(pageItems)])
+            case "session.page":
+                if pageDenied {
+                    try push(.object(["type": .string("command.result"), "command_id": .string(id), "attempt_id": message["attempt_id"],
+                        "ok": .bool(false), "error": .object(["code": .string("REMOTE_CAPABILITY_DENIED"), "message": .string("Unavailable")])]))
+                    return
+                }
+                result = .object(["session_id": .string(fixture.sessionID), "has_more": .bool(false), "items": .array(pageItems)])
             case "session.create":
                 guard case .object(var created) = session else { throw RemoteClientError.invalidPayload }
                 created["task_id"] = message["params"]["task_id"]
@@ -181,6 +188,11 @@ final class FixtureRelaySocket: RemoteWebSocket {
                 ledger[id] = .object(["command_id": .string(id), "state": .string("succeeded"), "result": result])
                 try push(.object(["type": .string("command.accepted"), "command_id": .string(id), "attempt_id": message["attempt_id"]]))
                 if loseSendResult { close(); return }
+            case "queue.update", "queue.remove", "queue.clear", "queue.send_now":
+                var data: [String: WireValue] = ["queue": .array([]), "queue_revision": .string("queue-r2")]
+                if method == "queue.send_now" { data["mode"] = .string("steered"); data["affected"] = .array([]) }
+                result = .object(data)
+                ledger[id] = .object(["command_id": .string(id), "state": .string("succeeded"), "result": result])
             case "translation.request_status": result = translationRecord.map { .object(["state": .string("succeeded"), "record": $0]) } ?? .object(["state": .string("unknown")])
             case "translation.request":
                 result = .object(["request_id": message["params"]["request_id"], "status": .string("accepted")])

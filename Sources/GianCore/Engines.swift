@@ -313,22 +313,25 @@ enum TranslationReducer {
     }
 
     private static func merge(existing: [ReadingTranslation], incoming: [ReadingTranslation]) -> [ReadingTranslation] {
-        var byID: [TranslationRecordID: ReadingTranslation] = [:]
-        for record in existing { byID[record.id] = record }
+        var result = existing
         for record in incoming {
-            if let prior = byID[record.id],
-               prior.presentableText != nil,
-               prior.textSHA256 == record.textSHA256,
-               record.presentableText == nil {
-                var kept = record
-                kept.presentableText = prior.presentableText
-                kept.integrity = prior.integrity
-                byID[record.id] = kept
+            if let index = result.firstIndex(where: { $0.id == record.id }) {
+                let prior = result[index]
+                if prior.presentableText != nil,
+                   prior.textSHA256 == record.textSHA256,
+                   record.presentableText == nil {
+                    var kept = record
+                    kept.presentableText = prior.presentableText
+                    kept.integrity = prior.integrity
+                    result[index] = kept
+                } else {
+                    result[index] = record
+                }
             } else {
-                byID[record.id] = record
+                result.append(record)
             }
         }
-        return byID.values.sorted { $0.id.rawValue < $1.id.rawValue }
+        return result
     }
 }
 
@@ -361,7 +364,7 @@ enum DirectoryFilter {
                     id: task.id,
                     title: task.title,
                     conversations: sessions
-                        .filter { $0.taskID == task.id && $0.authorized && !$0.archived }
+                        .filter { $0.taskID == task.id && $0.authorized && !$0.archived && $0.completedAt == nil }
                         .map { summary($0, names: names) }
                         .sorted(by: sortRows)
                 )
@@ -374,7 +377,7 @@ enum DirectoryFilter {
             results = []
         } else {
             results = searchCandidates
-                .filter { $0.authorized && !$0.archived && matches($0, query: trimmed, names: names) }
+                .filter { $0.authorized && !$0.archived && titleMatches($0.title, query: trimmed) }
                 .map { summary($0, names: names) }
                 .sorted(by: sortRows)
         }
@@ -404,9 +407,12 @@ enum DirectoryFilter {
         }
     }
 
-    private static func matches(_ session: SessionRecord, query: String, names: [WorkspaceID: String]) -> Bool {
-        let haystack = [session.title, names[session.workspaceID] ?? ""].joined(separator: " ")
-        return haystack.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+    static func titleMatches(_ title: String, query: String) -> Bool {
+        func normalize(_ value: String) -> String {
+            value.map { String($0).precomposedStringWithCompatibilityMapping.lowercased() }.joined()
+        }
+        let needle = normalize(query)
+        return !needle.isEmpty && normalize(title).contains(needle)
     }
 
     static func summary(_ session: SessionRecord, names: [WorkspaceID: String]) -> ConversationSummary {

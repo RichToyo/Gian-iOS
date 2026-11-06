@@ -45,11 +45,15 @@ extension GianClientStore {
 
     func downloadTranscriptFile(_ id: AttachmentID) async -> GianDispatchResult {
         guard let scope = readyScope(), let descriptor = transcriptFileDescriptor(for: id) else { return reject(.notFound) }
+        guard pendingSessionAccess[descriptor.sessionID] == nil, !deniedSessionAccess.contains(descriptor.sessionID) else { return reject(.mutationsDisabled) }
         guard descriptor.expiresAt > clock.now() else { transcriptFileStates[id] = .expired; return .applied }
         if transcriptFileData(for: id, scope: scope) != nil { transcriptFileStates[id] = .cached; return .applied }
         guard mutationsAllowed() else { return reject(.mutationsDisabled) }
         guard descriptor.downloadable else { transcriptFileStates[id] = .unavailable; return .applied }
-        if let code = requireCapability(.fileDownload) { return reject(code) }
+        if let code = requireCapability(.fileDownload) {
+            transcriptFileStates[id] = .unavailable
+            return reject(code)
+        }
         guard transcriptFileStates[id] != .downloading else { return reject(.operationInFlight) }
         guard transcriptFileStates.count < 256 || transcriptFileStates[id] != nil else { return reject(.mutationsDisabled) }
         transcriptDownloadSequence += 1

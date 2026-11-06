@@ -13,10 +13,17 @@ final class DirectoryFixtureService: ControlledService {
     var commandStatuses: [CommandID: CommandStatusResponse] = [:]
     var directoryMembershipGeneration = 0
     var retireNextDirectoryRead = false
+    var createWithoutActivity = false
 
     override func createSession(scope: ClientScope, request: SessionCreateRequest) async -> CommandDispatchResponse {
         createRequests.append(request)
-        return await super.createSession(scope: scope, request: request)
+        let response = await super.createSession(scope: scope, request: request)
+        if createWithoutActivity, case .succeeded(var success) = response {
+            success.session?.lastActivityAt = nil
+            success.session?.activityIsMessageOrExecution = false
+            return .succeeded(success)
+        }
+        return response
     }
     override func sendMessage(scope: ClientScope, request: SessionSendRequest) async -> CommandDispatchResponse {
         sendRequests.append(request)
@@ -53,9 +60,10 @@ extension DirectoryFixtureService: DirectoryMembershipEpoch {}
 func directoryEntry(_ title: String, task: Bool = false) -> DirectoryEntry {
     // Titles may contain spaces, which are not valid ID characters.
     let id = String(title.map { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" ? $0 : "-" })
-    let session = makeSession(id: id, title: title, taskID: task ? PreviewFixtures.taskID : nil)
+    let session = makeSession(id: id, title: title, taskID: task ? PreviewFixtures.taskID : nil, activity: PreviewFixtures.instant)
     return DirectoryEntry(session: session, workspace: WorkspaceRecord(id: session.workspaceID, name: "Repository"),
-        task: task ? TaskRecord(id: PreviewFixtures.taskID, title: "Incomplete Task", status: .open, updatedAt: PreviewFixtures.instant) : nil)
+        task: task ? TaskRecord(id: PreviewFixtures.taskID, title: "Incomplete Task", status: .open, updatedAt: PreviewFixtures.instant) : nil,
+        searchName: title)
 }
 
 func directoryPage(_ view: DirectoryCollection, _ entries: [DirectoryEntry] = [],
@@ -66,6 +74,231 @@ func directoryPage(_ view: DirectoryCollection, _ entries: [DirectoryEntry] = []
 
 @MainActor
 struct DirectoryClientTests {
+    @Test func removalBeforeCreateReceiptFencesUnknownSessionWithoutResending() async throws {
+        let service = DirectoryFixtureService(); service.pages[.tasks] = [directoryPage(.tasks)]
+        let clock = ManualGianClock(instant: PreviewFixtures.instant)
+        let store = GianClientStore(service: service, clock: clock)
+        _ = try await signIn(store, clock: clock)
+        let scope = try clientScope(store)
+        let session = directoryEntry("inflight-created").session
+        let command = PreviewFixtures.id("inflight-create-command", CommandID.self)
+        var intent = DurableSendIntent(draftID: store.state.composer.draft.id, stage: .create, creationID: command)
+        intent.createDispatched = true
+        store.state.composer.draft.text = "Fictional unsent draft"
+        store.state.composer.send = .creating(intent)
+        let cursor = try #require(store.state.sync.cursor)
+        var removal = CanonicalStatePatch(); removal.removedSessions = [session.id]
+        _ = store.applyStatePatch(sequence: cursor.eventSequence + 1, generation: cursor.hostGeneration,
+                                  baseRevision: cursor.revision, revision: "inflight-removal", patch: removal)
+        let version = try #require(store.pendingSessionAccess[session.id])
+        store.resolveSessionAccess(.unavailable, session: session.id, version: version, scope: scope)
+        store.resolveCommand(.succeeded(CommandSuccess(commandID: command, session: session)))
+        #expect(store.currentSessionID == nil)
+        #expect(store.deniedSessionAccess.contains(session.id))
+        #expect(store.state.composer.draft.boundSessionID == session.id)
+        #expect(store.state.composer.draft.text == "Fictional unsent draft")
+        #expect(service.sendRequests.isEmpty)
+    }
+    @Test func ambiguousAccessFenceSurvivesLocalReload() async throws {
+        let directory = try temporaryStorageDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let clock = ManualGianClock(instant: PreviewFixtures.instant)
+        let service = DirectoryFixtureService(); service.pages[.tasks] = [directoryPage(.tasks)]
+        let store = GianClientStore(service: service, clock: clock, storage: try SQLiteGianStorage(directory: directory))
+        _ = try await signIn(store, clock: clock)
+        let session = directoryEntry("reload-access-fence").session
+        store.sessions.append(session)
+        let cursor = try #require(store.state.sync.cursor)
+        var removal = CanonicalStatePatch(); removal.removedSessions = [session.id]
+        #expect(store.applyStatePatch(sequence: cursor.eventSequence + 1, generation: cursor.hostGeneration,
+                                      baseRevision: cursor.revision, revision: "reload-removal", patch: removal).isApplied)
+        let restored = GianClientStore(service: DirectoryFixtureService(), clock: clock,
+                                       storage: try SQLiteGianStorage(directory: directory))
+        #expect(restored.restoreAuthorizedSession(authorization: fictionalAuthorization(clock: clock)).isApplied)
+        #expect(restored.pendingSessionAccess[session.id] != nil)
+        #expect(restored.sessions.first(where: { $0.id == session.id })?.authorized == true)
+        let version = try #require(restored.pendingSessionAccess[session.id])
+        restored.resolveSessionAccess(.unavailable, session: session.id, version: version, scope: try clientScope(restored))
+        let denied = GianClientStore(service: DirectoryFixtureService(), clock: clock,
+                                     storage: try SQLiteGianStorage(directory: directory))
+        #expect(denied.restoreAuthorizedSession(authorization: fictionalAuthorization(clock: clock)).isApplied)
+        #expect(denied.deniedSessionAccess.contains(session.id))
+        let recoveredCursor = try #require(denied.state.sync.cursor)
+        var later = CanonicalStatePatch(); later.sessions = [session]
+        _ = denied.applyStatePatch(sequence: recoveredCursor.eventSequence + 1, generation: recoveredCursor.hostGeneration,
+                                   baseRevision: recoveredCursor.revision, revision: "later-legacy-upsert", patch: later)
+        #expect(denied.sessions.first(where: { $0.id == session.id })?.authorized == false)
+    }
+    @Test func legacyRemovalKeepsNegotiatedTasklessAndCompletedChatsPendingAccessProof() async throws {
+        for completed in [false, true] {
+            let service = DirectoryFixtureService(); service.pages[.tasks] = [directoryPage(.tasks)]
+            let clock = ManualGianClock(instant: PreviewFixtures.instant)
+            let store = GianClientStore(service: service, clock: clock)
+            _ = try await signIn(store, clock: clock)
+            var entry = directoryEntry(completed ? "completed-chat" : "taskless-chat")
+            if completed { entry.session.completedAt = "2026-09-01T00:00:00Z" }
+            let session = entry.session
+            store.sessions.append(session)
+            var repos = StoredDirectoryView(); repos.entries = [entry]
+            var search = StoredDirectoryView(); search.entries = [entry]
+            store.directoryViews[.repos] = repos; store.directoryViews[.search] = search
+            service.transcriptPages = [TranscriptPageResponse(items: [], cursor: nil, hasOlder: false)]
+            #expect((await store.dispatch(.selectConversation(session.id))).isApplied)
+            let cursor = try #require(store.state.sync.cursor)
+            let activity = store.sessions.first(where: { $0.id == session.id })?.lastActivityAt
+            var removal = CanonicalStatePatch(); removal.removedSessions = [session.id]
+            #expect(store.applyStatePatch(sequence: cursor.eventSequence + 1, generation: cursor.hostGeneration,
+                                         baseRevision: cursor.revision, revision: "legacy-remove", patch: removal).isApplied)
+            #expect(store.currentSessionID == session.id)
+            #expect(store.sessions.first(where: { $0.id == session.id })?.authorized == true)
+            #expect(store.directoryViews[.repos]?.visibleEntries.contains(where: { $0.session.id == session.id }) == true)
+            #expect(store.directoryViews[.search]?.visibleEntries.contains(where: { $0.session.id == session.id }) == true)
+            #expect(!store.mutationsReady)
+            let pending = try #require(store.pendingSessionAccess[session.id])
+            store.resolveSessionAccess(.authorized, session: session.id, version: pending, scope: try clientScope(store))
+            #expect(store.pendingSessionAccess[session.id] == nil)
+            #expect(store.currentSessionID == session.id)
+            #expect(store.sessions.first(where: { $0.id == session.id })?.lastActivityAt == activity)
+            let next = try #require(store.state.sync.cursor)
+            _ = store.applyStatePatch(sequence: next.eventSequence + 1, generation: next.hostGeneration,
+                                      baseRevision: next.revision, revision: "access-denied", patch: removal)
+            let denialVersion = try #require(store.pendingSessionAccess[session.id])
+            store.resolveSessionAccess(.unavailable, session: session.id, version: denialVersion, scope: try clientScope(store))
+            #expect(store.currentSessionID == nil)
+            #expect(store.sessions.first(where: { $0.id == session.id })?.authorized == false)
+            #expect(store.deniedSessionAccess.contains(session.id))
+        }
+    }
+
+    @Test func legacyOnlyPatchRemovalStillRetiresItsNarrowMembership() async throws {
+        let clock = ManualGianClock(instant: PreviewFixtures.instant)
+        let store = GianClientStore(service: ControlledService(), clock: clock)
+        _ = try await signIn(store, clock: clock)
+        #expect(!store.negotiatedDirectory)
+        let cursor = try #require(store.state.sync.cursor)
+        let id = PreviewFixtures.sessionID
+        var removal = CanonicalStatePatch(); removal.removedSessions = [id]
+        _ = store.applyStatePatch(sequence: cursor.eventSequence + 1, generation: cursor.hostGeneration,
+                                  baseRevision: cursor.revision, revision: "legacy-removed", patch: removal)
+        #expect(store.sessions.first(where: { $0.id == id })?.authorized == false)
+        #expect(store.pendingSessionAccess.isEmpty)
+    }
+
+    @Test func staleAccessResponseCannotUndoNewerRemovalOrDenial() async throws {
+        let service = DirectoryFixtureService(); service.pages[.tasks] = [directoryPage(.tasks)]
+        let clock = ManualGianClock(instant: PreviewFixtures.instant)
+        let store = GianClientStore(service: service, clock: clock)
+        _ = try await signIn(store, clock: clock)
+        let scope = try clientScope(store)
+        let session = directoryEntry("access-race").session
+        store.sessions.append(session)
+        let cursor = try #require(store.state.sync.cursor)
+        var patch = CanonicalStatePatch(); patch.removedSessions = [session.id]
+        _ = store.applyStatePatch(sequence: cursor.eventSequence + 1, generation: cursor.hostGeneration,
+                                  baseRevision: cursor.revision, revision: "remove-1", patch: patch)
+        let oldVersion = try #require(store.pendingSessionAccess[session.id])
+        _ = store.applyStatePatch(sequence: cursor.eventSequence + 2, generation: cursor.hostGeneration,
+                                  baseRevision: "remove-1", revision: "remove-2", patch: patch)
+        let newVersion = try #require(store.pendingSessionAccess[session.id])
+        store.resolveSessionAccess(.authorized, session: session.id, version: oldVersion, scope: scope)
+        #expect(store.pendingSessionAccess[session.id] == newVersion)
+        let otherScope = fictionalScope(host: PreviewFixtures.id("other-access-host", HostID.self))
+        store.resolveSessionAccess(.authorized, session: session.id, version: newVersion, scope: otherScope)
+        #expect(store.pendingSessionAccess[session.id] == newVersion)
+        _ = store.ingest(InboundEnvelope(scope: scope, event: .sessionUnavailable(session.id)))
+        store.resolveSessionAccess(.authorized, session: session.id, version: newVersion, scope: scope)
+        #expect(store.deniedSessionAccess.contains(session.id))
+        #expect(store.sessions.first(where: { $0.id == session.id })?.authorized == false)
+        var upsert = CanonicalStatePatch(); upsert.sessions = [session]
+        _ = store.applyStatePatch(sequence: cursor.eventSequence + 3, generation: cursor.hostGeneration,
+                                  baseRevision: "remove-2", revision: "later-upsert", patch: upsert)
+        #expect(store.sessions.first(where: { $0.id == session.id })?.authorized == false)
+        #expect(store.logout(invalidateRemote: false).isApplied)
+        store.resolveSessionAccess(.authorized, session: session.id, version: newVersion, scope: scope)
+        #expect(store.readyScope() == nil)
+        #expect(store.sessions.isEmpty)
+    }
+    @Test func directoryHintsDoNotMarkTranscriptForCatchUp() async throws {
+        let service = DirectoryFixtureService(); service.pages[.tasks] = [directoryPage(.tasks)]
+        let clock = ManualGianClock(instant: PreviewFixtures.instant)
+        let store = GianClientStore(service: service, clock: clock)
+        _ = try await signIn(store, clock: clock)
+        let scope = try clientScope(store)
+        let cursor = try #require(store.state.sync.cursor)
+        let id = PreviewFixtures.sessionID
+        store.memory.update(scope) {
+            $0.transcripts[id] = [transcriptItem(id: "hint-stable", turn: 1, text: "Fictional")]
+            $0.transcriptCursors[id] = StoredTranscriptCursor(cursor: nil, hasOlder: false)
+        }
+        for _ in 0..<8 {
+            #expect(store.ingest(InboundEnvelope(scope: scope, event: .directoryChanged(generation: cursor.hostGeneration, revision: "hint"))).isApplied)
+        }
+        #expect(store.memory.bundle(for: scope).transcriptCursors[id]?.catchUp == nil)
+        #expect(!store.state.sync.needsSnapshot)
+        #expect(store.directoryRefreshPending)
+    }
+    @Test func incompleteRefreshKeepsVerifiedRowsAndPublishesNewRowsUntilComplete() throws {
+        let scope = fictionalScope()
+        let existing = directoryEntry("Existing")
+        let added = directoryEntry("Added")
+        func page(_ entries: [DirectoryEntry], _ state: DirectoryPageState, _ cursor: String?) -> DirectoryPagePayload {
+            DirectoryPagePayload(view: .repos, asOf: PreviewFixtures.instant, revision: "revision",
+                                 state: state, entries: entries, nextCursor: cursor)
+        }
+        var view = StoredDirectoryView()
+        let initialApplied = view.apply(page([existing], .complete, nil), scope: scope, view: .repos)
+        #expect(initialApplied)
+        view.invalidate()
+        let firstApplied = view.apply(page([], .incomplete, "next-1"), scope: scope, view: .repos)
+        #expect(firstApplied)
+        #expect(view.visibleEntries.map(\.session.id) == [existing.session.id])
+        #expect(view.status.isStale && view.status.hasMore)
+        let secondApplied = view.apply(page([added], .incomplete, "next-2"), scope: scope, view: .repos)
+        #expect(secondApplied)
+        #expect(Set(view.visibleEntries.map(\.session.id)) == Set([existing.session.id, added.session.id]))
+        view.invalidate()
+        #expect(Set(view.visibleEntries.map(\.session.id)) == Set([existing.session.id, added.session.id]))
+        let finalApplied = view.apply(page([added], .complete, nil), scope: scope, view: .repos)
+        #expect(finalApplied)
+        #expect(view.visibleEntries.map(\.session.id) == [added.session.id])
+        #expect(view.status.phase == .complete)
+    }
+
+    @Test func orderedPatchUpdatesAndRemovalsDoNotRequireSnapshotButGapsDo() async throws {
+        let service = DirectoryFixtureService(); service.pages[.tasks] = [directoryPage(.tasks)]
+        let clock = ManualGianClock(instant: PreviewFixtures.instant)
+        let store = GianClientStore(service: service, clock: clock)
+        _ = try await signIn(store, clock: clock)
+        let cursor = try #require(store.state.sync.cursor)
+        let entry = directoryEntry("patch-session")
+        let session = entry.session
+        var repos = StoredDirectoryView(); repos.entries = [entry]
+        repos.pendingEntries = [entry]; repos.status = DirectoryPageStatus(phase: .incomplete, hasMore: true)
+        store.directoryViews[.repos] = repos
+        var patch = CanonicalStatePatch(); patch.sessions = [session]
+        for index in 1...8 {
+            let base = index == 1 ? cursor.revision : "revision-\(index - 1)"
+            #expect(store.applyStatePatch(sequence: cursor.eventSequence + index, generation: cursor.hostGeneration,
+                                          baseRevision: base, revision: "revision-\(index)", patch: patch).isApplied)
+            #expect(!store.state.sync.needsSnapshot)
+        }
+        var removal = CanonicalStatePatch(); removal.removedSessions = [session.id]
+        _ = store.applyStatePatch(sequence: cursor.eventSequence + 9, generation: cursor.hostGeneration,
+                                  baseRevision: "revision-8", revision: "revision-9", patch: removal)
+        #expect(store.sessions.first(where: { $0.id == session.id })?.authorized == true)
+        #expect(store.pendingSessionAccess[session.id] != nil)
+        #expect(store.directoryViews[.repos]?.visibleEntries.contains(where: { $0.session.id == session.id }) == true)
+        _ = store.ingest(InboundEnvelope(scope: try clientScope(store), event: .sessionUnavailable(session.id)))
+        #expect(store.sessions.first(where: { $0.id == session.id })?.authorized == false)
+        #expect(store.directoryViews[.repos]?.visibleEntries.contains(where: { $0.session.id == session.id }) == false)
+        _ = store.applyStatePatch(sequence: cursor.eventSequence + 10, generation: cursor.hostGeneration,
+                                  baseRevision: "revision-9", revision: "revision-10", patch: patch)
+        #expect(store.sessions.first(where: { $0.id == session.id })?.authorized == false)
+        _ = store.applyStatePatch(sequence: cursor.eventSequence + 11, generation: cursor.hostGeneration,
+                                  baseRevision: "wrong-base", revision: "revision-11", patch: patch)
+        #expect(store.state.sync.needsSnapshot)
+        #expect(store.sessions.first(where: { $0.id == session.id })?.authorized == false)
+    }
     @Test func emptyIncompletePagesRemainResumableAndNotExhaustive() async throws {
         let service = DirectoryFixtureService()
         service.pages[.tasks] = [directoryPage(.tasks)]
@@ -84,7 +317,7 @@ struct DirectoryClientTests {
         #expect(store.state.directory.repositories.first?.conversations.first?.title == "History")
     }
 
-    @Test func messageOnlySearchUsesHostMembershipNotLocalTitleMatching() async throws {
+    @Test func messageOnlySearchDoesNotAppearInTitleResults() async throws {
         let service = DirectoryFixtureService()
         service.pages[.tasks] = [directoryPage(.tasks)]
         service.pages[.search] = [directoryPage(.search, [directoryEntry("Unrelated title")])]
@@ -92,13 +325,13 @@ struct DirectoryClientTests {
         let store = GianClientStore(service: service, clock: clock)
         _ = try await signIn(store, clock: clock)
         _ = await store.dispatch(.search("text inside an old message"))
-        #expect(store.state.directory.searchResults.map(\.title) == ["Unrelated title"])
+        #expect(store.state.directory.searchResults.isEmpty)
         #expect(store.state.directory.searchPage.phase == .complete)
         #expect(service.requests.last?.query == "text inside an old message")
         var narrow = service.base.script.directory
         narrow.negotiatedFeatures.append(.sessionDirectoryV1)
         _ = store.ingest(InboundEnvelope(scope: try clientScope(store), event: .directory(narrow)))
-        #expect(store.state.directory.searchResults.map(\.title) == ["Unrelated title"])
+        #expect(store.state.directory.searchResults.isEmpty)
     }
 
     @Test func invalidCursorRestartsAtMostTwiceAndRetainsLastCoherentRows() async throws {
@@ -181,26 +414,39 @@ struct DirectoryClientTests {
         #expect(store.directoryRefreshPending)
     }
 
-    @Test func hostMembershipKeepsOlderWaitingAndReopenedRowsWithoutInventingTasklessGroups() async throws {
+    @Test func tasksHideCompletedConversationsWhileReposApplyActivityFilter() async throws {
         let service = DirectoryFixtureService()
-        service.pages[.tasks] = [directoryPage(.tasks, [directoryEntry("Finished turn in incomplete Task", task: true)])]
+        var finished = directoryEntry("Finished turn in incomplete Task", task: true)
+        finished.session.status = .new
+        finished.session.completedAt = "2026-01-01T00:00:00Z"
+        finished.session.attention = .running
+        let idle = directoryEntry("Idle conversation in incomplete Task", task: true)
+        var active = directoryEntry("Active conversation in incomplete Task", task: true)
+        active.session.status = .running
+        service.pages[.tasks] = [directoryPage(.tasks, [finished, active, idle])]
         var reopened = directoryEntry("Reopened old conversation")
         reopened.session.completedAt = "2026-01-01T00:00:00Z"
         reopened.session.status = .running
         var waiting = directoryEntry("Old real waiting exception")
         waiting.session.attention = .interaction
         waiting.session.lastActivityAt = nil
-        service.pages[.repos] = [directoryPage(.repos, [reopened, waiting])]
+        service.pages[.repos] = [directoryPage(.repos, [reopened, waiting, finished])]
         let clock = ManualGianClock(instant: PreviewFixtures.instant)
         let store = GianClientStore(service: service, clock: clock)
         _ = try await signIn(store, clock: clock)
         _ = await store.dispatch(.selectDirectoryView(.repos))
         #expect(store.state.directory.repos.count == 2)
         #expect(store.state.directory.tasks.count == 1)
-        #expect(store.state.directory.tasks[0].conversations.map(\.title) == ["Finished turn in incomplete Task"])
+        #expect(Set(store.state.directory.tasks[0].conversations.map(\.title)) == Set(["Active conversation in incomplete Task", "Idle conversation in incomplete Task"]))
+        var completed = active.session
+        completed.status = .done
+        completed.completedAt = "2026-01-02T00:00:00Z"
+        store.state.navigation.destination = .conversation(active.session.id)
+        #expect(store.ingest(InboundEnvelope(scope: try clientScope(store), event: .sessionMetadata(completed, interactions: []))).isApplied)
+        #expect(store.state.directory.tasks[0].conversations.map(\.title) == ["Idle conversation in incomplete Task"])
         let cursor = store.state.sync.cursor
         _ = store.ingest(InboundEnvelope(scope: try clientScope(store), event: .sessionUnavailable(reopened.session.id)))
-        #expect(store.state.directory.repos.map(\.title) == [waiting.session.title])
+        #expect(Set(store.state.directory.repos.map(\.title)) == Set([finished.session.title]))
         #expect(store.state.sync.cursor == cursor)
     }
 
@@ -245,7 +491,7 @@ struct DirectoryClientTests {
         #expect(traversal.status.phase == .incomplete)
     }
 
-    @Test func refreshedPrefixDoesNotClaimRetainedCoherentRowsAreFresh() throws {
+    @Test func verifiedPrefixReplacesStaleRowsWithoutClaimingCompletion() throws {
         var traversal = StoredDirectoryView()
         let scope = fictionalScope()
         let complete = DirectoryPagePayload(view: .repos, asOf: PreviewFixtures.instant, revision: "r1", state: .complete,
@@ -257,8 +503,8 @@ struct DirectoryClientTests {
             entries: [directoryEntry("New prefix")], nextCursor: "next")
         let prefixApplied = traversal.apply(prefix, scope: scope, view: .repos)
         #expect(prefixApplied)
-        #expect(traversal.visibleEntries.map { $0.session.title } == ["Coherent old row"])
-        #expect(traversal.status.isStale && traversal.status.hasMore)
+        #expect(traversal.visibleEntries.map { $0.session.title } == ["New prefix"])
+        #expect(!traversal.status.isStale && traversal.status.hasMore)
     }
 
     @Test func permissionDenialHidesExpandedRowsRatherThanRetainingAnAuthorizedCache() async throws {
@@ -338,7 +584,8 @@ struct DirectoryClientTests {
 
     @Test func reposTaskRecordDoesNotHideOpenTasksPage() async throws {
         let service = DirectoryFixtureService()
-        let open = directoryEntry("Open task row", task: true)
+        var open = directoryEntry("Open task row", task: true)
+        open.session.status = .running
         var done = directoryEntry("Repos history", task: true)
         done.task?.status = .completed
         service.pages[.tasks] = [directoryPage(.tasks, [open])]
@@ -348,7 +595,7 @@ struct DirectoryClientTests {
         _ = try await signIn(store, clock: clock)
         _ = await store.dispatch(.selectDirectoryView(.repos))
         #expect(store.state.directory.tasks.first?.conversations.map(\.title) == ["Open task row"])
-        #expect(store.state.directory.repos.map(\.title) == ["Repos history"])
+        #expect(store.state.directory.repos.isEmpty)
     }
 
     @Test func retiredDirectoryReadDoesNotInstallOrFailThePage() async throws {

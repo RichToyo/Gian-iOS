@@ -45,8 +45,9 @@ extension LiveGianClientService: GianClientServicing {
         return response["data"]
     }
 
-    func commandSuccess(_ data: WireValue, method: String, command: CommandID, scope: ClientScope) throws -> CommandSuccess {
+    func commandSuccess(_ data: WireValue, method: String, command: CommandID, scope: ClientScope, queueSession: SessionID? = nil) throws -> CommandSuccess {
         let session: SessionRecord?
+        var queue: SessionQueue?
         switch method {
         case "session.create": session = try RemoteMapping.session(data, host: scope.host)
         case "session.send":
@@ -59,9 +60,28 @@ extension LiveGianClientService: GianClientServicing {
             guard try data.boolean("resolved") else { throw RemoteClientError.invalidPayload }
             _ = try data.identifier("interaction_id"); _ = try data.string("revision")
             session = nil
+        case "queue.update", "queue.remove", "queue.clear", "queue.send_now":
+            guard let queueSession else { throw RemoteClientError.invalidPayload }
+            if method == "queue.send_now" {
+                try data.closed(["mode", "queue", "queue_revision"], optional: ["affected"])
+                let mode = try data.string("mode")
+                guard ["noop", "started", "steered"].contains(mode) else { throw RemoteClientError.invalidPayload }
+                if !data["affected"].isNull {
+                    for item in try data.array("affected", maximum: 64) {
+                        try item.closed(["queue_id", "state", "turn_number"])
+                        _ = try item.identifier("queue_id")
+                        guard ["started", "steered"].contains(try item.string("state")) else { throw RemoteClientError.invalidPayload }
+                        _ = try item.integer("turn_number", range: 1...9_007_199_254_740_991)
+                    }
+                }
+            } else {
+                try data.closed(["queue", "queue_revision"])
+            }
+            queue = try RemoteMapping.queue(.object(["revision": data["queue_revision"], "entries": data["queue"]]), session: queueSession)
+            session = nil
         default: throw RemoteClientError.invalidPayload
         }
-        return CommandSuccess(commandID: command, session: session, deliveryID: try data.optionalString("delivery_id"))
+        return CommandSuccess(commandID: command, session: session, deliveryID: try data.optionalString("delivery_id"), queue: queue)
     }
 
     func validateDelivery(_ data: WireValue) throws {
@@ -75,7 +95,8 @@ extension LiveGianClientService: GianClientServicing {
     }
 
     func dispatchCommand(scope: ClientScope, id: CommandID, method: String, params: WireValue,
-                         capability: BusinessCapability, expected: [String: WireValue] = [:]) async -> CommandDispatchResponse {
+                         capability: BusinessCapability, expected: [String: WireValue] = [:],
+                         queueSession: SessionID? = nil) async -> CommandDispatchResponse {
         var attempted = false
         var knownPriorAttempt = false
         let captured = epoch
@@ -94,7 +115,7 @@ extension LiveGianClientService: GianClientServicing {
             let status = try await statusData(scope: scope, command: id)
             try checkEpoch(captured)
             switch try status.string("state") {
-            case "succeeded": return .succeeded(try commandSuccess(status["result"], method: method, command: id, scope: scope))
+            case "succeeded": return .succeeded(try commandSuccess(status["result"], method: method, command: id, scope: scope, queueSession: queueSession))
             case "failed": return .failed(id, message: RemoteWire.error(status["error"]).safeDescription)
             case "expired": return .failed(id, message: RemoteClientError.expired.safeDescription)
             case "accepted", "unknown_outcome": return .unknownOutcome(id)
@@ -110,7 +131,7 @@ extension LiveGianClientService: GianClientServicing {
             try saveVault(vault, server: scope.server, account: scope.account, epoch: captured)
             attempted = true
             let data = try await rpc(scope: scope, method: method, params: params, command: id, expected: expected)
-            return .succeeded(try commandSuccess(data, method: method, command: id, scope: scope))
+            return .succeeded(try commandSuccess(data, method: method, command: id, scope: scope, queueSession: queueSession))
         } catch {
             let safe = note(error)
             // Once bytes may have left the device, transport/cancellation/decode failure is uncertain.
@@ -160,6 +181,27 @@ extension LiveGianClientService: GianClientServicing {
         await dispatchCommand(scope: scope, id: request.commandID, method: "session.stop", params: .object([
             "session_id": .string(request.sessionID.rawValue), "session_revision": .string(request.sessionRevision),
         ]), capability: .sessionStop, expected: ["session_revision": .string(request.sessionRevision)])
+    }
+
+    public func mutateQueue(scope: ClientScope, request: QueueMutationRequest) async -> CommandDispatchResponse {
+        var params: [String: WireValue] = ["session_id": .string(request.sessionID.rawValue),
+                                           "expected_queue_revision": .string(request.revision)]
+        let method: String
+        let capability: BusinessCapability
+        switch request.mutation {
+        case .update(let id, let text):
+            method = "queue.update"; capability = .queueUpdate
+            params["queue_id"] = .string(id); params["text"] = .string(text)
+        case .remove(let id):
+            method = "queue.remove"; capability = .queueRemove
+            params["queue_id"] = .string(id)
+        case .clear:
+            method = "queue.clear"; capability = .queueClear
+        case .sendNow:
+            method = "queue.send_now"; capability = .queueSendNow
+        }
+        return await dispatchCommand(scope: scope, id: request.commandID, method: method, params: .object(params),
+                                     capability: capability, queueSession: request.sessionID)
     }
     public func respondToInteraction(scope: ClientScope, request: InteractionRespondRequest) async -> CommandDispatchResponse {
         var values: [String: WireValue] = [:]

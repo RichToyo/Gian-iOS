@@ -158,6 +158,28 @@ public struct TaskRecord: Sendable, Equatable, Identifiable {
     }
 }
 
+public struct QueuedMessage: Sendable, Equatable, Codable, Identifiable {
+    public var id: String
+    public var text: String
+    public var attachmentCount: Int
+
+    public init(id: String, text: String, attachmentCount: Int = 0) {
+        self.id = id
+        self.text = text
+        self.attachmentCount = attachmentCount
+    }
+}
+
+public struct SessionQueue: Sendable, Equatable, Codable {
+    public var revision: String
+    public var entries: [QueuedMessage]
+
+    public init(revision: String, entries: [QueuedMessage]) {
+        self.revision = revision
+        self.entries = entries
+    }
+}
+
 public struct SessionRecord: Sendable, Equatable, Identifiable {
     public var id: SessionID
     public var hostID: HostID
@@ -178,6 +200,8 @@ public struct SessionRecord: Sendable, Equatable, Identifiable {
     public var activityIsMessageOrExecution: Bool
     public var updatedAt: Date
     public var completedAt: String?
+    /// Host-authoritative queue. Nil means no queue snapshot is available.
+    public var queue: SessionQueue?
     /// Settings the Host reports for the conversation; nil means the Agent's
     /// default. `session.update` changes them and they apply from the next turn.
     public var model: String?
@@ -223,6 +247,7 @@ public struct SessionRecord: Sendable, Equatable, Identifiable {
         self.activityIsMessageOrExecution = activityIsMessageOrExecution
         self.updatedAt = updatedAt
         self.completedAt = nil
+        self.queue = nil
     }
 }
 
@@ -452,12 +477,17 @@ public struct ReadingRequestState: Sendable, Equatable {
     public var pending: Bool
     public var uncertain: Bool
     public var error: String?
+    public var sourceSHA256: String?
+    public var targetLanguage: String?
 
-    public init(requestID: TranslationRequestID, pending: Bool, uncertain: Bool, error: String? = nil) {
+    public init(requestID: TranslationRequestID, pending: Bool, uncertain: Bool, error: String? = nil,
+                sourceSHA256: String? = nil, targetLanguage: String? = nil) {
         self.requestID = requestID
         self.pending = pending
         self.uncertain = uncertain
         self.error = error
+        self.sourceSHA256 = sourceSHA256
+        self.targetLanguage = targetLanguage
     }
 }
 

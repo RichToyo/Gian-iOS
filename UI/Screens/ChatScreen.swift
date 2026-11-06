@@ -2,7 +2,7 @@ import SwiftUI
 import GianCore
 
 /// Main chat screen. The bar centers the conversation title over the current
-/// Host (status dot + name), with Back on compact screens. Translation lives
+/// conversation, with Back on compact screens. Translation lives
 /// in the composer's ⋯ menu. Banner and connectivity share the non-colliding
 /// TopStatusStack. All edits and operations dispatch typed `GianClientAction`s
 /// via closures.
@@ -19,10 +19,14 @@ struct ChatScreen: View {
 
     var onBannerTap: (BannerID) -> Void = { _ in }
     var onBannerDismiss: (BannerID) -> Void = { _ in }
+    var onRetrySynchronization: () -> Void = {}
+    var onRetryTranscriptSync: () -> Void = {}
     var onToggleAutomaticTranslation: (Bool) -> Void = { _ in }
     var onEditDraft: (String) -> Void = { _ in }
     var onSend: () -> Void = {}
     var onStop: () -> Void = {}
+    var onMutateQueue: (QueueMutation) -> Void = { _ in }
+    var onRecoverQueue: () -> Void = {}
     var onRetryTranslationSend: () -> Void = {}
     var onSendOriginal: () -> Void = {}
     var onCancelTranslationSend: () -> Void = {}
@@ -31,10 +35,12 @@ struct ChatScreen: View {
     var onRetryAttachmentUpload: (AttachmentID) -> Void = { _ in }
     var onPageOlder: () -> Void = {}
     var onRespondToInteraction: (InteractionID, ActionID, [String: InteractionValue]) -> Void = { _, _, _ in }
-    var onRequestTranslation: (TranscriptItemID, String) -> Void = { _, _ in }
-    var onCancelReadingTranslation: (TranscriptItemID) -> Void = { _ in }
+    var onRequestTranslation: (String, String) -> Void = { _, _ in }
+    var onCancelReadingTranslation: (String) -> Void = { _ in }
+    var onRecoverReadingTranslation: (String) -> Void = { _ in }
     var onPageTranslation: (TranslationRecordID) -> Void = { _ in }
     var attachmentPresentation: (AttachmentID) -> AttachmentFilePresentation = { _ in .unknown }
+    var attachmentIsImage: (AttachmentID) -> Bool = { _ in false }
     var onDownloadAttachment: (AttachmentID) -> Void = { _ in }
     var attachmentData: (AttachmentID) -> Data? = { _ in nil }
     var attachmentDescriptorName: (AttachmentID) -> String = { _ in "Attachment" }
@@ -55,53 +61,132 @@ struct ChatScreen: View {
 
     @Environment(\.globalActionsAtBottom) private var globalActionsAtBottom
     @State private var previewedAttachment: (id: AttachmentID, name: String, data: Data)?
+    @State private var followsLatest = true
+    @State private var nearBottom = true
+    @State private var latestScrollRequest = 0
+    @State private var userScrolling = false
+    @State private var visibleRowID: String?
+    @State private var olderPageAnchor: String?
+    @State private var awaitingOlderPage = false
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(spacing: 0) {
                     if conversation.hasOlderPages {
-                        Button("Load earlier messages", action: onPageOlder)
-                            .font(GianTheme.Typography.caption)
-                            .foregroundStyle(GianTheme.Colors.tint)
-                            .gianHitTarget()
-                            .padding(.top, GianTheme.Metrics.paddingSmall)
+                        Button("Load earlier messages") {
+                            followsLatest = false
+                            awaitingOlderPage = true
+                            olderPageAnchor = stableAnchor(for: visibleRowID)
+                            onPageOlder()
+                        }
+                        .font(GianTheme.Typography.caption)
+                        .foregroundStyle(GianTheme.Colors.tint)
+                        .gianHitTarget()
+                        .padding(.top, GianTheme.Metrics.paddingSmall)
                     }
                     TranscriptView(
                         rows: conversation.rows,
                         translationEnabled: mutationsReady
                             && conversation.translation?.capability == .configured,
+                        translationAvailable: conversation.translation?.capability == .configured,
+                        translationRecoveryEnabled: mutationsReady,
                         onRespondToInteraction: mutationsReady ? onRespondToInteraction : { _, _, _ in },
                         onRequestTranslation: onRequestTranslation,
                         onCancelTranslation: { onCancelReadingTranslation($0) },
                         onRetryTranslation: onRequestTranslation,
+                        onRecoverTranslation: onRecoverReadingTranslation,
                         onPageTranslation: onPageTranslation,
                         attachmentPresentation: attachmentPresentation,
+                        attachmentIsImage: attachmentIsImage,
+                        attachmentData: attachmentData,
+                        autoLoadImages: mutationsReady,
                         onDownloadAttachment: mutationsReady ? onDownloadAttachment : { _ in },
                         onPreviewAttachment: previewAttachment
                     )
-                    .padding(.top, topOverlayInset)
+                    Color.clear.frame(height: 1).id("transcript-latest")
                 }
+                .padding(.top, 144)
                 .frame(maxWidth: GianTheme.Metrics.readableWidth)
                 .frame(maxWidth: .infinity)
             }
-            .defaultScrollAnchor(.bottom)
+            .id(conversation.id)
+            .defaultScrollAnchor(.bottom, for: .initialOffset)
+            .scrollPosition(id: $visibleRowID, anchor: .top)
             .scrollDismissesKeyboard(.interactively)
-            .onChange(of: conversation.rows.count) { _, _ in
-                // Follow new content only at the tail; reading position
-                // is preserved otherwise.
-                if let last = conversation.rows.last {
-                    withAnimation(.easeOut(duration: 0.2)) {
-                        proxy.scrollTo(last.id, anchor: .bottom)
+            .onScrollGeometryChange(for: TranscriptScrollEdges.self) { geometry in
+                return TranscriptScrollEdges(
+                    nearBottom: geometry.contentSize.height - geometry.visibleRect.maxY <= 64,
+                    viewportHeight: geometry.visibleRect.height,
+                    contentHeight: geometry.contentSize.height
+                )
+            } action: { previous, value in
+                nearBottom = value.nearBottom
+                if userScrolling { followsLatest = value.nearBottom }
+                if followsLatest, !userScrolling, !awaitingOlderPage,
+                   previous.viewportHeight != value.viewportHeight || previous.contentHeight != value.contentHeight {
+                    Task { @MainActor in
+                        await Task.yield()
+                        if followsLatest && !userScrolling && !awaitingOlderPage {
+                            proxy.scrollTo("transcript-latest", anchor: .bottom)
+                        }
                     }
+                }
+            }
+            .onScrollPhaseChange { _, phase in
+                switch phase {
+                case .tracking, .interacting, .decelerating:
+                    userScrolling = true
+                case .idle:
+                    if userScrolling { followsLatest = nearBottom }
+                    userScrolling = false
+                default: break
+                }
+            }
+            .onChange(of: TranscriptFollowSignal(rows: conversation.rows)) { old, new in
+                if awaitingOlderPage && new.isPrepend(after: old) {
+                    if let anchor = olderPageAnchor, new.ids.contains(anchor) { proxy.scrollTo(anchor, anchor: .top) }
+                    awaitingOlderPage = false
+                    olderPageAnchor = nil
+                    return
+                }
+                if followsLatest, !userScrolling, new.shouldFollow(after: old) {
+                    proxy.scrollTo("transcript-latest", anchor: .bottom)
+                }
+            }
+            .onChange(of: conversation.id) { _, _ in
+                followsLatest = true
+                nearBottom = true
+                userScrolling = false
+                visibleRowID = nil
+                awaitingOlderPage = false
+                olderPageAnchor = nil
+            }
+            .onChange(of: visibleRowID) { _, value in
+                if awaitingOlderPage && userScrolling { olderPageAnchor = stableAnchor(for: value) }
+            }
+            .onChange(of: latestScrollRequest) { _, _ in
+                proxy.scrollTo("transcript-latest", anchor: .bottom)
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if !followsLatest {
+                    Button {
+                        followsLatest = true
+                        proxy.scrollTo("transcript-latest", anchor: .bottom)
+                    } label: {
+                        Image(systemName: "arrow.down")
+                            .frame(width: 44, height: 44)
+                            .background(.regularMaterial, in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Jump to latest")
+                    .padding(GianTheme.Metrics.paddingMedium)
                 }
             }
         }
         .overlay(alignment: .top) {
             TopStatusStack(
                 banner: conversation.banner,
-                connectivity: conversation.connectivity,
-                diagnostic: diagnostic,
                 onBannerTap: {
                     if let banner = conversation.banner { onBannerTap(banner.id) }
                 },
@@ -123,10 +208,24 @@ struct ChatScreen: View {
             // Centered on every layout, including the Duo's vertical-bar one,
             // where the system title sits on the leading edge.
             ToolbarItem(placement: .principal) {
-                HostScopedTitle(title: conversation.title, host: host)
+                HStack(spacing: 6) {
+                    HostScopedTitle(title: conversation.title, host: nil)
+                        .accessibilityIdentifier("conversation-title")
+                        .layoutPriority(1)
+                    if let status = ConversationStatusPresentation.make(
+                        connectivity: conversation.connectivity,
+                        diagnostic: diagnostic,
+                        transcriptSync: conversation.transcriptSync
+                    ) {
+                        ConversationStatusView(status: status, onRetryConnection: onRetrySynchronization,
+                                               onRetryMessages: onRetryTranscriptSync)
+                    }
+                }
             }
             GlobalToolbarActions(atBottom: globalActionsAtBottom, onNewChat: onOpenNewChat, onSettings: onOpenSettings)
         }
+        .toolbarVisibility(.visible, for: .navigationBar)
+        .modifier(PersistentChatToolbar())
         .sheet(item: previewBinding) { preview in
             AttachmentPreviewSheet(
                 name: preview.name,
@@ -159,18 +258,28 @@ struct ChatScreen: View {
         )
     }
 
-    private var topOverlayInset: CGFloat {
-        var rows = 0
-        if conversation.banner != nil { rows += 1 }
-        if conversation.connectivity != .hidden { rows += 1 }
-        if diagnostic != .none { rows += 1 }
-        return rows > 0 ? CGFloat(rows) * 44 + 12 : 0
+    private func stableAnchor(for visible: String?) -> String? {
+        guard let visible, let index = conversation.rows.firstIndex(where: { $0.id == visible }) else { return visible }
+        if case .timeMarker = conversation.rows[index] {
+            return conversation.rows.dropFirst(index + 1).first?.id ?? visible
+        }
+        return visible
     }
 
     // MARK: - Composer
 
     private var composerArea: some View {
-        ComposerView(
+        VStack(spacing: GianTheme.Metrics.paddingSmall) {
+            if conversation.queue?.entries.isEmpty == false || conversation.queueCommand != nil {
+                let queue = conversation.queue ?? SessionQueue(revision: "", entries: [])
+                QueueList(queue: queue, command: conversation.queueCommand,
+                          enabled: mutationsReady, canUpdate: conversation.canUpdateQueue,
+                          canRemove: conversation.canRemoveQueue, canClear: conversation.canClearQueue,
+                          canSendNow: conversation.canSendQueueNow,
+                          onMutation: onMutateQueue, onRecover: onRecoverQueue)
+                    .id(conversation.id)
+            }
+            ComposerView(
             draft: Binding(
                 get: { composer.draft.text },
                 set: onEditDraft
@@ -191,7 +300,11 @@ struct ChatScreen: View {
                 onSelectApproval: onSelectApproval,
                 onToggleAutomaticTranslation: onToggleAutomaticTranslation
             ),
-            onSend: onSend,
+            onSend: {
+                followsLatest = true
+                latestScrollRequest += 1
+                onSend()
+            },
             onStop: onStop,
             onRetryTranslationSend: onRetryTranslationSend,
             onSendOriginal: onSendOriginal,
@@ -199,11 +312,181 @@ struct ChatScreen: View {
             onRecoverUncertain: onRecoverUncertain,
             onRemoveAttachment: onRemoveAttachment,
             onRetryAttachmentUpload: onRetryAttachmentUpload,
+            onFocusChange: { focused in
+                if focused {
+                    followsLatest = true
+                    latestScrollRequest += 1
+                }
+            },
             attachmentPicker: attachmentPicker
-        )
+            )
+        }
         .frame(maxWidth: GianTheme.Metrics.readableWidth)
         .padding(.horizontal, GianTheme.Metrics.paddingMedium)
         .padding(.bottom, GianTheme.Metrics.paddingSmall)
         .frame(maxWidth: .infinity)
+    }
+}
+
+private struct QueueList: View {
+    let queue: SessionQueue
+    let command: QueueCommandState?
+    let enabled: Bool
+    let canUpdate: Bool
+    let canRemove: Bool
+    let canClear: Bool
+    let canSendNow: Bool
+    let onMutation: (QueueMutation) -> Void
+    let onRecover: () -> Void
+    @State private var expanded = true
+    @State private var editing: QueuedMessage?
+    @State private var showingEditor = false
+    @State private var editedText = ""
+    @State private var confirmingSendNow = false
+    @State private var confirmingClear = false
+
+    private var controlsEnabled: Bool {
+        guard enabled else { return false }
+        switch command {
+        case .pending, .uncertain: return false
+        case .failed, nil: return true
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+        DisclosureGroup(isExpanded: $expanded) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(queue.entries) { entry in
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "clock")
+                                .foregroundStyle(GianTheme.Colors.secondaryLabel)
+                            Text(entry.text.isEmpty ? "Attachment" : entry.text)
+                                .lineLimit(2)
+                            if entry.attachmentCount > 0 {
+                                Label("\(entry.attachmentCount)", systemImage: "paperclip")
+                                    .foregroundStyle(GianTheme.Colors.secondaryLabel)
+                            }
+                            Spacer(minLength: 0)
+                            if canUpdate {
+                                Button {
+                                    editing = entry
+                                    editedText = entry.text
+                                    showingEditor = true
+                                } label: { Image(systemName: "pencil").frame(width: 36, height: 36).contentShape(Rectangle()) }
+                                    .accessibilityLabel("Edit queued message")
+                                    .disabled(!controlsEnabled)
+                            }
+                            if canRemove {
+                                Button { onMutation(.remove(id: entry.id)) } label: {
+                                    Image(systemName: "xmark").frame(width: 36, height: 36).contentShape(Rectangle())
+                                }
+                                    .accessibilityLabel("Remove queued message")
+                                    .disabled(!controlsEnabled)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .font(GianTheme.Typography.caption)
+                .padding(.top, 8)
+            }
+            .frame(maxHeight: 120)
+        } label: {
+            HStack {
+                Label("Queued (\(queue.entries.count))", systemImage: "text.line.first.and.arrowtriangle.forward")
+                Spacer()
+                if canSendNow && !queue.entries.isEmpty {
+                    Button { confirmingSendNow = true } label: {
+                        Image(systemName: "arrow.up.circle").frame(width: 36, height: 36).contentShape(Rectangle())
+                    }
+                        .accessibilityLabel("Send queue now")
+                        .disabled(!controlsEnabled)
+                }
+                if canClear && !queue.entries.isEmpty {
+                    Button { confirmingClear = true } label: {
+                        Image(systemName: "trash").frame(width: 36, height: 36).contentShape(Rectangle())
+                    }
+                        .accessibilityLabel("Clear queued messages")
+                        .disabled(!controlsEnabled)
+                }
+            }
+            .font(GianTheme.Typography.caption)
+        }
+        switch command {
+        case .pending: ProgressView().controlSize(.mini)
+        case .uncertain: Button("Check queue status", action: onRecover).font(GianTheme.Typography.caption)
+        case .failed(let message): Text(message).font(GianTheme.Typography.caption).foregroundStyle(GianTheme.Colors.failure).lineLimit(2)
+        case nil: EmptyView()
+        }
+        }
+        .alert("Edit queued message", isPresented: $showingEditor) {
+            TextField("Message", text: $editedText)
+            Button("Cancel", role: .cancel) { editing = nil }
+            Button("Save") {
+                if let editing { onMutation(.update(id: editing.id, text: editedText)) }
+                editing = nil
+            }
+        }
+        .confirmationDialog("Send queued messages now?",
+                            isPresented: $confirmingSendNow, titleVisibility: .visible) {
+            Button("Send now") { onMutation(.sendNow) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("While a turn is running, all queued messages are steered into it. Otherwise, the next queued message starts a new turn.")
+        }
+        .confirmationDialog("Clear all queued messages?", isPresented: $confirmingClear, titleVisibility: .visible) {
+            Button("Clear queue", role: .destructive) { onMutation(.clear) }
+            Button("Cancel", role: .cancel) {}
+        }
+        .padding(10)
+        .background(GianTheme.Colors.card, in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct TranscriptScrollEdges: Equatable {
+    let nearBottom: Bool
+    let viewportHeight: CGFloat
+    let contentHeight: CGFloat
+}
+
+private struct PersistentChatToolbar: ViewModifier {
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 27.0, *) {
+            content
+                .toolbarMinimizationBehavior(.never, for: .navigationBar)
+        } else {
+            content
+        }
+    }
+}
+
+struct TranscriptFollowSignal: Equatable {
+    let ids: [String]
+    let lastAssistantID: String?
+    let lastAssistantText: String?
+
+    init(rows: [TranscriptRow]) {
+        ids = rows.map(\.id)
+        let assistant = rows.reversed().compactMap { row -> AssistantRow? in
+            if case .assistant(let item) = row { return item }
+            return nil
+        }.first
+        lastAssistantID = assistant?.id.rawValue
+        lastAssistantText = assistant?.markdown
+    }
+
+    func shouldFollow(after old: TranscriptFollowSignal) -> Bool {
+        if isPrepend(after: old) { return false }
+        return ids.last != old.ids.last || lastAssistantID != old.lastAssistantID || lastAssistantText != old.lastAssistantText
+    }
+
+    func isPrepend(after old: TranscriptFollowSignal) -> Bool {
+        let current = Set(ids)
+        guard let shared = old.ids.first(where: { current.contains($0) }),
+              let oldIndex = old.ids.firstIndex(of: shared), let newIndex = ids.firstIndex(of: shared) else { return false }
+        return newIndex > oldIndex
     }
 }

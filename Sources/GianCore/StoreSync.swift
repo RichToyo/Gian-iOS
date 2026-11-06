@@ -14,6 +14,9 @@ extension GianClientStore {
     func reconcileActiveTranscript() async -> GianDispatchResult {
         guard let scope = readyScope(), let session = currentSessionID,
               state.conversation?.session.id == session else { return reject(.notFound) }
+        let sync = beginTranscriptSync(session: session)
+        var succeeded = false
+        defer { finishTranscriptSync(sync, session: session, state: succeeded ? .idle : .failed) }
         let token = epoch
         let navigation = navigationEpoch
         let baseline = memory.bundle(for: scope).transcripts[session] ?? []
@@ -57,11 +60,17 @@ extension GianClientStore {
                 }
                 cursor.catchUp = nil
                 memory.update(scope) { $0.transcripts[session] = merged; $0.transcriptCursors[session] = cursor }
+                if let tail = memory.retentionTailIDs(scope, session: session) {
+                    let connected = tail.isEmpty || !page.hasOlder || !tail.isDisjoint(with: pending.map(\.id))
+                    memory.noteRetentionItems(pending, session: session, scope: scope, hydrated: connected)
+                }
                 state.conversation?.items = merged
                 state.conversation?.cursor = cursor.cursor
                 state.conversation?.hasOlder = cursor.hasOlder
                 state.conversation?.hydratedFromCache = false
-                return persistenceResult()
+                let result = persistenceResult()
+                succeeded = result.isApplied
+                return result
             }
             guard let next = page.cursor, seen.insert(next).inserted else { return reject(.notFound) }
             before = next
@@ -85,7 +94,12 @@ extension GianClientStore {
         case .snapshot(let payload):
             let applied = applySnapshot(payload, scope: scope)
             guard applied.isApplied, negotiatedDirectory else { return applied }
-            return await refreshLoadedDirectoryViews()
+            switch await refreshLoadedDirectoryViews() {
+            case .complete, .incomplete: return .applied
+            case .stale: return reject(.staleOperation)
+            case .failed: return reject(.notFound)
+            case .blocked: return reject(.mutationsDisabled)
+            }
         case .unknownOutcome:
             // This is an idempotent directory read, not an uncertain mutation.
             // The coordinator may retry a superseded read within its fixed bound.
@@ -160,6 +174,10 @@ extension GianClientStore {
             memory.update(scope) { $0.transcriptCursors[sessionID] = savedCursor }
         }
         memory.update(scope) { $0.transcripts[sessionID] = merged }
+        if navigation == navigationEpoch, currentSessionID == sessionID,
+           (sessions + searchHits).contains(where: { $0.id == sessionID && $0.authorized && !$0.archived }) {
+            memory.noteRetentionItems(page.items, session: sessionID, scope: scope)
+        }
         return persistenceResult()
     }
 
@@ -183,7 +201,8 @@ extension GianClientStore {
             // Rows already published by directory.list stay until that directory page
             // replaces them. A replayed snapshot must not put its narrow sessions back on top.
             let published = publishedDirectorySessionIDs
-            for session in payload.sessions.filter({ $0.hostID == scope.host }) where !published.contains(session.id) {
+            for session in payload.sessions.filter({ $0.hostID == scope.host }) where !published.contains(session.id) && !deniedSessionAccess.contains(session.id)
+                && (!sessionAccessOverflow || sessions.contains(where: { $0.id == session.id && $0.authorized })) {
                 if let index = sessions.firstIndex(where: { $0.id == session.id }) {
                     let activity = sessions[index]
                     sessions[index] = session
@@ -192,7 +211,10 @@ extension GianClientStore {
                 } else { sessions.append(session) }
             }
         } else {
-            sessions = payload.sessions.filter { $0.hostID == scope.host }
+            sessions = payload.sessions.filter { incoming in
+                incoming.hostID == scope.host && !deniedSessionAccess.contains(incoming.id)
+                    && (!sessionAccessOverflow || sessions.contains(where: { $0.id == incoming.id && $0.authorized }))
+            }
             directoryViews = [:]
             searchHits = []
         }
@@ -217,7 +239,7 @@ extension GianClientStore {
         let retainedInteractions = expanded ? state.interactions.filter { prior in
             !payload.sessions.contains(where: { $0.id == prior.sessionID })
         } : []
-        state.interactions = retainedInteractions + payload.interactions.map { incoming in
+        state.interactions = retainedInteractions + payload.interactions.filter { !deniedSessionAccess.contains($0.sessionID) }.map { incoming in
             var next = incoming
             if incoming.phase == .pending, let previous = priorInteractions[incoming.id],
                previous.phase == .responding || previous.phase == .uncertain {
@@ -228,6 +250,14 @@ extension GianClientStore {
         state.sync = SyncProjection(cursor: payload.cursor, needsSnapshot: false, reason: nil)
         requiresFreshSnapshot = false
         readyServiceEpoch = (service as? any GianClientEventSource)?.eventEpoch
+        if let diagnostic = serviceDiagnostic,
+           case .resyncRequired = diagnostic.status,
+           diagnostic.epoch == readyServiceEpoch,
+           diagnostic.server.map({ $0 == scope.server }) ?? true,
+           diagnostic.account.map({ $0 == scope.account }) ?? true,
+           diagnostic.host.map({ $0 == scope.host }) ?? true {
+            serviceDiagnostic = nil
+        }
         state.directory.authority = expanded ? .negotiatedDirectoryV1 : payload.authority
         if state.localConnectivity == .available { state.connection = .online }
         if let index = state.hosts.firstIndex(where: { $0.id == payload.host.id }) { state.hosts[index] = payload.host }
@@ -293,6 +323,7 @@ extension GianClientStore {
                     }
                 }
             case .interaction(let interaction):
+                if deniedSessionAccess.contains(interaction.sessionID) { break }
                 if let index = state.interactions.firstIndex(where: { $0.id == interaction.id }) {
                     let phase = state.interactions[index].phase
                     state.interactions[index] = interaction
@@ -305,6 +336,8 @@ extension GianClientStore {
             case .attention(let sessionID, let kind):
                 guard let index = sessions.firstIndex(where: { $0.id == sessionID }) else { return reject(.notFound) }
                 sessions[index].attention = kind
+            case .attentions(let values):
+                for index in sessions.indices { sessions[index].attention = values[sessions[index].id] }
             }
             cursor.eventSequence = sequence
             state.sync.cursor = cursor
@@ -312,6 +345,119 @@ extension GianClientStore {
             schedulePersistence()
             return .applied
         }
+    }
+
+    func applyStatePatch(sequence: Int, generation: HostGenerationID, baseRevision: String,
+                         revision: String, patch: CanonicalStatePatch) -> GianDispatchResult {
+        guard !state.sync.needsSnapshot else { return .applied }
+        guard var cursor = state.sync.cursor, cursor.hostGeneration == generation,
+              cursor.eventSequence < Int.max, sequence == cursor.eventSequence + 1,
+              !revision.isEmpty, baseRevision == cursor.revision,
+              patch.sessions.allSatisfy({ $0.hostID == state.currentHostID }) else {
+            markTranscriptCatchUp()
+            state.sync.needsSnapshot = true
+            state.sync.reason = .revisionMismatch
+            if state.connection == .online { state.connection = .resyncing }
+            schedulePersistence()
+            return .applied
+        }
+        let legacyRemoved = negotiatedDirectory ? [] : patch.removedSessions
+        let removedTasks = Set(patch.removedTasks)
+        if negotiatedDirectory {
+            var phases = [state.composer.send]
+            if let scope = readyScope() { phases.append(contentsOf: memory.bundle(for: scope).operations.values) }
+            let creating = phases.contains { phase in
+                switch phase {
+                case .creating(let intent), .uncertain(let intent): return intent.stage == .create
+                default: return false
+                }
+            }
+            for id in patch.removedSessions {
+                let session = (sessions + searchHits).first { $0.id == id && $0.authorized && !$0.archived }
+                let taskIsRemoved = session.flatMap { $0.taskID }.map { removedTasks.contains($0) } ?? false
+                guard !deniedSessionAccess.contains(id), session != nil || creating,
+                      !taskIsRemoved else { continue }
+                guard pendingSessionAccess[id] != nil || pendingSessionAccess.count < 4_096 else {
+                    sessionAccessOverflow = true
+                    continue
+                }
+                sessionAccessSequence += 1
+                pendingSessionAccess[id] = sessionAccessSequence
+            }
+        }
+        if !patch.removedSessions.isEmpty || !patch.removedTasks.isEmpty {
+            invalidateDirectoryViews()
+            directoryRefreshPending = negotiatedDirectory
+            let sessionsRemoved = Set(legacyRemoved)
+            for collection in directoryViews.keys {
+                directoryViews[collection]?.entries.removeAll { entry in
+                    sessionsRemoved.contains(entry.session.id) || entry.task.map { removedTasks.contains($0.id) } == true
+                }
+            }
+        }
+        for session in patch.sessions {
+            upsertSession(session)
+            if state.conversation?.session.id == session.id,
+               let updated = sessions.first(where: { $0.id == session.id && $0.authorized }),
+               !deniedSessionAccess.contains(session.id) {
+                state.conversation?.session = updated
+            }
+        }
+        for (id, queue) in patch.queues {
+            guard !sessionAccessOverflow, pendingSessionAccess[id] == nil, !deniedSessionAccess.contains(id),
+                  let index = sessions.firstIndex(where: { $0.id == id && $0.authorized && !$0.archived }) else { continue }
+            sessions[index].queue = queue
+            if state.conversation?.session.id == id { state.conversation?.session = sessions[index] }
+        }
+        for id in legacyRemoved {
+            if let index = sessions.firstIndex(where: { $0.id == id }) { sessions[index].authorized = false }
+            if let index = searchHits.firstIndex(where: { $0.id == id }) { searchHits[index].authorized = false }
+            if let scope = readyScope() { memory.clearRetentionActivity(scope: scope, session: id) }
+            if temporarySearchResultID == id { temporarySearchResultID = nil }
+            locallyCreatedSessions.remove(id); locallyCreatedWithActivity.remove(id)
+            state.interactions.removeAll { $0.sessionID == id }
+            if currentSessionID == id {
+                navigationEpoch += 1; state.conversation = nil; state.navigation.destination = .home
+            }
+        }
+        for task in patch.tasks {
+            if let index = taskRecords.firstIndex(where: { $0.id == task.id }) { taskRecords[index] = task }
+            else { taskRecords.append(task) }
+        }
+        for id in patch.removedTasks {
+            if let index = taskRecords.firstIndex(where: { $0.id == id }) { taskRecords[index].status = .completed }
+            for index in sessions.indices where sessions[index].taskID == id {
+                recordSessionDenial(sessions[index].id); pendingSessionAccess.removeValue(forKey: sessions[index].id)
+                sessions[index].authorized = false
+            }
+            for index in searchHits.indices where searchHits[index].taskID == id {
+                recordSessionDenial(searchHits[index].id); pendingSessionAccess.removeValue(forKey: searchHits[index].id)
+                searchHits[index].authorized = false
+            }
+            if let selected = temporarySearchResultID,
+               (sessions + searchHits).contains(where: { $0.id == selected && $0.taskID == id }) { temporarySearchResultID = nil }
+            if let selected = state.conversation?.session, selected.taskID == id {
+                navigationEpoch += 1; state.conversation = nil; state.navigation.destination = .home
+            }
+        }
+        for incoming in patch.interactions where !deniedSessionAccess.contains(incoming.sessionID) {
+            if let index = state.interactions.firstIndex(where: { $0.id == incoming.id }) {
+                let phase = state.interactions[index].phase
+                state.interactions[index] = incoming
+                if incoming.phase == .pending && (phase == .responding || phase == .uncertain) { state.interactions[index].phase = phase }
+            } else { state.interactions.append(incoming) }
+        }
+        let removed = Set(patch.removedInteractions)
+        state.interactions.removeAll { removed.contains($0.id) && $0.phase != .uncertain && $0.phase != .responding }
+        if let attention = patch.attention {
+            for index in sessions.indices { sessions[index].attention = attention[sessions[index].id] }
+        }
+        cursor.eventSequence = sequence; cursor.revision = revision
+        state.sync.cursor = cursor
+        reproject()
+        if negotiatedDirectory && !patch.removedSessions.isEmpty { return persistenceResult() }
+        schedulePersistence()
+        return .applied
     }
 
     func applyTranscript(sessionID: SessionID, item: TranscriptItem) -> GianDispatchResult {
@@ -339,12 +485,33 @@ extension GianClientStore {
             schedulePersistence()
             return reject(.scopeMismatch)
         }
+        switch item.body {
+        case .user, .assistant, .command, .fileChange, .fileRead, .fileSearch, .webSearch, .tool, .agent, .turnEnd:
+            noteCreatedActivity(sessionID)
+        default: break
+        }
         if state.conversation?.session.id == sessionID {
             state.conversation?.items = merged
         }
         memory.update(scope) { $0.transcripts[sessionID] = merged }
         // An exact duplicate is already in the log. It must not raise another banner.
         if existing == merged { return .applied }
+        memory.noteRetentionItems([item], session: sessionID, scope: scope)
+        let isRealActivity: Bool
+        switch item.body {
+        case .user, .assistant, .command, .fileChange, .fileRead, .fileSearch, .webSearch, .tool, .agent, .turnEnd:
+            isRealActivity = true
+        default: isRealActivity = false
+        }
+        if isRealActivity, item.timestamp.timeIntervalSince1970.isFinite,
+           (!session.activityIsMessageOrExecution || session.lastActivityAt.map({ item.timestamp > $0 }) != false) {
+            var active = session
+            active.lastActivityAt = item.timestamp
+            active.activityIsMessageOrExecution = true
+            upsertSession(active)
+            if state.conversation?.session.id == sessionID { state.conversation?.session = active }
+            reproject()
+        }
         let summary: String
         switch item.body {
         case .user(let text, _, _, _): summary = text
@@ -364,6 +531,7 @@ extension GianClientStore {
     }
 
     func applyTranslationEvent(sessionID: SessionID, update: TranslationInbound) -> GianDispatchResult {
+        guard !deniedSessionAccess.contains(sessionID) else { return reject(.notAuthorized) }
         guard state.capabilities.translationNegotiated else { return reject(.translationUnavailable) }
         var current = state.translations[sessionID] ?? .unsupported
         switch update {
@@ -398,8 +566,8 @@ extension GianClientStore {
                prior.presentableText != nil {
                 break
             }
-            current.records.removeAll { $0.id == verified.id }
-            current.records.append(verified)
+            if let index = current.records.firstIndex(where: { $0.id == verified.id }) { current.records[index] = verified }
+            else { current.records.append(verified) }
         }
         state.translations[sessionID] = current
         schedulePersistence()
@@ -452,14 +620,31 @@ extension GianClientStore {
             if existing.uncertain { return reject(.uncertainOutcome) }
             if existing.pending { return reject(.operationInFlight) }
         }
-        if !mutationsAllowed() { return reject(.mutationsDisabled) }
-        if let code = requireCapability(.sessionSend) { return reject(code) }
-        let requestID: TranslationRequestID = mint()
+        if current.automatic[sourceID]?.pending == true { return reject(.operationInFlight) }
         guard !sourceID.isEmpty, sourceID.utf8.count <= 1_024, text.utf8.count <= 2 * 1024 * 1024,
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return reject(.translationUnavailable)
         }
-        current.reading[sourceID] = ReadingRequestState(requestID: requestID, pending: true, uncertain: false)
+        if sourceID.hasPrefix("turn:") {
+            guard let turn = Int(sourceID.dropFirst(5)), turn >= 0, sourceID == "turn:\(turn)",
+                  let currentText = state.conversation?.items.reversed().compactMap({ item -> String? in
+                      guard item.turn == turn, case .assistant(let value, _) = item.body,
+                            !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+                      return value
+                  }).first, currentText == text else { return reject(.staleOperation) }
+        }
+        let sourceHash = SHA256Hex.digest(Data(text.utf8))
+        if current.records.contains(where: {
+            $0.sourceID == sourceID && $0.sourceSHA256.lowercased() == sourceHash
+                && !$0.targetLanguage.isEmpty && !current.readingLanguage.isEmpty
+                && $0.targetLanguage.caseInsensitiveCompare(current.readingLanguage) == .orderedSame
+                && ($0.integrity == .inlineVerified || $0.integrity == .pagedVerified || $0.integrity == .descriptorPending)
+        }) { return .applied }
+        if !mutationsAllowed() { return reject(.mutationsDisabled) }
+        if let code = requireCapability(.sessionSend) { return reject(code) }
+        let requestID: TranslationRequestID = mint()
+        current.reading[sourceID] = ReadingRequestState(requestID: requestID, pending: true, uncertain: false,
+                                                         sourceSHA256: sourceHash, targetLanguage: current.readingLanguage)
         state.translations[sessionID] = current
         memory.update(scope) { $0.readingIntents[sessionID, default: [:]][sourceID] = StoredReadingIntent(requestID: requestID, sourceText: text) }
         guard persist() else {
@@ -505,10 +690,27 @@ extension GianClientStore {
         return reject(.translationUnavailable)
     }
 
+    func recoverReading(_ sourceID: String) async -> GianDispatchResult {
+        guard let scope = readyScope(), let sessionID = currentSessionID,
+              let request = state.translations[sessionID]?.reading[sourceID], request.uncertain || request.pending else { return reject(.notFound) }
+        guard translationStatusRequests.insert(request.requestID).inserted else { return reject(.operationInFlight) }
+        defer { translationStatusRequests.remove(request.requestID) }
+        let token = epoch
+        let navigation = navigationEpoch
+        let status = await service.translationRequestStatus(scope: scope,
+            request: TranslationStatusRequest(sessionID: sessionID, requestID: request.requestID))
+        guard responseIsCurrent(token), navigation == navigationEpoch, currentSessionID == sessionID,
+              state.translations[sessionID]?.reading[sourceID]?.requestID == request.requestID else { return reject(.staleOperation) }
+        applyReadingResponse(status, sessionID: sessionID, sourceID: sourceID, requestID: request.requestID)
+        return persistenceResult()
+    }
+
     func pageTranslation(_ id: TranslationRecordID) async -> GianDispatchResult {
         guard let scope = readyScope(), let sessionID = currentSessionID,
               let record = state.translations[sessionID]?.records.first(where: { $0.id == id })
         else { return reject(.notFound) }
+        guard translationPageRequests.insert(id).inserted else { return reject(.operationInFlight) }
+        defer { translationPageRequests.remove(id) }
         var assembled = ""
         var offset: Int?
         var pages = 0
@@ -594,21 +796,22 @@ extension GianClientStore {
         sourceID: String,
         requestID: TranslationRequestID
     ) {
+        let previous = state.translations[sessionID]?.reading[sourceID]
         switch response {
         case .settled(let settledID, let record, let error):
             guard settledID == requestID else { return }
-            state.translations[sessionID]?.reading[sourceID] = nil
             if let record {
-                guard record.sourceID == nil || record.sourceID == sourceID else { return }
-                if let scope = readyScope(), let original = memory.bundle(for: scope).readingIntents[sessionID]?[sourceID] {
-                    guard original.requestID == requestID,
-                          record.sourceSHA256.lowercased() == SHA256Hex.digest(Data(original.sourceText.utf8)) else {
-                        state.translations[sessionID]?.reading[sourceID] = ReadingRequestState(
-                            requestID: requestID, pending: false, uncertain: false, error: "Translation source integrity failed.")
-                        persist()
-                        return
-                    }
+                guard (record.sourceID == nil || record.sourceID == sourceID),
+                      let scope = readyScope(), let original = memory.bundle(for: scope).readingIntents[sessionID]?[sourceID],
+                      original.requestID == requestID,
+                      record.sourceSHA256.lowercased() == SHA256Hex.digest(Data(original.sourceText.utf8)) else {
+                    state.translations[sessionID]?.reading[sourceID] = ReadingRequestState(
+                        requestID: requestID, pending: true, uncertain: true,
+                        sourceSHA256: previous?.sourceSHA256, targetLanguage: previous?.targetLanguage)
+                    persist()
+                    return
                 }
+                state.translations[sessionID]?.reading[sourceID] = nil
                 let verified = TranslationReducer.verifiedRecord(
                     id: record.id,
                     sourceID: record.sourceID ?? sourceID,
@@ -625,21 +828,27 @@ extension GianClientStore {
                     requestID: requestID,
                     pending: false,
                     uncertain: false,
-                    error: error
+                    error: error,
+                    sourceSHA256: previous?.sourceSHA256, targetLanguage: previous?.targetLanguage
                 )
+            } else {
+                state.translations[sessionID]?.reading[sourceID] = ReadingRequestState(
+                    requestID: requestID, pending: true, uncertain: true,
+                    sourceSHA256: previous?.sourceSHA256, targetLanguage: previous?.targetLanguage)
             }
         case .unknown:
             state.translations[sessionID]?.reading[sourceID] = ReadingRequestState(
                 requestID: requestID,
                 pending: true,
-                uncertain: true
+                uncertain: true, sourceSHA256: previous?.sourceSHA256, targetLanguage: previous?.targetLanguage
             )
         case .failed(let message):
             state.translations[sessionID]?.reading[sourceID] = ReadingRequestState(
                 requestID: requestID,
                 pending: false,
                 uncertain: false,
-                error: message
+                error: message,
+                sourceSHA256: previous?.sourceSHA256, targetLanguage: previous?.targetLanguage
             )
         case .cancelled(let id) where id == requestID:
             state.translations[sessionID]?.reading[sourceID]?.pending = false
@@ -655,8 +864,11 @@ extension GianClientStore {
 
     private func replaceRecord(_ record: ReadingTranslation, sessionID: SessionID) {
         if state.translations[sessionID] == nil { state.translations[sessionID] = .unsupported }
-        state.translations[sessionID]?.records.removeAll { $0.id == record.id }
-        state.translations[sessionID]?.records.append(record)
+        if let index = state.translations[sessionID]?.records.firstIndex(where: { $0.id == record.id }) {
+            state.translations[sessionID]?.records[index] = record
+        } else {
+            state.translations[sessionID]?.records.append(record)
+        }
         persist()
     }
 }

@@ -21,10 +21,13 @@ struct HostTitleLabel: View {
                 .font(isSubtitle ? GianTheme.Typography.navSubtitle : GianTheme.Typography.navTitle)
                 .foregroundStyle(isSubtitle ? GianTheme.Colors.secondaryLabel : GianTheme.Colors.label)
                 .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .layoutPriority(1)
             if showsChevron {
                 Image(systemName: "chevron.down")
                     .font(.caption2.weight(.bold))
                     .foregroundStyle(GianTheme.Colors.secondaryLabel)
+                    .fixedSize()
             }
         }
         .accessibilityElement(children: .ignore)
@@ -110,6 +113,8 @@ struct HostList: View {
 /// pull-to-refresh. The symbol shows the grouping.
 struct DirectoryListMenu: View {
     @Binding var selection: DirectoryView
+    var timeFilter: DirectoryTimeFilter
+    var onSelectTimeFilter: (DirectoryTimeFilter) -> Void
     var onRefresh: () -> Void
 
     @State private var showsOptions = false
@@ -125,6 +130,12 @@ struct DirectoryListMenu: View {
                 rows: [
                     ChoiceListRow(id: "tasks", title: "Tasks", systemImage: "checklist", isSelected: selection == .tasks) { selection = .tasks },
                     ChoiceListRow(id: "repos", title: "Repositories", systemImage: "folder", isSelected: selection == .repos) { selection = .repos },
+                ],
+                additionalHeader: "Time filter",
+                additionalRows: [
+                    ChoiceListRow(id: "hour", title: "Last hour", isSelected: timeFilter == .lastHour) { onSelectTimeFilter(.lastHour) },
+                    ChoiceListRow(id: "day", title: "Last 24 hours", isSelected: timeFilter == .last24Hours) { onSelectTimeFilter(.last24Hours) },
+                    ChoiceListRow(id: "week", title: "Last 7 days", isSelected: timeFilter == .last7Days) { onSelectTimeFilter(.last7Days) },
                 ],
                 actions: [ChoiceListRow(id: "refresh", title: "Refresh", systemImage: "arrow.clockwise", action: onRefresh)]
             )
