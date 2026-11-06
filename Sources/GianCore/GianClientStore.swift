@@ -702,6 +702,9 @@ public final class GianClientStore {
                 sessions[index].activityIsMessageOrExecution = previous.activityIsMessageOrExecution
             }
             if session.completedAt == nil { sessions[index].completedAt = previous.completedAt }
+            // Session records carry no attention; attention updates, patches and
+            // snapshots set and clear it.
+            if session.attention == nil { sessions[index].attention = previous.attention }
         } else {
             sessions.append(session)
         }

@@ -423,6 +423,41 @@ struct ContractTests {
         #expect(foreign == .rejected(.scopeMismatch))
     }
 
+    @Test func sessionUpdatesKeepAttentionUntilAttentionClearsIt() async throws {
+        let (store, _, clock) = makeHarness()
+        _ = try await signIn(store, clock: clock)
+        let scope = try clientScope(store)
+        let id = PreviewFixtures.sessionID
+        func attention() -> AttentionKind? { store.sessions.first { $0.id == id }?.attention }
+        func apply(_ patch: CanonicalStatePatch, _ revision: String) throws {
+            let cursor = try #require(store.state.sync.cursor)
+            #expect(store.applyStatePatch(sequence: cursor.eventSequence + 1, generation: cursor.hostGeneration,
+                                          baseRevision: cursor.revision, revision: revision, patch: patch).isApplied)
+        }
+        var waiting = CanonicalStatePatch(); waiting.attention = [id: .interaction]
+        try apply(waiting, "attention-set")
+        #expect(attention() == .interaction)
+
+        // A sessions patch and a session.updated event carry the record only.
+        var renamed = try #require(store.sessions.first { $0.id == id })
+        renamed.attention = nil
+        renamed.title = "Renamed"
+        var update = CanonicalStatePatch(); update.sessions = [renamed]
+        try apply(update, "session-renamed")
+        #expect(attention() == .interaction)
+        renamed.title = "Renamed again"
+        let cursor = try #require(store.state.sync.cursor)
+        #expect(store.ingest(InboundEnvelope(scope: scope, event: .canonical(sequence: cursor.eventSequence + 1,
+            generation: cursor.hostGeneration, body: .session(renamed)))).isApplied)
+        #expect(store.sessions.first { $0.id == id }?.title == "Renamed again")
+        #expect(attention() == .interaction)
+        #expect(store.state.directory.tasks.flatMap(\.conversations).first { $0.id == id }?.attention == .interaction)
+
+        var cleared = CanonicalStatePatch(); cleared.attention = [:]
+        try apply(cleared, "attention-cleared")
+        #expect(attention() == nil)
+    }
+
     @Test func openingBannerNavigatesToItsOwnConversation() async throws {
         let (store, _, clock) = makeHarness()
         _ = try await signIn(store, clock: clock)
