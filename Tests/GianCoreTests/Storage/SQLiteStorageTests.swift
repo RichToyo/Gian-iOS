@@ -127,7 +127,8 @@ struct SQLiteStorageTests {
         let oldRecord = reading("translation-old-record", source: "turn:1", sourceText: "Old result", language: "zh-CN", text: "Old translation")
         var state = StoredHostState(); state.sessions = [old]
         state.transcripts[old.id] = [oldItem] + (2..<45).map { assistant("translation-old-\($0)", turn: $0, text: "Old \($0)") }
-        var translation = translationState(revision: 1, configRevision: 1, language: "zh-CN")
+        // Reading records are kept for the reading language, not the sending one.
+        var translation = translationState(revision: 1, configRevision: 1, readingLanguage: "zh-CN")
         translation.records = [oldRecord]; state.translations[old.id] = translation
         let storage = try SQLiteGianStorage(directory: directory)
         try storage.save(state, scope: scope)

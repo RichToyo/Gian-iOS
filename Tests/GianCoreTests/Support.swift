@@ -61,14 +61,15 @@ func translationState(
     configRevision: Int,
     automaticRevision: Int = 0,
     epoch: String = "",
-    language: String = "en"
+    language: String = "en",
+    readingLanguage: String = "es"
 ) -> TranslationSessionState {
     TranslationSessionState(
         supported: true,
         enabled: true,
         configured: true,
         sendingLanguage: language,
-        readingLanguage: "es",
+        readingLanguage: readingLanguage,
         revision: revision,
         configRevision: configRevision,
         automaticRevision: automaticRevision,
