@@ -123,8 +123,11 @@ struct ContractTests {
     @Test func legacyDirectoryHidesReposAndSearch() async throws {
         let (store, service, clock) = makeHarness()
         _ = try await signIn(store, clock: clock)
-        #expect(store.state.directory.tasks.contains { $0.title == "Paint the harbor" })
-        #expect(!conversationTitles(store).contains("Mooring notes"))
+        // `.done` is an idle conversation whose last turn finished, not a
+        // completed one; a legacy Host has no completed_at to hide it by.
+        #expect(store.state.directory.tasks.contains { section in
+            section.title == "Paint the harbor" && section.conversations.contains { $0.title == "Mooring notes" }
+        })
         #expect(store.state.directory.repos.isEmpty)
         #expect(store.state.directory.reposSupport == .unsupported(.reposDirectory))
         #expect(store.state.directory.searchSupport == .unsupported(.olderSearch))
