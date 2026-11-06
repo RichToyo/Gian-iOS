@@ -11,10 +11,33 @@ extension GianClientStore {
             reproject()
             _ = persist()
         case .unavailable:
-            _ = ingest(InboundEnvelope(scope: scope, event: .sessionUnavailable(session), serviceEpoch: expectedServiceEpoch))
+            // Like an authorization, an answered denial applies even before
+            // the directory is negotiated again (e.g. restored from cache).
+            _ = applySessionUnavailable(session)
         case .retry:
             break
         }
+    }
+
+    func applySessionUnavailable(_ session: SessionID) -> GianDispatchResult {
+        recordSessionDenial(session)
+        pendingSessionAccess.removeValue(forKey: session)
+        invalidateDirectoryViews()
+        directoryRefreshPending = true
+        for collection in directoryViews.keys {
+            directoryViews[collection]?.entries.removeAll { $0.session.id == session }
+        }
+        if let scope = readyScope() { memory.clearRetentionActivity(scope: scope, session: session) }
+        if let index = sessions.firstIndex(where: { $0.id == session }) { sessions[index].authorized = false }
+        if let index = searchHits.firstIndex(where: { $0.id == session }) { searchHits[index].authorized = false }
+        if temporarySearchResultID == session { temporarySearchResultID = nil }
+        locallyCreatedSessions.remove(session); locallyCreatedWithActivity.remove(session)
+        state.interactions.removeAll { $0.sessionID == session }
+        if currentSessionID == session {
+            navigationEpoch += 1; state.conversation = nil; state.navigation.destination = .home
+        }
+        reproject()
+        return persistenceResult()
     }
 
     func manualRefreshDirectory(_ view: DirectoryCollection) async -> GianDispatchResult {

@@ -319,24 +319,7 @@ public final class GianClientStore {
             return persistenceResult()
         case .sessionUnavailable(let session):
             guard negotiatedDirectory else { return reject(.staleOperation) }
-            recordSessionDenial(session)
-            pendingSessionAccess.removeValue(forKey: session)
-            invalidateDirectoryViews()
-            directoryRefreshPending = true
-            for collection in directoryViews.keys {
-                directoryViews[collection]?.entries.removeAll { $0.session.id == session }
-            }
-            if let scope = readyScope() { memory.clearRetentionActivity(scope: scope, session: session) }
-            if let index = sessions.firstIndex(where: { $0.id == session }) { sessions[index].authorized = false }
-            if let index = searchHits.firstIndex(where: { $0.id == session }) { searchHits[index].authorized = false }
-            if temporarySearchResultID == session { temporarySearchResultID = nil }
-            locallyCreatedSessions.remove(session); locallyCreatedWithActivity.remove(session)
-            state.interactions.removeAll { $0.sessionID == session }
-            if currentSessionID == session {
-                navigationEpoch += 1; state.conversation = nil; state.navigation.destination = .home
-            }
-            reproject()
-            return persistenceResult()
+            return applySessionUnavailable(session)
         case .canonical(let sequence, let generation, let body):
             return applyCanonical(sequence: sequence, generation: generation, body: body)
         case .statePatch(let sequence, let generation, let base, let revision, let patch):
