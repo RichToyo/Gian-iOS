@@ -143,6 +143,22 @@ enum TranscriptLog {
         return merged
     }
 
+    /// Whether items changed live during a page read can win over the page
+    /// (as in `mergePage`) without hiding a missed middle. Assistant text
+    /// streams as deltas: a live copy that extends the page's, or that the
+    /// page's extends (chunks still in flight), is the same text. Text begun
+    /// after the read is whole. Anything else may sit on a gap.
+    static func liveChangesExtend(baseline: [TranscriptItem], current: [TranscriptItem], page: [TranscriptItem]) -> Bool {
+        let original = baseline.reduce(into: [TranscriptItemID: TranscriptItem]()) { $0[$1.id] = $1 }
+        let read = page.reduce(into: [TranscriptItemID: TranscriptItem]()) { $0[$1.id] = $1 }
+        return current.allSatisfy { item in
+            guard original[item.id] != item, case .assistant(let live, _) = item.body else { return true }
+            guard let copy = read[item.id] else { return original[item.id] == nil }
+            guard case .assistant(let paged, _) = copy.body else { return false }
+            return live.utf8.starts(with: paged.utf8) || paged.utf8.starts(with: live.utf8)
+        }
+    }
+
     static func mergePage(baseline: [TranscriptItem], current: [TranscriptItem], page: [TranscriptItem]) -> [TranscriptItem] {
         let original = baseline.reduce(into: [TranscriptItemID: TranscriptItem]()) { $0[$1.id] = $1 }
         let changedDuringRequest = current.filter { original[$0.id] != $0 }

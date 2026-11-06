@@ -62,6 +62,55 @@ struct TranscriptCatchUpTests {
         #expect(service.base.translationRequestCount == 0)
     }
 
+    /// The Agent keeps streaming while catch-up pages are read. Live text the
+    /// page's copy is a prefix of (or extends), and items begun after the
+    /// read, cannot hide a missed middle, so catch-up finishes and Stop/Send
+    /// are not held off until the turn ends.
+    @Test func liveStreamingConsistentWithThePageLetsCatchUpFinish() async throws {
+        let service = ControlledService()
+        let clock = ManualGianClock(instant: PreviewFixtures.instant)
+        let store = GianClientStore(service: service, clock: clock, storage: InMemoryGianStorage())
+        _ = try await signIn(store, clock: clock)
+        let scope = try clientScope(store)
+        func assistant(_ id: String, turn: Int, _ text: String, delta: Bool = false) -> TranscriptItem {
+            var item = transcriptItem(id: id, turn: turn, text: text)
+            item.body = .assistant(text: text, delta: delta)
+            return item
+        }
+        func live(_ item: TranscriptItem) {
+            _ = store.ingest(InboundEnvelope(scope: scope, event: .transcript(sessionID: PreviewFixtures.sessionID, item: item)))
+        }
+        func reconcile(page: [TranscriptItem], during: [TranscriptItem]) async throws -> GianDispatchResult {
+            store.markConnectionNotReady(.resyncing, reason: .cryptoResumed)
+            _ = store.ingest(InboundEnvelope(scope: scope, event: .directory(service.base.script.directory)))
+            #expect(!store.mutationsReady)
+            service.holdNextPage = true
+            let pending = Task { await store.reconcileActiveTranscript() }
+            for _ in 0..<100 where service.page == nil { await Task.yield() }
+            let completion = try #require(service.page)
+            service.page = nil
+            during.forEach(live)
+            completion.resume(returning: TranscriptPageResponse(items: page, cursor: nil, hasOlder: false))
+            return await pending.value
+        }
+        service.transcriptPages = [TranscriptPageResponse(items: [assistant("streaming", turn: 1, "A")], cursor: nil, hasOlder: false)]
+        _ = await store.dispatch(.selectConversation(PreviewFixtures.sessionID))
+
+        // Live text extends the page's copy, and a new item starts after the read.
+        #expect((try await reconcile(page: [assistant("streaming", turn: 1, "A")],
+            during: [assistant("streaming", turn: 1, "B", delta: true), assistant("next", turn: 2, "N", delta: true)])).isApplied)
+        #expect(store.state.conversation?.items.map(\.body) == [.assistant(text: "AB", delta: false), .assistant(text: "N", delta: false)])
+        #expect(store.mutationsReady)
+
+        // The page is ahead of live text whose next chunks are still in flight.
+        #expect((try await reconcile(page: [assistant("streaming", turn: 1, "AB"), assistant("next", turn: 2, "NOPQ")],
+            during: [assistant("next", turn: 2, "O", delta: true)])).isApplied)
+        #expect(store.mutationsReady)
+        live(assistant("next", turn: 2, "PQ", delta: true))
+        #expect(store.state.conversation?.items.last?.body == .assistant(text: "NOPQ", delta: false))
+        #expect(service.base.sendCount == 0)
+    }
+
     @Test func gapReadPagesToStableOldIdentityWithoutLosingDraftOrPagingBoundary() async throws {
         let service = ControlledService()
         let clock = ManualGianClock(instant: PreviewFixtures.instant)

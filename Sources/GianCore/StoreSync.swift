@@ -47,8 +47,11 @@ extension GianClientStore {
             if anchors.isEmpty || !page.hasOlder || !anchors.isDisjoint(with: page.items.map(\.id)) {
                 let current = memory.bundle(for: scope).transcripts[session] ?? []
                 // No canonical cursor orders live chunks relative to a page.
-                // Re-read rather than declaring a raced partial body reconciled.
-                guard current == baseline else { return reject(.staleOperation) }
+                // Keep streaming that provably continues the page; re-read
+                // rather than declaring any other raced partial body reconciled.
+                guard TranscriptLog.liveChangesExtend(baseline: baseline, current: current, page: pending) else {
+                    return reject(.staleOperation)
+                }
                 let merged = TranscriptLog.mergePage(baseline: baseline, current: current, page: pending)
                 var cursor = storedTranscriptCursor(cursor: page.cursor, hasOlder: page.hasOlder, session: session, scope: scope)
                 if let saved, saved.hostGeneration != nil, saved.hostGeneration == state.sync.cursor?.hostGeneration {
