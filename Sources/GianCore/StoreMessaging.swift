@@ -474,6 +474,8 @@ extension GianClientStore {
 
     func addAttachment(_ input: AttachmentDraftInput) async -> GianDispatchResult {
         guard let scope = readyScope() else { return reject(.notAuthorized) }
+        // Without the stored history there is nowhere to retain the bytes.
+        guard !storageLoadFailed else { return reject(.mutationsDisabled) }
         guard !state.composer.send.isInFlight else { return reject(.operationInFlight) }
         guard AttachmentRules.accepts(byteCount: input.bytes.count), AttachmentRules.safeFilename(input.filename) else {
             return reject(.attachmentRejected)

@@ -6,6 +6,10 @@ final class ScopedMemory {
     private let storage: any GianStorage
     private let retentionClock: (any GianClock)?
     private var bundles: [ClientScope: Bundle] = [:]
+    /// Scopes whose bundle was read from storage. Only these change or commit:
+    /// a bundle built over a failed or skipped load would replace the stored
+    /// drafts, operations and history with an empty diff.
+    private var loaded: Set<ClientScope> = []
     private var dirty: Set<ClientScope> = []
     private var committedEvictions: [ClientScope: Set<SessionID>] = [:]
     private var bundleGeneration: [ClientScope: Int] = [:]
@@ -29,7 +33,7 @@ final class ScopedMemory {
     }
 
     func retentionWorkSnapshot(_ scope: ClientScope) throws -> (StoredHostState, StoredHostState, Int, Int, Set<SessionID>, Date?)? {
-        if bundles[scope] == nil { try load(scope) }
+        try load(scope)
         guard let (stored, generation) = try (storage as? SQLiteGianStorage)?.retentionWorkSnapshot(scope) else { return nil }
         var snapshot = bundle(for: scope)
         snapshot.retentionRecentActivity = retentionActivityEvidence[scope]
@@ -58,8 +62,10 @@ final class ScopedMemory {
     }
 
     func load(_ scope: ClientScope) throws {
-        guard bundles[scope] != nil || dirty.count < 2 else { throw GianStorageError.unavailable }
-        if bundles[scope] == nil { bundles[scope] = try storage.load(scope: scope) ?? Bundle() }
+        guard !loaded.contains(scope) else { return }
+        guard dirty.count < 2 else { throw GianStorageError.unavailable }
+        bundles[scope] = try storage.load(scope: scope) ?? Bundle()
+        loaded.insert(scope)
     }
 
     func bundle(for scope: ClientScope) -> Bundle { bundles[scope] ?? Bundle() }
@@ -120,6 +126,7 @@ final class ScopedMemory {
     }
 
     func update(_ scope: ClientScope, _ body: (inout Bundle) -> Void) {
+        guard loaded.contains(scope) else { return }
         var bundle = bundles[scope] ?? Bundle()
         body(&bundle)
         bundles[scope] = bundle
@@ -128,6 +135,7 @@ final class ScopedMemory {
     }
 
     func commit(_ scope: ClientScope) throws {
+        guard loaded.contains(scope) else { throw GianStorageError.unavailable }
         let bundle = retentionSnapshot(scope)
         let now = retentionClock?.now()
         var retained = now.map {
@@ -177,6 +185,7 @@ final class ScopedMemory {
 
     func discardCommitted() {
         bundles = bundles.filter { dirty.contains($0.key) }
+        loaded.formIntersection(dirty)
         retentionActivityEvidence = retentionActivityEvidence.filter { dirty.contains($0.key) }
         retentionVerifiedItems = retentionVerifiedItems.filter { dirty.contains($0.key) }
         retentionHydratedEvidence = retentionHydratedEvidence.filter { dirty.contains($0.key) }
@@ -184,6 +193,7 @@ final class ScopedMemory {
 
     func clearDownloads(_ scope: ClientScope) throws {
         try storage.clearDownloadCache(scope: scope)
+        guard loaded.contains(scope) else { return }
         bundles[scope]?.downloads = [:]
         bundles[scope]?.downloadOwners = nil
         bundleGeneration[scope, default: 0] += 1

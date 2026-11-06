@@ -11,9 +11,11 @@ private func sendIsUncertain(_ phase: SendPhase) -> Bool {
 private final class FailingStorage: GianStorage {
     let backing = InMemoryGianStorage()
     var rejectWrites = false
+    var rejectLoads = false
     var loadCount = 0
     func load(scope: ClientScope) throws -> StoredHostState? {
         loadCount += 1
+        if rejectLoads { throw GianStorageError.corruptData }
         return try backing.load(scope: scope)
     }
     func save(_ state: StoredHostState, scope: ClientScope) throws {
@@ -295,6 +297,44 @@ struct StoreDurabilityTests {
         #expect(service.sendCount == 0)
         #expect(service.respondCount == 0)
         #expect(service.translationRequestCount == 0)
+    }
+
+    @Test func failedHistoryLoadNeverCommitsAnEmptyBundleOverStoredDrafts() async throws {
+        let clock = ManualGianClock(instant: PreviewFixtures.instant)
+        let service = PreviewGianClientService(script: .legacyContract)
+        let storage = FailingStorage()
+        let original = GianClientStore(service: service, clock: clock, ids: SequenceIDGenerator(), storage: storage)
+        _ = try await signIn(original, clock: clock)
+        await prepareComposer(original, text: "Kept across a failed load")
+        #expect(original.flushStorage().isApplied)
+        let scope = try clientScope(original)
+        func storedDraftKept() throws -> Bool {
+            try storage.backing.load(scope: scope)?.drafts.contains { $0.text == "Kept across a failed load" } == true
+        }
+        #expect(try storedDraftKept())
+
+        storage.rejectLoads = true
+        let reopened = GianClientStore(service: service, clock: clock, ids: SequenceIDGenerator(), storage: storage)
+        #expect(reopened.restoreAuthorizedSession(authorization: fictionalAuthorization(clock: clock)) == .rejected(.mutationsDisabled))
+        #expect(reopened.storageLoadFailed)
+        // Each of these used to fill an empty in-memory bundle that a later
+        // flush committed over the stored drafts and operations.
+        _ = await reopened.dispatch(.noteLocalConnectivity(.unavailable))
+        _ = await reopened.dispatch(.noteLocalConnectivity(.available))
+        #expect(await reopened.dispatch(.addDraftAttachment(AttachmentDraftInput(
+            filename: "notes.txt", mime: "text/plain", bytes: Data("bytes".utf8)))) == .rejected(.mutationsDisabled))
+        #expect(reopened.state.composer.draft.attachments.isEmpty)
+        _ = await reopened.dispatch(.clearAttachmentCache)
+        _ = await reopened.dispatch(.setForeground(.foreground))
+        _ = await reopened.dispatch(.refreshDirectory)
+        #expect(try storedDraftKept())
+
+        // A later successful load reads the stored history.
+        storage.rejectLoads = false
+        _ = await reopened.dispatch(.selectHost(scope.host))
+        #expect(!reopened.storageLoadFailed)
+        #expect(reopened.state.drafts.contains { $0.text == "Kept across a failed load" })
+        #expect(try storedDraftKept())
     }
 
     @Test func accountSetupWithoutHostEvidenceCannotReadAnyHostCache() {
