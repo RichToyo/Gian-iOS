@@ -20,7 +20,6 @@ struct UserMessageView: View {
                     Text(row.text)
                         .font(GianTheme.Typography.body)
                         .foregroundStyle(.white)
-                        .multilineTextAlignment(.trailing)
                         .textSelection(.enabled)
 
                     if let sent = row.sentTranslation,
@@ -31,7 +30,6 @@ struct UserMessageView: View {
                             Text(translated)
                                 .font(GianTheme.Typography.body)
                                 .foregroundStyle(.white.opacity(0.9))
-                                .multilineTextAlignment(.trailing)
                                 .textSelection(.enabled)
                         }
                         .padding(.top, 6)

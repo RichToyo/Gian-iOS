@@ -130,7 +130,12 @@ struct AdaptiveRoot: View {
             .allowsHitTesting(false)
         }
         .onPreferenceChange(WideLayoutSizeKey.self) { size in
-            if size.width > 0, size.height > 0 { keyboardIndependentSize = size }
+            // Rotation, folding and resizing change the width; the keyboard
+            // only takes height. Re-deciding on a height-only change would
+            // rebuild the tree under the focused composer (expanded portrait
+            // reads as landscape above a keyboard).
+            guard size.width > 0, size.height > 0, size.width != keyboardIndependentSize.width else { return }
+            keyboardIndependentSize = size
         }
         .preferredColorScheme(colorScheme)
         .onAppear {

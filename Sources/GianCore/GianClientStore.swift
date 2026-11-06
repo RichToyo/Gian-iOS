@@ -1164,7 +1164,11 @@ public final class GianClientStore {
         state.composer.draft.text = text
         noteDraftEdited()
         rememberDraft()
-        return persistenceResult()
+        // Keystrokes coalesce like streaming writes instead of a synchronous
+        // commit each; send, navigation and backgrounding still commit at once.
+        guard !storageWritesBlocked, !storageLoadFailed else { return persistenceResult() }
+        schedulePersistence()
+        return .applied
     }
 
     private func clearCache() -> GianDispatchResult {

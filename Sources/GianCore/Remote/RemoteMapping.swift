@@ -358,8 +358,11 @@ enum RemoteMapping {
                 // A page is an authoritative replay baseline, not another live delta.
                 item.body = .assistant(text: complete, delta: false)
             }
-            if let index = indices[item.id] { items[index] = item }
-            else { indices[item.id] = items.count; items.append(item) }
+            if let index = indices[item.id] {
+                // Start and end rows of one call share an id; keep the start.
+                item.timestamp = min(items[index].timestamp, item.timestamp)
+                items[index] = item
+            } else { indices[item.id] = items.count; items.append(item) }
         }
         return items
     }

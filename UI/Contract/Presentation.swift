@@ -213,6 +213,8 @@ struct WorkCard: Equatable, Identifiable, Sendable {
     var events: [WorkEventItem]
     var startedAt: Date? = nil
     var finishedAt: Date? = nil
+    /// The turn number, set once a turn's work is consolidated into one card.
+    var turn: Int? = nil
 }
 
 enum TranscriptRow: Equatable, Identifiable, Sendable {
@@ -230,7 +232,9 @@ enum TranscriptRow: Equatable, Identifiable, Sendable {
         case .timeMarker(let id, _): "marker-\(id)"
         case .user(let row): row.id.rawValue
         case .assistant(let row): row.id.rawValue
-        case .work(let card): "work-\(card.id.rawValue)-\(card.events.first?.id.rawValue ?? "empty")"
+        // Stable for the whole turn, so the card keeps its expansion and
+        // scroll anchor while events arrive or a page reorders them.
+        case .work(let card): card.turn.map { "work-turn-\($0)" } ?? "work-\(card.id.rawValue)"
         case .interaction(let record): "interaction-\(record.id.rawValue)"
         case .turnOutcome(let id, _): "outcome-\(id.rawValue)"
         case .severeError(let id): "error-\(id.rawValue)"

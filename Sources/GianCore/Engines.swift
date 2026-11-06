@@ -155,8 +155,14 @@ enum TranscriptLog {
         for var item in existing + incoming {
             // Pages are full canonical items, never append operations.
             if case .assistant(let text, _) = item.body { item.body = .assistant(text: text, delta: false) }
-            if let prior = byID[item.id], prior.turnID != item.turnID { continue }
-            if byID[item.id] == nil { order.append(item.id) }
+            if let prior = byID[item.id] {
+                if prior.turnID != item.turnID { continue }
+                // An item sorts by when it started, as on the live path; a
+                // page's completion copy must not move it later in its turn.
+                item.timestamp = min(prior.timestamp, item.timestamp)
+            } else {
+                order.append(item.id)
+            }
             byID[item.id] = item
         }
         let merged = order.compactMap { byID[$0] }

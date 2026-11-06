@@ -43,9 +43,30 @@ struct ComposerView: View {
     var attachmentPicker: AttachmentPickerButton = AttachmentPickerButton(onPicked: { _, _ in })
 
     @FocusState private var isFocused: Bool
+    /// What the field shows while edits travel to the store. Dispatch is
+    /// async, so reading the store back mid-typing would drop keystrokes (and
+    /// break an input method's marked text). Nil shows the store's draft.
+    @State private var localText: String?
+    /// Edits sent but not yet reflected by the store, oldest first.
+    @State private var pendingEchoes: [String] = []
+
+    private var text: String { localText ?? draft }
+
+    private var fieldText: Binding<String> {
+        Binding(
+            get: { text },
+            set: { value in
+                guard value != text else { return }
+                localText = value
+                pendingEchoes.append(value)
+                if pendingEchoes.count > 64 { pendingEchoes.removeFirst(pendingEchoes.count - 64) }
+                draft = value
+            }
+        )
+    }
 
     private var canSend: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || !attachments.isEmpty
     }
 
@@ -88,6 +109,17 @@ struct ComposerView: View {
             )
         )
         .onChange(of: isFocused) { _, focused in onFocusChange(focused) }
+        .onChange(of: draft) { _, value in
+            if let index = pendingEchoes.firstIndex(of: value) {
+                // One of our own edits arriving; later ones are still on the way.
+                pendingEchoes.removeFirst(index + 1)
+                if pendingEchoes.isEmpty, value == localText { localText = nil }
+            } else {
+                // Changed elsewhere (sent, another conversation's draft): show it.
+                pendingEchoes.removeAll()
+                localText = nil
+            }
+        }
     }
 
     /// + · text · ⋯ · Send/Stop. One line by default; Return adds a line and
@@ -99,7 +131,7 @@ struct ComposerView: View {
                 .disabled(isBusy || !remoteReady)
                 .padding(.bottom, 4)
 
-            TextField(placeholder, text: $draft, axis: .vertical)
+            TextField(placeholder, text: fieldText, axis: .vertical)
                 .font(GianTheme.Typography.body)
                 .lineLimit(1...6)
                 .focused($isFocused)
@@ -107,6 +139,12 @@ struct ComposerView: View {
                 .padding(.horizontal, 4)
                 // Centers a single line in the 52 pt row (≈ 22 pt line + 2 × 15).
                 .padding(.vertical, 15)
+                // The padding is part of the box: a tap anywhere in it edits.
+                .background {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { if !isBusy { isFocused = true } }
+                }
 
             if let moreMenu, !moreMenu.isEmpty {
                 moreMenu

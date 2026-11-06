@@ -278,6 +278,30 @@ final class StoreProjectionTests: XCTestCase {
         XCTAssertTrue(final.isFinalResult)
     }
 
+    func testRunningWorkCardKeepsItsPlaceWhenTheTurnEnds() {
+        let user = item("user", turn: 1, turnID: "turn-1", seconds: 0,
+                        body: .user(text: "Fix it", deliveryID: nil, attachmentIDs: [], translation: nil))
+        let intro = item("intro", turn: 1, turnID: "turn-1", seconds: 1, body: .assistant(text: "Checking", delta: false))
+        let command = item("command", turn: 1, turnID: "turn-1", seconds: 2, body: .command(status: .success, exitCode: 0))
+        let answer = item("answer", turn: 1, turnID: "turn-1", seconds: 3, body: .assistant(text: "Done", delta: false))
+        let end = item("end", turn: 1, turnID: "turn-1", seconds: 4, body: .turnEnd(outcome: .worked))
+        func order(_ items: [TranscriptItem], active: Bool) -> [String] {
+            StoreProjection.transcriptRows(items: items, interactions: [], translation: nil,
+                                           agent: .claude, agentName: "Claude", now: now, isTurnActive: active)
+                .compactMap { row in
+                    switch row {
+                    case .user(let value): value.id.rawValue
+                    case .assistant(let value): value.id.rawValue
+                    case .work: "work"
+                    default: nil
+                    }
+                }
+        }
+        XCTAssertEqual(order([user, intro, command], active: true), ["user", "intro", "work"])
+        XCTAssertEqual(order([user, intro, command, answer], active: true), ["user", "intro", "work", "answer"])
+        XCTAssertEqual(order([user, intro, command, answer, end], active: false), ["user", "intro", "work", "answer"])
+    }
+
     func testInteractionPlacedAfterItsTurn() {
         let items = [
             item("i1", turn: 1, turnID: "turn-1", seconds: 0,

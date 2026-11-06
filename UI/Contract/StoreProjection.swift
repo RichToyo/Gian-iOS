@@ -470,11 +470,21 @@ enum StoreProjection {
         }
         flushWork()
 
-        // Place each interaction directly after the last row of its turn.
+        // Place each interaction directly after the last row of its turn. An
+        // interaction carries the Agent's own turn id, which only the turn's
+        // end shares; until that arrives it belongs to the latest turn.
+        var numberByTurnID: [TurnID: Int] = [:]
+        for item in items { numberByTurnID[item.turnID] = item.turn }
+        let latestTurn = items.map(\.turn).max()
+        var lastRowIndexByNumber: [Int: Int] = [:]
+        for (turnID, index) in lastRowIndexByTurn {
+            guard let number = numberByTurnID[turnID] else { continue }
+            lastRowIndexByNumber[number] = max(lastRowIndexByNumber[number] ?? index, index)
+        }
         for interaction in interactions.sorted(by: { $0.id.rawValue < $1.id.rawValue }) {
-            if let index = lastRowIndexByTurn[interaction.turnID] {
+            if let number = numberByTurnID[interaction.turnID] ?? latestTurn, let index = lastRowIndexByNumber[number] {
                 rows.insert(.interaction(interaction), at: index + 1)
-                lastRowIndexByTurn = lastRowIndexByTurn.mapValues { $0 >= index + 1 ? $0 + 1 : $0 }
+                lastRowIndexByNumber = lastRowIndexByNumber.mapValues { $0 >= index + 1 ? $0 + 1 : $0 }
             } else {
                 rows.append(.interaction(interaction))
             }
@@ -499,12 +509,13 @@ enum StoreProjection {
                 finalAssistants[item.turn] = item.id
             }
         }
+        let latestTurn = items.map(\.turn).max()
         func turn(of row: TranscriptRow) -> Int? {
             switch row {
             case .user(let value): turnsByItem[value.id]
             case .assistant(let value): turnsByItem[value.id]
             case .work(let value): value.events.first.flatMap { turnsByItem[$0.id] }
-            case .interaction(let value): turnsByID[value.turnID]
+            case .interaction(let value): turnsByID[value.turnID] ?? latestTurn
             case .turnOutcome(let id, _), .severeError(let id), .notice(let id, _, _): turnsByItem[id]
             case .timeMarker: nil
             }
@@ -513,6 +524,7 @@ enum StoreProjection {
         var lastIndex: [Int: Int] = [:]
         var pendingInteractionIndex: [Int: Int] = [:]
         var firstWorkIndex: [Int: Int] = [:]
+        var lastWorkIndex: [Int: Int] = [:]
         var resultIndex: [Int: Int] = [:]
         var outcomeIndex: [Int: Int] = [:]
         for (index, row) in rows.enumerated() {
@@ -521,6 +533,7 @@ enum StoreProjection {
             switch row {
             case .work(let card):
                 if firstWorkIndex[number] == nil { firstWorkIndex[number] = index }
+                lastWorkIndex[number] = index
                 if cards[number] == nil { cards[number] = card }
                 else { cards[number]?.events.append(contentsOf: card.events) }
             case .assistant(let assistant) where finalAssistants[number] == assistant.id:
@@ -533,7 +546,6 @@ enum StoreProjection {
             }
         }
         var insertions: [Int: [(Int, WorkCard)]] = [:]
-        let latestTurn = items.map(\.turn).max()
         for (number, var card) in cards {
             let ending = endings[number]
             if let ending {
@@ -555,11 +567,15 @@ enum StoreProjection {
                 card.phase = .worked
             }
             card.startedAt = card.events.compactMap { times[$0.id] }.min()
+            card.turn = number
             let anchor: Int
             if ending?.0 == .worked, !failedTurns.contains(number), let index = resultIndex[number] { anchor = index }
             else if let index = outcomeIndex[number] { anchor = index }
             else if let index = pendingInteractionIndex[number] { anchor = index }
             else if !isTurnActive, let index = firstWorkIndex[number] { anchor = index }
+            // A running turn's text after its latest work is where the card
+            // settles when the turn ends, so the card never hops over the answer.
+            else if ending == nil, let index = resultIndex[number], index > (lastWorkIndex[number] ?? -1) { anchor = index }
             else { anchor = (lastIndex[number] ?? rows.count - 1) + 1 }
             insertions[anchor, default: []].append((number, card))
         }

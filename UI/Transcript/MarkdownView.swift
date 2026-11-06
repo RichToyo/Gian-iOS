@@ -8,10 +8,50 @@ struct MarkdownView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: GianTheme.Metrics.paddingMedium) {
-            ForEach(Array(MarkdownBlockParser.parse(source).enumerated()), id: \.offset) { _, block in
+            ForEach(Array(MarkdownCache.blocks(source).enumerated()), id: \.offset) { _, block in
                 MarkdownBlockView(block: block)
             }
         }
+    }
+}
+
+/// Parsed blocks and inline runs by source text. Transcript rows re-render on
+/// every store change; parsing once per distinct text keeps that cheap, and a
+/// streaming message only parses its newest form.
+@MainActor
+enum MarkdownCache {
+    private static var blockCache: [String: [MarkdownBlock]] = [:]
+    private static var inlineCache: [String: AttributedString] = [:]
+    private static var cachedCharacters = 0
+
+    static func blocks(_ source: String) -> [MarkdownBlock] {
+        if let cached = blockCache[source] { return cached }
+        let parsed = MarkdownBlockParser.parse(source)
+        reserve(source.utf8.count)
+        blockCache[source] = parsed
+        return parsed
+    }
+
+    static func inline(_ text: String) -> AttributedString? {
+        if let cached = inlineCache[text] { return cached }
+        var options = AttributedString.MarkdownParsingOptions(
+            interpretedSyntax: .inlineOnlyPreservingWhitespace
+        )
+        options.allowsExtendedAttributes = true
+        guard let attributed = try? AttributedString(markdown: text, options: options) else { return nil }
+        reserve(text.utf8.count)
+        inlineCache[text] = attributed
+        return attributed
+    }
+
+    /// Bounded by entries and text size; a full cache starts over.
+    private static func reserve(_ characters: Int) {
+        if blockCache.count + inlineCache.count >= 1_024 || cachedCharacters + characters > 4 * 1024 * 1024 {
+            blockCache.removeAll(keepingCapacity: true)
+            inlineCache.removeAll(keepingCapacity: true)
+            cachedCharacters = 0
+        }
+        cachedCharacters += characters
     }
 }
 
@@ -58,11 +98,7 @@ struct MarkdownBlockView: View {
     }
 
     private func inlineText(_ text: String) -> Text {
-        var options = AttributedString.MarkdownParsingOptions(
-            interpretedSyntax: .inlineOnlyPreservingWhitespace
-        )
-        options.allowsExtendedAttributes = true
-        if let attributed = try? AttributedString(markdown: text, options: options) {
+        if let attributed = MarkdownCache.inline(text) {
             return Text(attributed)
         }
         return Text(text)

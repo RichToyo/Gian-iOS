@@ -62,10 +62,10 @@ struct ChatScreen: View {
     @Environment(\.globalActionsAtBottom) private var globalActionsAtBottom
     @State private var previewedAttachment: (id: AttachmentID, name: String, data: Data)?
     @State private var followsLatest = true
-    @State private var nearBottom = true
     @State private var latestScrollRequest = 0
-    @State private var userScrolling = false
-    @State private var visibleRowID: String?
+    /// Per-frame scroll bookkeeping; a plain reference, so dragging does not
+    /// re-render the transcript.
+    @State private var scroll = TranscriptScrollTracker()
     @State private var olderPageAnchor: String?
     @State private var awaitingOlderPage = false
 
@@ -77,7 +77,7 @@ struct ChatScreen: View {
                         Button("Load earlier messages") {
                             followsLatest = false
                             awaitingOlderPage = true
-                            olderPageAnchor = stableAnchor(for: visibleRowID)
+                            olderPageAnchor = stableAnchor(for: scroll.topRowID)
                             onPageOlder()
                         }
                         .font(GianTheme.Typography.caption)
@@ -112,7 +112,13 @@ struct ChatScreen: View {
             }
             .id(conversation.id)
             .defaultScrollAnchor(.bottom, for: .initialOffset)
-            .scrollPosition(id: $visibleRowID, anchor: .top)
+            .scrollPosition(id: Binding(
+                get: { scroll.topRowID },
+                set: { value in
+                    scroll.topRowID = value
+                    if awaitingOlderPage && scroll.userScrolling { olderPageAnchor = stableAnchor(for: value) }
+                }
+            ), anchor: .top)
             .scrollDismissesKeyboard(.interactively)
             .onScrollGeometryChange(for: TranscriptScrollEdges.self) { geometry in
                 return TranscriptScrollEdges(
@@ -121,25 +127,25 @@ struct ChatScreen: View {
                     contentHeight: geometry.contentSize.height
                 )
             } action: { previous, value in
-                nearBottom = value.nearBottom
-                if userScrolling { followsLatest = value.nearBottom }
-                if followsLatest, !userScrolling, !awaitingOlderPage,
-                   previous.viewportHeight != value.viewportHeight || previous.contentHeight != value.contentHeight {
-                    Task { @MainActor in
-                        await Task.yield()
-                        if followsLatest && !userScrolling && !awaitingOlderPage {
-                            proxy.scrollTo("transcript-latest", anchor: .bottom)
-                        }
-                    }
+                scroll.nearBottom = value.nearBottom
+                if scroll.userScrolling, followsLatest != value.nearBottom { followsLatest = value.nearBottom }
+                // Size changes (streaming text, keyboard, composer) keep the
+                // latest line in place.
+                if previous.viewportHeight != value.viewportHeight || previous.contentHeight != value.contentHeight {
+                    followLatest(proxy, animated: false)
                 }
             }
             .onScrollPhaseChange { _, phase in
                 switch phase {
                 case .tracking, .interacting, .decelerating:
-                    userScrolling = true
+                    scroll.userScrolling = true
                 case .idle:
-                    if userScrolling { followsLatest = nearBottom }
-                    userScrolling = false
+                    if scroll.userScrolling {
+                        if followsLatest != scroll.nearBottom { followsLatest = scroll.nearBottom }
+                        // Back at the latest messages, an unanswered older page no longer holds the view.
+                        if scroll.nearBottom { awaitingOlderPage = false; olderPageAnchor = nil }
+                    }
+                    scroll.userScrolling = false
                 default: break
                 }
             }
@@ -150,29 +156,28 @@ struct ChatScreen: View {
                     olderPageAnchor = nil
                     return
                 }
-                if followsLatest, !userScrolling, new.shouldFollow(after: old) {
-                    proxy.scrollTo("transcript-latest", anchor: .bottom)
+                if new.shouldFollow(after: old) {
+                    followLatest(proxy, animated: false)
                 }
             }
             .onChange(of: conversation.id) { _, _ in
                 followsLatest = true
-                nearBottom = true
-                userScrolling = false
-                visibleRowID = nil
+                scroll = TranscriptScrollTracker()
                 awaitingOlderPage = false
                 olderPageAnchor = nil
             }
-            .onChange(of: visibleRowID) { _, value in
-                if awaitingOlderPage && userScrolling { olderPageAnchor = stableAnchor(for: value) }
-            }
             .onChange(of: latestScrollRequest) { _, _ in
-                proxy.scrollTo("transcript-latest", anchor: .bottom)
+                awaitingOlderPage = false
+                olderPageAnchor = nil
+                followLatest(proxy, animated: false, force: true)
             }
             .overlay(alignment: .bottomTrailing) {
                 if !followsLatest {
                     Button {
                         followsLatest = true
-                        proxy.scrollTo("transcript-latest", anchor: .bottom)
+                        awaitingOlderPage = false
+                        olderPageAnchor = nil
+                        followLatest(proxy, animated: true, force: true)
                     } label: {
                         Image(systemName: "arrow.down")
                             .frame(width: 44, height: 44)
@@ -208,19 +213,22 @@ struct ChatScreen: View {
             // Centered on every layout, including the Duo's vertical-bar one,
             // where the system title sits on the leading edge.
             ToolbarItem(placement: .principal) {
+                let status = ConversationStatusPresentation.make(
+                    connectivity: conversation.connectivity,
+                    diagnostic: diagnostic,
+                    transcriptSync: conversation.transcriptSync
+                )
                 HStack(spacing: 6) {
                     HostScopedTitle(title: conversation.title, host: nil)
                         .accessibilityIdentifier("conversation-title")
                         .layoutPriority(1)
-                    if let status = ConversationStatusPresentation.make(
-                        connectivity: conversation.connectivity,
-                        diagnostic: diagnostic,
-                        transcriptSync: conversation.transcriptSync
-                    ) {
+                    if let status {
                         ConversationStatusView(status: status, onRetryConnection: onRetrySynchronization,
                                                onRetryMessages: onRetryTranscriptSync)
+                            .transition(.opacity)
                     }
                 }
+                .animation(.easeInOut(duration: 0.2), value: status)
             }
             GlobalToolbarActions(atBottom: globalActionsAtBottom, onNewChat: onOpenNewChat, onSettings: onOpenSettings)
         }
@@ -256,6 +264,30 @@ struct ChatScreen: View {
                 if newValue == nil { previewedAttachment = nil }
             }
         )
+    }
+
+    /// Keeps the latest line in view while following, deferred a turn so the
+    /// new layout exists. Following never animates: an animated scroll fights
+    /// a swipe that starts during it. Only Jump to latest glides, and size
+    /// changes during it wait instead of cutting it short. `force` is the
+    /// user's own request (send, focus, Jump to latest), even mid-fling.
+    private func followLatest(_ proxy: ScrollViewProxy, animated: Bool, force: Bool = false) {
+        let scroll = scroll
+        if animated { scroll.animationEnds = .now + 0.25 }
+        func following() -> Bool { force || (followsLatest && !scroll.userScrolling && !awaitingOlderPage) }
+        Task { @MainActor in
+            await Task.yield()
+            guard following() else { return }
+            if animated {
+                withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("transcript-latest", anchor: .bottom) }
+                // Content that grew during the animation is caught up after it.
+                try? await Task.sleep(for: .milliseconds(250))
+                guard followsLatest, !scroll.userScrolling else { return }
+                proxy.scrollTo("transcript-latest", anchor: .bottom)
+            } else if force || Date.now >= scroll.animationEnds {
+                proxy.scrollTo("transcript-latest", anchor: .bottom)
+            }
+        }
     }
 
     private func stableAnchor(for visible: String?) -> String? {
@@ -443,6 +475,14 @@ private struct QueueList: View {
         .padding(10)
         .background(GianTheme.Colors.card, in: RoundedRectangle(cornerRadius: 8))
     }
+}
+
+@MainActor
+private final class TranscriptScrollTracker {
+    var topRowID: String?
+    var nearBottom = true
+    var userScrolling = false
+    var animationEnds = Date.distantPast
 }
 
 private struct TranscriptScrollEdges: Equatable {
