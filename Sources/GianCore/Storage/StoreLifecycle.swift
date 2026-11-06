@@ -62,6 +62,7 @@ extension GianClientStore {
         let ownerEpoch = epoch
         retentionRecoveryTasks[scope] = Task { @MainActor [weak self] in
             var delay: UInt64 = 1
+            var staleSteps = 0
             var cachedGeneration: Int?
             var cachedMemoryGeneration: Int?
             var cachedReferences: Set<AttachmentID> = []
@@ -107,12 +108,21 @@ extension GianClientStore {
                     case .paused:
                         self.retentionRecoveryTasks[scope] = nil; return
                     case .more:
-                        delay = 1
+                        delay = 1; staleSteps = 0
                         await self.retentionRecoveryYield()
                     case .stale:
                         cachedGeneration = nil; cachedMemoryGeneration = nil
-                        delay = 1
-                        await self.retentionRecoveryYield()
+                        staleSteps += 1
+                        // Each streamed chunk moves the bundle generation. Back off
+                        // rather than recompute references back to back meanwhile.
+                        if staleSteps < 3 {
+                            delay = 1
+                            await self.retentionRecoveryYield()
+                        } else {
+                            do { try await self.retentionRecoverySleep(delay) }
+                            catch { self.retentionRecoveryTasks[scope] = nil; return }
+                            delay = min(delay * 2, 30)
+                        }
                     }
                 } catch {
                     if (error as? GianStorageError) != .unavailable {

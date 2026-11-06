@@ -901,6 +901,51 @@ struct SQLiteStorageTests {
         #expect(final.retentionCleanup == nil)
     }
 
+    /// Every streamed chunk moves the in-memory bundle generation, so each
+    /// cleanup step comes back stale. The cleanup must back off rather than
+    /// recompute its references back to back for as long as the stream runs.
+    @Test func retentionCleanupBacksOffWhileStreamingKeepsItStale() async throws {
+        let directory = try temporaryStorageDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storage = try SQLiteGianStorage(directory: directory)
+        let service = DirectoryFixtureService()
+        service.pages[.tasks] = [directoryPage(.tasks)]
+        let now = PreviewFixtures.instant
+        let clock = ManualGianClock(instant: now)
+        let store = GianClientStore(service: service, clock: clock, storage: storage)
+        _ = try await signIn(store, clock: clock)
+        let scope = try clientScope(store)
+        let aging = makeSession(id: "streaming-old", title: "Aging", taskID: nil, activity: now.addingTimeInterval(-24 * 60 * 60))
+        store.sessions.append(aging)
+        store.memory.update(scope) {
+            $0.transcripts[aging.id] = (0..<600).map { transcriptItem(id: "streaming-item-\($0)", turn: $0, text: "History") }
+        }
+        #expect(store.persist())
+        clock.instant = now.addingTimeInterval(8 * 24 * 60 * 60)
+        var streaming = true
+        var chunks = 0
+        var yields = 0
+        var sleeps = 0
+        store.retentionRecoveryYield = { yields += 1; await Task.yield() }
+        store.retentionRecoverySleep = { _ in sleeps += 1; streaming = false; await Task.yield() }
+        let stream = Task { @MainActor in
+            while streaming, chunks < 5_000 {
+                chunks += 1
+                store.memory.update(scope) { $0.catalogRevision = "chunk-\(chunks)" }
+                await Task.yield()
+            }
+        }
+        #expect(store.persist())
+        let cleanup = try #require(store.retentionRecoveryTasks[scope])
+        await cleanup.value
+        streaming = false
+        await stream.value
+        #expect(sleeps >= 1)
+        #expect(chunks < 5_000)
+        if let next = store.retentionRecoveryTasks[scope] { await next.value }
+        #expect(try SQLiteGianStorage(directory: directory).load(scope: scope)?.transcripts[aging.id] == nil)
+    }
+
     @Test func transientRetentionFailureRetriesWithoutAnotherUserWrite() async throws {
         let directory = try temporaryStorageDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
