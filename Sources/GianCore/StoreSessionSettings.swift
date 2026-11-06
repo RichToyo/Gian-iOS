@@ -139,11 +139,15 @@ extension GianClientStore {
     /// Best effort: a failure leaves the Agent default and says so.
     func applyNewChatApproval(_ mode: String?, to session: SessionRecord, scope: ClientScope) async {
         guard let mode, mode != session.approvalMode, requireCapability(.sessionUpdate) == nil else { return }
+        let token = epoch
         let response = await service.updateSession(
             scope: scope,
             request: SessionUpdateRequest(commandID: mint(), sessionID: session.id, sessionRevision: session.revision, change: .approvalMode(mode))
         )
-        if case .updated(let record) = response, record.id == session.id {
+        // A Host switch or reconnect meanwhile retires this record; the caller
+        // then reports the send as stale.
+        guard responseIsCurrent(token), readyScope() == scope else { return }
+        if case .updated(let record) = response, record.id == session.id, record.hostID == scope.host {
             upsertSession(record)
         } else {
             state.settingsNotice = "The conversation started with the Agent's default approval mode."

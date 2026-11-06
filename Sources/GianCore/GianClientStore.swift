@@ -707,7 +707,8 @@ public final class GianClientStore {
     }
 
     func upsertSession(_ session: SessionRecord) {
-        guard !deniedSessionAccess.contains(session.id),
+        // Another Host's record would fail every later commit's scope check.
+        guard session.hostID == state.currentHostID, !deniedSessionAccess.contains(session.id),
               sessions.first(where: { $0.id == session.id })?.authorized != false,
               !sessionAccessOverflow || sessions.contains(where: { $0.id == session.id && $0.authorized }) else { return }
         if let index = sessions.firstIndex(where: { $0.id == session.id }) {

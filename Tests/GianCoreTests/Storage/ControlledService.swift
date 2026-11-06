@@ -27,6 +27,8 @@ class ControlledService: GianClientServicing {
     var updateRequests: [SessionUpdateRequest] = []
     /// Overrides the preview service's `session.update` result when set.
     var updateResponse: SessionUpdateResponse?
+    var holdNextUpdate = false
+    var update: CheckedContinuation<SessionUpdateResponse, Never>?
     /// Scripted pairing replies, consumed in order before the preview's.
     var claimResponses: [HostPairingResponse] = []
     var pairingRefreshResponses: [HostPairingResponse] = []
@@ -79,6 +81,10 @@ class ControlledService: GianClientServicing {
     }
     func updateSession(scope: ClientScope, request: SessionUpdateRequest) async -> SessionUpdateResponse {
         updateRequests.append(request)
+        if holdNextUpdate {
+            holdNextUpdate = false
+            return await withCheckedContinuation { update = $0 }
+        }
         if let updateResponse { return updateResponse }
         return await base.updateSession(scope: scope, request: request)
     }

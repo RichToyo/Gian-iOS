@@ -129,6 +129,35 @@ struct ConversationSettingsTests {
         #expect(service.base.sendCount == 1)
     }
 
+    /// The post-create approval update can answer after a Host switch. Its
+    /// record belongs to the previous Host and must not enter the new one,
+    /// where every later commit would fail the scope check.
+    @Test func lateApprovalUpdateAfterHostSwitchStaysWithItsHost() async throws {
+        let (store, service) = try await harness()
+        let lighthouse = HostSummary(id: PreviewFixtures.id("host-lighthouse", HostID.self), name: "Lighthouse",
+                                     online: true, version: "0.6.9")
+        service.extraHosts = [lighthouse]
+        store.state.hosts.append(lighthouse)
+        let harbor = try clientScope(store)
+        await prepareComposer(store)
+        _ = await store.dispatch(.selectApprovalMode("auto"))
+        service.holdNextUpdate = true
+
+        let send = Task { await store.dispatch(.send) }
+        for _ in 0..<100 where service.update == nil { await Task.yield() }
+        let request = try #require(service.updateRequests.last)
+        #expect((await store.dispatch(.selectHost(lighthouse.id))).isApplied)
+        service.update?.resume(returning: await service.base.updateSession(scope: harbor, request: request))
+        #expect(await send.value == .rejected(.staleOperation))
+
+        #expect(store.state.currentHostID == lighthouse.id)
+        #expect(store.sessions.allSatisfy { $0.hostID == lighthouse.id })
+        #expect(store.flushStorage().isApplied)
+        #expect(!store.storageWritesBlocked)
+        #expect(store.state.connection == .online)
+        #expect(service.base.sendCount == 0)
+    }
+
     @Test func fastIsDroppedForModelsWithoutIt() async throws {
         let (store, service) = try await harness()
         await prepareComposer(store)
