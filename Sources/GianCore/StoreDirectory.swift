@@ -250,9 +250,9 @@ extension GianClientStore {
         func entries(_ view: DirectoryCollection) -> [DirectoryEntry] {
             (directoryViews[view]?.visibleEntries ?? []).compactMap { entry in
                 guard let current = sessions.first(where: { $0.id == entry.session.id }), current.authorized, !current.archived else { return nil }
+                // The page's own task record decides, not one merged from another view.
                 guard entry.task == nil || entry.task?.status == .open else { return nil }
                 guard current.taskID == entry.task?.id, current.workspaceID == entry.workspace.id else { return nil }
-                guard !taskRecords.contains(where: { $0.id == current.taskID && $0.status != .open }) else { return nil }
                 var next = entry; next.session = current
                 return next
             }
