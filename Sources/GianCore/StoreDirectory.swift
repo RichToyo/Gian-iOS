@@ -255,8 +255,14 @@ extension GianClientStore {
             pendingSessionAccess.removeValue(forKey: entry.session.id)
             deniedSessionAccess.remove(entry.session.id)
             if let index = sessions.firstIndex(where: { $0.id == entry.session.id }) {
+                // Directory rows carry no queue or conversation settings.
                 var session = entry.session
-                if session.queue == nil { session.queue = sessions[index].queue }
+                let previous = sessions[index]
+                if session.queue == nil { session.queue = previous.queue }
+                session.model = session.model ?? previous.model
+                session.thinking = session.thinking ?? previous.thinking
+                session.serviceTier = session.serviceTier ?? previous.serviceTier
+                session.approvalMode = session.approvalMode ?? previous.approvalMode
                 sessions[index] = session
             } else { sessions.append(entry.session) }
             noteRetentionActivity(entry.session)

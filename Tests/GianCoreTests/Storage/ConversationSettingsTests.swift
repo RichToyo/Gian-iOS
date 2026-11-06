@@ -158,6 +158,31 @@ struct ConversationSettingsTests {
         #expect(service.base.sendCount == 0)
     }
 
+    /// Directory rows carry no settings. Merging one must not strip them from
+    /// the record the next transcript item copies into the open chat.
+    @Test func directoryRowKeepsTheOpenConversationSettings() async throws {
+        let (store, _) = try await harness()
+        _ = await store.dispatch(.selectConversation(PreviewFixtures.sessionID))
+        #expect((await store.dispatch(.setConversationModel("ada-swift"))).isApplied)
+        #expect((await store.dispatch(.setConversationThinking("high"))).isApplied)
+        #expect((await store.dispatch(.setConversationFast(true))).isApplied)
+        #expect((await store.dispatch(.setConversationApprovalMode("auto"))).isApplied)
+        var row = directoryEntry("Directory row")
+        row.session = try #require(store.sessions.first { $0.id == PreviewFixtures.sessionID })
+        row.session.revision = "directory-revision"
+        row.session.model = nil; row.session.thinking = nil; row.session.serviceTier = nil; row.session.approvalMode = nil
+        store.mergeDirectoryMetadata([row])
+        let item = transcriptItem(id: "after-directory", turn: 2, text: "Live", at: PreviewFixtures.instant.addingTimeInterval(60))
+        #expect(store.ingest(InboundEnvelope(scope: try clientScope(store),
+                                             event: .transcript(sessionID: PreviewFixtures.sessionID, item: item))).isApplied)
+        let session = try #require(store.state.conversation?.session)
+        #expect(session.revision == "directory-revision")
+        #expect(session.model == "ada-swift")
+        #expect(session.thinking == "high")
+        #expect(session.serviceTier == "fast")
+        #expect(session.approvalMode == "auto")
+    }
+
     @Test func fastIsDroppedForModelsWithoutIt() async throws {
         let (store, service) = try await harness()
         await prepareComposer(store)
