@@ -370,8 +370,12 @@ struct ConversationStatusPresentation: Equatable {
             details.append(detail)
         }
         switch connectivity {
-        case .offlineHistory: add("Offline", "wifi.slash", "Offline. Showing saved history.")
-        case .hostOffline: add("Host offline", "laptopcomputer.slash", "The Host is offline.")
+        case .offlineHistory:
+            add("Offline", "wifi.slash", "Offline. Showing saved history.")
+            retryConnection = true
+        case .hostOffline:
+            add("Host offline", "laptopcomputer.slash", "The Host is offline.")
+            retryConnection = true
         case .deviceRevoked: add("Access revoked", "hand.raised.fill", "This device's access was revoked. Pair the Host again.", error: true)
         case .versionMismatch(let version): add("Incompatible", "exclamationmark.triangle", "Host version \(version) is not supported by this app.", error: true)
         case .hidden, .reconnecting, .resyncing: break
@@ -382,6 +386,10 @@ struct ConversationStatusPresentation: Equatable {
         }
         if case .connectionClosed(let message) = diagnostic {
             add("Connection lost", "wifi.exclamationmark", message, error: true)
+            // Failed integrity, payload or version checks aren't retried on
+            // their own, and an automatic retry can be 32 s away. Only pairing
+            // again helps a revoked device.
+            if connectivity != .deviceRevoked { retryConnection = true }
         }
         switch connectivity {
         case .reconnecting: add("Reconnecting", "arrow.triangle.2.circlepath", "Reconnecting to the Host.")

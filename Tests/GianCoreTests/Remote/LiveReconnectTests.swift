@@ -85,3 +85,31 @@ struct LiveReconnectTests {
         await fixture.service.disconnect()
     }
 }
+
+/// "Retry connection" in a chat dispatches `.retrySynchronization`.
+@MainActor
+struct RetryConnectionTests {
+    @Test func retryReconnectsAfterAConnectionLossThatIsNotRetriedAutomatically() async throws {
+        let fixture = RemoteFixture()
+        try await fixture.connectAndClaim()
+        let socket = FixtureRelaySocket(fixture)
+        let (store, coordinator) = try await LiveInteractionRefreshTests.liveStore(fixture, socket: socket)
+        // A frame that fails verification ends the connection for good.
+        try socket.push(.object(["type": .string("event"), "host_generation": .string("00000000-0000-7000-8000-000000000099"),
+            "event_sequence": .int(0), "event": .object(["kind": .string("attention.updated"), "attention": .array([])])]))
+        #expect(await eventually { store.serviceDiagnostic?.status == .connectionClosed(.integrity) })
+        #expect(store.state.connection == .offline)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(fixture.service.reconnect == nil)
+        #expect(fixture.service.relay == nil)
+
+        let replacement = FixtureRelaySocket(fixture)
+        fixture.transport.socket = replacement
+        #expect((await store.dispatch(.retrySynchronization)).isApplied)
+        #expect(fixture.service.relay?.isOpen == true)
+        #expect(replacement.commands.contains("state.refresh"))
+        #expect(store.state.connection == .online)
+        #expect(store.serviceDiagnostic == nil)
+        await coordinator.stop()
+    }
+}
