@@ -117,21 +117,46 @@ extension LiveGianClientService {
             return
         }
         guard !intentionalDisconnect, !overflowed, error != .cancelled, error != .integrity,
-              error != .versionMismatch, error != .invalidPayload,
-              reconnect == nil, reconnectAttempt < 5 else { return }
+              error != .versionMismatch, error != .invalidPayload, error != .serverIdentityChanged,
+              reconnect == nil else { return }
         reconnectAttempt += 1
-        let delay = 1 << reconnectAttempt
+        // Back off to one try every 32 s, but keep trying: going to the
+        // background, losing the network or signing out disconnects on purpose.
+        let delay = reconnectBackoffUnit * (1 << min(reconnectAttempt, 5))
         reconnect = Task { @MainActor [weak self] in
             do {
-                try await Task.sleep(for: .seconds(delay))
+                try await Task.sleep(for: delay)
                 guard let self, self.epoch == nextEpoch, !self.intentionalDisconnect else { return }
                 self.reconnect = nil
                 try await self.openConnection(scope: scope, epoch: nextEpoch)
-                guard case .snapshot(let payload) = await self.refreshDirectory(scope: scope) else { throw RemoteClientError.disconnected }
-                if let session = self.desiredSession, self.relay?.features.contains(.sessionDirectoryV1) == true || payload.sessions.contains(where: { $0.id == session }) {
-                    try await self.catchUpTranscript(scope: scope, session: session, epoch: nextEpoch)
+                var refreshed = await self.refreshDirectory(scope: scope)
+                // A patch or event from a busy Host, or the store's own read,
+                // supersedes a snapshot read. That's live activity on a working
+                // connection, not a failed one: read again rather than reconnect.
+                var retries = 0
+                while refreshed == .unknownOutcome, retries < 3, self.relay?.isOpen == true, self.acceptedDirectory == nil {
+                    retries += 1
+                    try await Task.sleep(for: self.reconnectBackoffUnit / 4 * retries)
+                    try self.checkEpoch(nextEpoch)
+                    refreshed = await self.refreshDirectory(scope: scope)
                 }
+                try self.checkEpoch(nextEpoch)
+                guard self.relay?.isOpen == true else { throw RemoteClientError.disconnected }
+                if case .failed = refreshed { throw RemoteClientError.disconnected }
+                // Still superseded keeps the connection too: while the store
+                // needs a snapshot it reads the directory itself.
                 self.reconnectAttempt = 0
+                guard self.acceptedDirectory != nil, let session = self.desiredSession else { return }
+                var visible = self.relay?.features.contains(.sessionDirectoryV1) == true
+                if case .snapshot(let payload) = refreshed { visible = visible || payload.sessions.contains { $0.id == session } }
+                guard visible else { return }
+                do { try await self.catchUpTranscript(scope: scope, session: session, epoch: nextEpoch) }
+                catch {
+                    // The store reconciles the open chat itself; a chat update
+                    // racing this read is no reason to drop the connection.
+                    try self.checkEpoch(nextEpoch)
+                    guard self.relay?.isOpen == true else { throw error }
+                }
             } catch {
                 guard let self, self.epoch == nextEpoch, !self.intentionalDisconnect else { return }
                 self.reconnect = nil

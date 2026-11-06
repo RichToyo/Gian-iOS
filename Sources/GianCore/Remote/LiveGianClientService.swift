@@ -20,6 +20,8 @@ public final class LiveGianClientService: GianClientLifecycle {
     var connecting: Task<Void, any Error>?
     var reconnect: Task<Void, Never>?
     var reconnectAttempt = 0
+    /// Reconnect attempt n waits this × 2ⁿ, at most × 32.
+    var reconnectBackoffUnit: Duration = .seconds(1)
     var intentionalDisconnect = false
     var overflowed = false
     var commandWaiters: [String: RemoteCommandWaiter] = [:]
