@@ -280,11 +280,15 @@ struct DirectoryTimeFilterTests {
             }
             if reconnect {
                 store.markConnectionNotReady(.offline, reason: .cryptoResumed)
+                #expect(store.memory.bundle(for: scope).transcriptCursors[old.id]?.catchUp != nil)
             } else {
                 let generation = try #require(store.state.sync.cursor?.hostGeneration)
                 _ = store.ingest(InboundEnvelope(scope: scope, event: .directoryChanged(generation: generation, revision: "changed")))
+                // A directory hint is no transcript gap (directoryHintsDoNotMarkTranscriptForCatchUp)
+                // and its write is coalesced; the next commit still evicts.
+                #expect(store.memory.bundle(for: scope).transcriptCursors[old.id]?.catchUp == nil)
+                #expect(store.flushStorage().isApplied)
             }
-            #expect(store.memory.bundle(for: scope).transcriptCursors[old.id]?.catchUp != nil)
             #expect(try storage.load(scope: scope)?.transcripts[old.id] == nil)
             #expect(try storage.load(scope: scope)?.transcriptCursors[old.id] == nil)
         }
