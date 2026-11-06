@@ -491,7 +491,10 @@ struct DirectoryClientTests {
         #expect(traversal.status.phase == .incomplete)
     }
 
-    @Test func verifiedPrefixReplacesStaleRowsWithoutClaimingCompletion() throws {
+    /// A new traversal's verified prefix joins the retained rows, which stay
+    /// (marked stale) until the traversal completes; see
+    /// incompleteRefreshKeepsVerifiedRowsAndPublishesNewRowsUntilComplete.
+    @Test func verifiedPrefixJoinsRetainedRowsWithoutClaimingCompletion() throws {
         var traversal = StoredDirectoryView()
         let scope = fictionalScope()
         let complete = DirectoryPagePayload(view: .repos, asOf: PreviewFixtures.instant, revision: "r1", state: .complete,
@@ -503,8 +506,9 @@ struct DirectoryClientTests {
             entries: [directoryEntry("New prefix")], nextCursor: "next")
         let prefixApplied = traversal.apply(prefix, scope: scope, view: .repos)
         #expect(prefixApplied)
-        #expect(traversal.visibleEntries.map { $0.session.title } == ["New prefix"])
-        #expect(!traversal.status.isStale && traversal.status.hasMore)
+        #expect(traversal.visibleEntries.map { $0.session.title } == ["Coherent old row", "New prefix"])
+        #expect(traversal.status.phase == .incomplete)
+        #expect(traversal.status.isStale && traversal.status.hasMore)
     }
 
     @Test func permissionDenialHidesExpandedRowsRatherThanRetainingAnAuthorizedCache() async throws {
