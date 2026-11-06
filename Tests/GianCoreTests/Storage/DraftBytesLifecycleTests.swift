@@ -56,6 +56,30 @@ struct DraftBytesLifecycleTests {
         #expect(saved.draftBytes[shared.id] == bytes)
     }
 
+    @Test func sendRejectedBeforeDispatchDoesNotPinRemovedAttachmentBytes() async throws {
+        let service = ControlledService()
+        let clock = ManualGianClock(instant: PreviewFixtures.instant)
+        let storage = InMemoryGianStorage()
+        let store = GianClientStore(service: service, clock: clock, storage: storage)
+        _ = try await signIn(store, clock: clock)
+        _ = await store.dispatch(.openNewChat)
+        _ = await store.dispatch(.selectAgent(PreviewFixtures.agentID))
+        _ = await store.dispatch(.selectTask(PreviewFixtures.taskID))
+        _ = await store.dispatch(.editDraftText("No workspace yet"))
+        #expect((await store.dispatch(.addDraftAttachment(AttachmentDraftInput(
+            filename: "a.txt", mime: "text/plain", bytes: Data("fixture".utf8))))).isApplied)
+        let id = try #require(store.state.composer.draft.attachments.first?.id)
+        let scope = try clientScope(store)
+        #expect(await store.dispatch(.send) == .rejected(.missingWorkspace))
+        #expect(store.state.composer.send == .idle)
+        #expect(store.memory.bundle(for: scope).submittedDrafts[store.state.composer.draft.id] == nil)
+
+        #expect((await store.dispatch(.removeDraftAttachment(id))).isApplied)
+        #expect(store.memory.bundle(for: scope).draftBytes[id] == nil)
+        #expect(try storage.load(scope: scope)?.draftBytes[id] == nil)
+        #expect(service.sessionCreateRequests.isEmpty)
+    }
+
     @Test func unknownSendKeepsSubmittedBytesAndIdentity() async throws {
         let service = ControlledService(); service.base.script.commandBehavior = .lostAckStillUnknown
         let clock = ManualGianClock(instant: PreviewFixtures.instant)

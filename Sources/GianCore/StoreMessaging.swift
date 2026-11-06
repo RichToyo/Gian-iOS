@@ -100,6 +100,24 @@ extension GianClientStore {
     }
 
     func performSend(explicitOriginal: Bool, reusedRequestID: TranslationRequestID?) async -> GianDispatchResult {
+        let draftID = state.composer.draft.id
+        let result = await submitDraft(explicitOriginal: explicitOriginal, reusedRequestID: reusedRequestID)
+        releaseUnusedSubmission(draftID)
+        return result
+    }
+
+    /// Send freezes the draft before checks that can still reject it (no
+    /// workspace, Task or capability). Without an operation for that draft,
+    /// the frozen copy would only pin attachment bytes that removing the
+    /// attachment can no longer free.
+    private func releaseUnusedSubmission(_ draftID: DraftID) {
+        guard let scope = readyScope(), memory.bundle(for: scope).submittedDrafts[draftID] != nil,
+              memory.bundle(for: scope).operations[draftID] == nil,
+              state.composer.draft.id != draftID || state.composer.send.intent == nil else { return }
+        memory.update(scope) { $0.submittedDrafts[draftID] = nil }
+    }
+
+    private func submitDraft(explicitOriginal: Bool, reusedRequestID: TranslationRequestID?) async -> GianDispatchResult {
         guard let scope = readyScope() else { return reject(.notAuthorized) }
         if state.localConnectivity == .unavailable || state.connection == .offline {
             state.composer.notice = .offlineDraftRetained
