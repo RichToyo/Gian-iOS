@@ -175,6 +175,10 @@ extension GianClientStore {
             state.composer.notice = .keptAfterUncertainOutcome
         }
         if state.pendingStop.isInFlight, let intent = state.pendingStop.intent { state.pendingStop = .uncertain(intent) }
+        // The pending reply is dropped as stale; recovery queries the command.
+        for (session, command) in state.queueCommands {
+            if case .pending(let id) = command { state.queueCommands[session] = .uncertain(id) }
+        }
         for index in state.interactions.indices where state.interactions[index].phase == .responding {
             state.interactions[index].phase = .uncertain
         }

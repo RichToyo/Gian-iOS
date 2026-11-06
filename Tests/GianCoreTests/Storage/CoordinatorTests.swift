@@ -444,6 +444,39 @@ struct CoordinatorTests {
         await coordinator.stop()
     }
 
+    @Test func queueCommandInFlightAcrossReconnectBecomesRecoverable() async throws {
+        let clock = ManualGianClock(instant: PreviewFixtures.instant)
+        let service = CoordinatedService()
+        let index = try #require(service.base.script.directory.sessions.firstIndex { $0.id == PreviewFixtures.sessionID })
+        service.base.script.directory.sessions[index].queue = SessionQueue(revision: "queue-1", entries: [
+            QueuedMessage(id: "queue-item-1", text: "First")
+        ])
+        let store = GianClientStore(service: service, clock: clock, storage: InMemoryGianStorage())
+        let coordinator = try GianClientCoordinator(store: store, runtime: service, events: service.events,
+            diagnostics: service.diagnostics, loadAuthorization: { _, _ in fictionalAuthorization(clock: clock) })
+        coordinator.start()
+        _ = try await signIn(store, clock: clock)
+        _ = await coordinator.refreshConnection()
+        _ = await store.dispatch(.selectConversation(PreviewFixtures.sessionID))
+        #expect(store.mutationsReady)
+        service.holdNextQueue = true
+        let pending = Task { await store.dispatch(.mutateQueue(.remove(id: "queue-item-1"))) }
+        for _ in 0..<100 where service.queueContinuation == nil { await Task.yield() }
+        let reply = try #require(service.queueContinuation)
+        let command = try #require(service.queueRequests.first?.commandID)
+        service.eventEpoch += 1
+        store.synchronizeServiceEpoch()
+        reply.resume(returning: .succeeded(CommandSuccess(commandID: command, queue: SessionQueue(revision: "queue-2", entries: []))))
+        #expect(await pending.value == .rejected(.staleOperation))
+        // Not stuck pending: the outcome is unknown and can be queried.
+        #expect(store.state.queueCommands[PreviewFixtures.sessionID] == .uncertain(command))
+        service.queueStatus = .failed(command, message: "Queue revision changed")
+        #expect(await store.dispatch(.recoverQueueCommand) == .rejected(.staleOperation))
+        #expect(store.state.queueCommands[PreviewFixtures.sessionID] == .failed("Queue revision changed"))
+        #expect(service.queueRequests.count == 1)
+        await coordinator.stop()
+    }
+
     @Test func constructionIsInertAndOnlyOneCoordinatorOwnsTheStreams() throws {
         let clock = ManualGianClock(instant: PreviewFixtures.instant)
         let service = CoordinatedService()
