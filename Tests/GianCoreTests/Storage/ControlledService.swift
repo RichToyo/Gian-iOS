@@ -29,6 +29,9 @@ class ControlledService: GianClientServicing {
     var updateResponse: SessionUpdateResponse?
     var holdNextUpdate = false
     var update: CheckedContinuation<SessionUpdateResponse, Never>?
+    var holdNextUpload = false
+    var holdNextDownload = false
+    var transfer: CheckedContinuation<AttachmentTransferResponse, Never>?
     /// Scripted pairing replies, consumed in order before the preview's.
     var claimResponses: [HostPairingResponse] = []
     var pairingRefreshResponses: [HostPairingResponse] = []
@@ -132,8 +135,20 @@ class ControlledService: GianClientServicing {
         if let translationStatus { return translationStatus }
         return await base.translationRequestStatus(scope: scope, request: request)
     }
-    func uploadAttachment(scope: ClientScope, request: AttachmentUploadRequest) async -> AttachmentTransferResponse { await base.uploadAttachment(scope: scope, request: request) }
-    func downloadAttachment(scope: ClientScope, request: AttachmentDownloadRequest) async -> AttachmentTransferResponse { await base.downloadAttachment(scope: scope, request: request) }
+    func uploadAttachment(scope: ClientScope, request: AttachmentUploadRequest) async -> AttachmentTransferResponse {
+        if holdNextUpload {
+            holdNextUpload = false
+            return await withCheckedContinuation { transfer = $0 }
+        }
+        return await base.uploadAttachment(scope: scope, request: request)
+    }
+    func downloadAttachment(scope: ClientScope, request: AttachmentDownloadRequest) async -> AttachmentTransferResponse {
+        if holdNextDownload {
+            holdNextDownload = false
+            return await withCheckedContinuation { transfer = $0 }
+        }
+        return await base.downloadAttachment(scope: scope, request: request)
+    }
     func pageTranscript(scope: ClientScope, sessionID: SessionID, cursor: String?) async -> TranscriptPageResponse {
         transcriptRequestCursors.append(cursor)
         if holdNextPage {

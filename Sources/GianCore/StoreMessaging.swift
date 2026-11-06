@@ -517,12 +517,17 @@ extension GianClientStore {
             return reject(.attachmentRejected)
         }
         let attachment = state.composer.draft.attachments[index]
+        guard attachment.state != .uploading else { return reject(.operationInFlight) }
         guard bytes.count == attachment.byteCount, SHA256Hex.digest(bytes) == attachment.sha256 else {
             state.composer.draft.attachments[index].state = .hashMismatch
             return reject(.attachmentRejected)
         }
         state.composer.draft.attachments[index].state = .uploading
-        guard persist() else { return reject(.mutationsDisabled) }
+        guard persist() else {
+            state.composer.draft.attachments[index].state = attachment.state
+            rememberDraft()
+            return reject(.mutationsDisabled)
+        }
         let token = epoch
         let response = await service.uploadAttachment(
             scope: scope,
@@ -536,6 +541,7 @@ extension GianClientStore {
             )
         )
         guard responseIsCurrent(token), let current = state.composer.draft.attachments.firstIndex(where: { $0.id == id }) else {
+            settleDroppedTransfer(id)
             return reject(.staleOperation)
         }
         switch response {
@@ -578,6 +584,7 @@ extension GianClientStore {
         }
         if let code = requireCapability(.attachmentRead) { return reject(code) }
         guard let index = state.composer.draft.attachments.firstIndex(where: { $0.id == id }) else { return reject(.notFound) }
+        guard state.composer.draft.attachments[index].state != .downloading else { return reject(.operationInFlight) }
         state.composer.draft.attachments[index].state = .downloading
         let token = epoch
         let response = await service.downloadAttachment(
@@ -586,6 +593,7 @@ extension GianClientStore {
         )
         guard responseIsCurrent(token), state.composer.draft.id == draftID,
               let current = state.composer.draft.attachments.firstIndex(where: { $0.id == id }) else {
+            settleDroppedTransfer(id)
             return reject(.staleOperation)
         }
         switch response {
@@ -610,6 +618,23 @@ extension GianClientStore {
         rememberDraft()
         persist()
         return .applied
+    }
+
+    /// A transfer reply dropped as stale (reconnect, or the draft left the
+    /// composer) must not leave its attachment in flight: Send rejects while
+    /// one is. Same retryable state as a restore or a cache clear.
+    private func settleDroppedTransfer(_ id: AttachmentID) {
+        func settle(_ attachments: inout [DraftAttachment]) -> Bool {
+            guard let index = attachments.firstIndex(where: { $0.id == id }),
+                  attachments[index].state == .uploading || attachments[index].state == .downloading else { return false }
+            attachments[index].state = attachments[index].remoteID == nil ? .localOnly : .uploaded
+            return true
+        }
+        var changed = settle(&state.composer.draft.attachments)
+        for index in state.drafts.indices {
+            if settle(&state.drafts[index].attachments) { changed = true }
+        }
+        if changed, readyScope() != nil { persist() }
     }
 
     /// Returns only bytes in the currently authorized server/account/Host

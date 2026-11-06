@@ -52,6 +52,46 @@ struct AsyncFenceTests {
         #expect(store.state.composer.draft.text == "New chat draft")
     }
 
+    /// A transfer reply that arrives after its draft left the composer is
+    /// dropped. The attachment must not stay in flight, or Send rejects it.
+    @Test func droppedTransferReplyLeavesAttachmentRetryable() async throws {
+        let service = ControlledService()
+        let clock = ManualGianClock(instant: PreviewFixtures.instant)
+        let store = GianClientStore(service: service, clock: clock, ids: SequenceIDGenerator(), storage: InMemoryGianStorage())
+        _ = try await signIn(store, clock: clock)
+        _ = await store.dispatch(.selectConversation(PreviewFixtures.sessionID))
+        _ = await store.dispatch(.editDraftText("With a file"))
+        service.holdNextUpload = true
+        let adding = Task { await store.dispatch(.addDraftAttachment(AttachmentDraftInput(
+            filename: "notes.txt", mime: "text/plain", bytes: Data("hello".utf8)))) }
+        for _ in 0..<100 where service.transfer == nil { await Task.yield() }
+        let upload = try #require(service.transfer)
+        service.transfer = nil
+        let id = try #require(store.state.composer.draft.attachments.first?.id)
+        _ = await store.dispatch(.openNewChat)
+        upload.resume(returning: .failed("Connection lost"))
+        #expect(await adding.value == .rejected(.staleOperation))
+        _ = await store.dispatch(.selectConversation(PreviewFixtures.sessionID))
+        #expect(store.state.composer.draft.attachments.first?.state == .localOnly)
+        #expect(store.memory.bundle(for: try clientScope(store)).drafts
+            .flatMap(\.attachments).first(where: { $0.id == id })?.state == .localOnly)
+        #expect((await store.dispatch(.retryAttachmentUpload(id))).isApplied)
+        #expect(store.state.composer.draft.attachments.first?.state == .uploaded)
+
+        service.holdNextDownload = true
+        let downloading = Task { await store.dispatch(.downloadAttachment(id)) }
+        for _ in 0..<100 where service.transfer == nil { await Task.yield() }
+        let download = try #require(service.transfer)
+        service.transfer = nil
+        _ = await store.dispatch(.openNewChat)
+        download.resume(returning: .failed("Connection lost"))
+        #expect(await downloading.value == .rejected(.staleOperation))
+        _ = await store.dispatch(.selectConversation(PreviewFixtures.sessionID))
+        #expect(store.state.composer.draft.attachments.first?.state == .uploaded)
+        #expect((await store.dispatch(.send)).isApplied)
+        #expect(service.sendRequest?.attachmentIDs.count == 1)
+    }
+
     @Test func reclaimedTranslationCannotSendOnALateSettlement() async throws {
         let service = ControlledService()
         let clock = ManualGianClock(instant: PreviewFixtures.instant)
