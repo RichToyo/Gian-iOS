@@ -97,7 +97,9 @@ extension LiveGianClientService {
         if subscribedSession != sessionID { subscribedCards.removeAll(); waitingRefreshRevision = nil }
         subscribedSession = sessionID; desiredSession = sessionID
         _ = try subscribed.string("cursor")
-        fileDescriptors.removeAll()
+        // Like the Host, which drops this device's file references for every
+        // other session: older pages of this chat keep their attachments.
+        fileDescriptors = fileDescriptors.filter { $0.value.sessionID == sessionID }
         var waiting = false
         if relay?.features.contains(.sessionDirectoryV1) == true {
             let interactions = try subscribed.array("interactions").map(RemoteMapping.interaction)

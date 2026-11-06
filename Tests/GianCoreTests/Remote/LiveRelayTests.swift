@@ -247,4 +247,35 @@ struct LiveRelayTests {
         #expect(await fixture.service.queryCommand(scope: fixture.scope, commandID: command) == .unknownOutcome(command))
         await fixture.service.disconnect()
     }
+    /// The Host drops this device's file references only for other sessions
+    /// when it subscribes, so reopening a chat keeps its older attachments.
+    @Test func reopeningAChatKeepsOlderPagesAttachmentDetails() async throws {
+        let (fixture, socket) = try await connected()
+        let session = SessionID(rawValue: fixture.sessionID)!
+        func file(_ id: String, session: String) -> WireValue {
+            .object(["id": .string(id), "session_id": .string(session), "name": .string("fixture.txt"), "mime": .string("text/plain"),
+                "size": .int(socket.fileBytes.count), "revision": .string("file-r1"), "previewable": .bool(true), "downloadable": .bool(true),
+                "expires_at": .string("2030-01-01T00:00:00Z")])
+        }
+        let older = AttachmentID(rawValue: "00000000-0000-7000-8000-000000000053")!
+        socket.pageItems = [.object(["kind": .string("user"), "id": .string("00000000-0000-7000-8000-000000000054"),
+            "turn_id": .string("00000000-0000-7000-8000-000000000055"), "turn": .int(1), "ts": .int(fixture.milliseconds), "text": .string("fixture"),
+            "attachments": .array([file(older.rawValue, session: fixture.sessionID)])])]
+        #expect(!(await fixture.service.pageTranscript(scope: fixture.scope, sessionID: session, cursor: "older-page")).failed)
+        let otherChat = SessionID(rawValue: "00000000-0000-7000-8000-000000000056")!
+        let elsewhere = AttachmentID(rawValue: "00000000-0000-7000-8000-000000000057")!
+        fixture.service.fileDescriptors[elsewhere] = try RemoteFileDescriptor(file(elsewhere.rawValue, session: otherChat.rawValue), session: otherChat)
+        // Reopening subscribes again; the newest page no longer reaches turn 1.
+        socket.pageItems = []
+        #expect(!(await fixture.service.pageTranscript(scope: fixture.scope, sessionID: session, cursor: nil)).failed)
+        #expect(socket.commands.filter { $0 == "session.subscribe" }.count == 2)
+        #expect(fixture.service.fileDescriptor(scope: fixture.scope, id: older)?.name == "fixture.txt")
+        #expect(fixture.service.fileDescriptor(scope: fixture.scope, id: elsewhere) == nil)
+        // A dropped connection keeps them for the reconnect's subscribe; signing
+        // out or switching away doesn't.
+        fixture.service.connectionClosed(.integrity, scope: fixture.scope, epoch: fixture.service.epoch)
+        #expect(fixture.service.fileDescriptor(scope: fixture.scope, id: older) != nil)
+        await fixture.service.disconnect()
+        #expect(fixture.service.fileDescriptors.isEmpty)
+    }
 }

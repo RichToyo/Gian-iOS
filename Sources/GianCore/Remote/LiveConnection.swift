@@ -93,7 +93,11 @@ extension LiveGianClientService {
         snapshotTimeout?.cancel(); snapshotTimeout = nil
         snapshotParts = nil; snapshot = nil; capabilities = nil; stagedSnapshot = nil; catalog = nil
         pendingReadSnapshots.removeAll()
-        subscribedSession = nil; fileDescriptors.removeAll()
+        subscribedSession = nil
+        // The Host keeps this device's file references across connections, and
+        // the reconnect subscribes the same chat again. Revocation drops them.
+        if error == .notAuthorized || error == .deviceRevoked { fileDescriptors.removeAll() }
+        else { fileDescriptors = fileDescriptors.filter { $0.value.sessionID == desiredSession } }
         stopSubscriptionRefresh()
         lastFailure = error
         diagnostic(.connectionClosed(error), scope: scope)
