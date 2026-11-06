@@ -41,6 +41,18 @@ public final class LiveGianClientService: GianClientLifecycle {
     var cursor: SyncCursor?
     var subscribedSession: SessionID?
     var subscriptionReadGeneration = 0
+    /// `session.subscribe` requests not yet answered. A refresh never overtakes one.
+    var subscribesInFlight = 0
+    var subscriptionRefresh: Task<Void, Never>?
+    var subscriptionRefreshQueued = false
+    var subscriptionRefreshDelay: Duration = .milliseconds(300)
+    /// Cards the Host has listed for `subscribedSession` and not removed since.
+    var subscribedCards: Set<InteractionID> = []
+    /// Directory revision of the subscribed chat that last asked for its cards.
+    var waitingRefreshRevision: String?
+    var sessionFenceClock = 0
+    var sessionFenceFloor = 0
+    var sessionFences: [SessionID: Int] = [:]
     var desiredSession: SessionID?
     var latestTranscriptTurns: [SessionID: Int] = [:]
     var issuedCommands: [String: String] = [:]

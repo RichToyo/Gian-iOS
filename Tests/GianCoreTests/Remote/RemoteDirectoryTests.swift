@@ -182,21 +182,31 @@ struct RemoteDirectoryTests {
         await fixture.service.disconnect()
     }
 
-    @Test func hintRetiresInflightSubscriptionMetadataAndInteractions() async throws {
+    /// The Host hints after every event it broadcasts, so a hint cannot retire
+    /// a chat's subscribe; a change of that chat itself does.
+    @Test func hintDoesNotRetireInflightSubscriptionButItsOwnCardUpdateDoes() async throws {
         let (fixture, socket) = try await connected()
         socket.holdSubscriptionReplies = true
-        let read = Task { await fixture.service.pageTranscript(scope: fixture.scope,
-            sessionID: SessionID(rawValue: fixture.sessionID)!, cursor: nil) }
+        let session = SessionID(rawValue: fixture.sessionID)!
+        var read = Task { await fixture.service.pageTranscript(scope: fixture.scope, sessionID: session, cursor: nil) }
         _ = try await socket.subscriptionHeld.next()
         try fixture.service.receive(.object(["type": .string("directory.changed"), "version": .int(1),
             "host_generation": .string(fixture.generation), "revision": .string("new")]), scope: fixture.scope)
         try socket.releaseSubscription()
+        #expect(!(await read.value).failed)
+        read = Task { await fixture.service.pageTranscript(scope: fixture.scope, sessionID: session, cursor: nil) }
+        _ = try await socket.subscriptionHeld.next()
+        try fixture.service.receive(.object(["type": .string("event"), "host_generation": .string(fixture.generation), "event_sequence": .int(0),
+            "event": .object(["kind": .string("interaction.updated"), "interaction": wireQuestion(fixture)])]), scope: fixture.scope)
+        try socket.releaseSubscription()
         #expect(await read.value.failed)
-        #expect(!socket.commands.contains("session.page"))
+        #expect(socket.commands.filter { $0 == "session.page" }.count == 1)
         await fixture.service.disconnect()
         fixture.service.eventContinuation.finish()
+        var metadata = 0
         for await envelope in fixture.service.events {
-            if case .sessionMetadata = envelope.event { Issue.record("Retired subscribe emitted metadata") }
+            if case .sessionMetadata = envelope.event { metadata += 1 }
         }
+        #expect(metadata == 1)
     }
 }

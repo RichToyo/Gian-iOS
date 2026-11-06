@@ -306,7 +306,11 @@ public final class GianClientStore {
         case .sessionMetadata(let session, let interactions):
             guard negotiatedDirectory, session.hostID == scope.host, session.id == currentSessionID,
                   interactions.allSatisfy({ $0.sessionID == session.id }) else { return reject(.staleOperation) }
-            guard !deniedSessionAccess.contains(session.id), pendingSessionAccess[session.id] == nil else { return .applied }
+            guard !deniedSessionAccess.contains(session.id) else { return .applied }
+            // The service drops a subscribe that a removal of this session
+            // overtook, so the Host granted it after every removal already in
+            // this stream: the same proof the access re-check looks for.
+            pendingSessionAccess.removeValue(forKey: session.id)
             upsertSession(session)
             state.conversation?.session = sessions.first { $0.id == session.id } ?? session
             let prior = state.interactions

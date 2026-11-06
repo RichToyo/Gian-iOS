@@ -52,33 +52,16 @@ extension LiveGianClientService {
         do {
             try requireCapability(.sessionRead, scope: scope)
             let captured = epoch
-            let membershipGeneration = directoryMembershipGeneration
+            let fence = sessionFence(sessionID)
             if subscribedSession != sessionID || cursor == nil {
-                subscriptionReadGeneration += 1
-                let read = subscriptionReadGeneration
-                let subscribed = try await rpc(scope: scope, method: "session.subscribe", params: .object(["session_id": .string(sessionID.rawValue)]))
-                guard try subscribed["session"].identifier("id") == sessionID.rawValue else { throw RemoteClientError.integrity }
-                try checkEpoch(captured)
-                guard membershipGeneration == directoryMembershipGeneration, read == subscriptionReadGeneration else { throw RemoteClientError.cancelled }
-                subscribedSession = sessionID; desiredSession = sessionID
-                _ = try subscribed.string("cursor")
-                fileDescriptors.removeAll()
-                if relay?.features.contains(.sessionDirectoryV1) == true {
-                    let interactions = try subscribed.array("interactions").map(RemoteMapping.interaction)
-                    guard interactions.allSatisfy({ $0.sessionID == sessionID }),
-                          Set(interactions.map(\.id)).count == interactions.count else { throw RemoteClientError.invalidPayload }
-                    emit(.sessionMetadata(try RemoteMapping.session(subscribed["session"], host: scope.host), interactions: interactions), scope: scope)
-                }
-                if !subscribed["translation"].isNull {
-                    try requireTranslation(scope)
-                    emit(.translation(sessionID: sessionID, update: .state(try RemoteMapping.translationState(subscribed["translation"]), authoritativeBaseline: true)), scope: scope)
-                }
+                let waiting = try await subscribe(scope: scope, sessionID: sessionID, epoch: captured, fence: fence)
+                if waiting { requestSubscriptionRefresh(scope: scope) }
             }
             var params: [String: WireValue] = ["session_id": .string(sessionID.rawValue), "turns": .int(10)]
             if let cursor { params["cursor"] = .string(cursor) }
             let result = try await rpc(scope: scope, method: "session.page", params: .object(params))
             try checkEpoch(captured)
-            guard membershipGeneration == directoryMembershipGeneration, subscribedSession == sessionID else { throw RemoteClientError.cancelled }
+            guard fence == sessionFence(sessionID), subscribedSession == sessionID else { throw RemoteClientError.cancelled }
             guard try result.identifier("session_id") == sessionID.rawValue else { throw RemoteClientError.integrity }
             let rawItems = try result.array("items")
             let items = try RemoteMapping.transcriptPage(rawItems)
@@ -91,11 +74,45 @@ extension LiveGianClientService {
         } catch {
             let safe = note(error)
             if safe == .capabilityDenied || safe == .server(code: "RESOURCE_NOT_FOUND", retryAfter: nil) {
-                directoryMembershipGeneration += 1
-                emit(.sessionUnavailable(sessionID), scope: scope)
+                sessionBecameUnavailable(sessionID, scope: scope)
             }
             return TranscriptPageResponse(items: [], cursor: cursor, hasOlder: false, failed: true)
         }
+    }
+
+    /// Moves this device's Host subscription to `sessionID` and publishes its
+    /// metadata, cards and translation state, unless something about the chat
+    /// changed while the read was in flight (`fence`). Returns whether the Host
+    /// says the chat waits for the user but listed no card yet: it marks the
+    /// chat pending just before it registers the card.
+    func subscribe(scope: ClientScope, sessionID: SessionID, epoch captured: Int, fence: Int) async throws -> Bool {
+        subscriptionReadGeneration += 1
+        let read = subscriptionReadGeneration
+        subscribesInFlight += 1
+        defer { subscribesInFlight -= 1 }
+        let subscribed = try await rpc(scope: scope, method: "session.subscribe", params: .object(["session_id": .string(sessionID.rawValue)]))
+        guard try subscribed["session"].identifier("id") == sessionID.rawValue else { throw RemoteClientError.integrity }
+        try checkEpoch(captured)
+        guard fence == sessionFence(sessionID), read == subscriptionReadGeneration else { throw RemoteClientError.cancelled }
+        if subscribedSession != sessionID { subscribedCards.removeAll(); waitingRefreshRevision = nil }
+        subscribedSession = sessionID; desiredSession = sessionID
+        _ = try subscribed.string("cursor")
+        fileDescriptors.removeAll()
+        var waiting = false
+        if relay?.features.contains(.sessionDirectoryV1) == true {
+            let interactions = try subscribed.array("interactions").map(RemoteMapping.interaction)
+            guard interactions.allSatisfy({ $0.sessionID == sessionID }),
+                  Set(interactions.map(\.id)).count == interactions.count else { throw RemoteClientError.invalidPayload }
+            let session = try RemoteMapping.session(subscribed["session"], host: scope.host)
+            subscribedCards = Set(interactions.map(\.id))
+            waiting = session.status == .pending && interactions.isEmpty
+            emit(.sessionMetadata(session, interactions: interactions), scope: scope)
+        }
+        if !subscribed["translation"].isNull {
+            try requireTranslation(scope)
+            emit(.translation(sessionID: sessionID, update: .state(try RemoteMapping.translationState(subscribed["translation"]), authoritativeBaseline: true)), scope: scope)
+        }
+        return waiting
     }
     public func searchSessions(scope: ClientScope, query: String) async -> SearchResponse {
         // This old, non-paginated API cannot truthfully represent incomplete
@@ -190,9 +207,17 @@ extension LiveGianClientService {
             }
             let patch = try RemoteMapping.statePatch(message["patch"], host: scope.host)
             if !patch.removedSessions.isEmpty || !patch.removedTasks.isEmpty { directoryMembershipGeneration += 1 }
+            // Removed ids don't say which chat they belonged to.
+            if !patch.removedTasks.isEmpty || !patch.removedInteractions.isEmpty { advanceAllSessionFences() }
+            advanceSessionFences(patch.removedSessions + patch.sessions.map(\.id) + patch.interactions.map(\.sessionID) + Array(patch.queues.keys))
+            subscribedCards.subtract(patch.removedInteractions)
+            subscribedCards.formUnion(patch.interactions.filter { $0.sessionID == subscribedSession }.map(\.id))
             invalidateInFlightDirectoryRead()
             cursor?.eventSequence = sequence; cursor?.revision = revision
             emit(.statePatch(sequence: sequence, generation: generation, baseRevision: base, revision: revision, patch: patch), scope: scope)
+            // For a chat outside an open task this is how the Host says it
+            // changed, including that it now waits for an answer.
+            if let session = subscribedSession, patch.removedSessions.contains(session) { requestSubscriptionRefresh(scope: scope) }
         case "event": try receiveEvent(message, scope: scope)
         case "transcript.page":
             let session: SessionID = try message.scoped("session_id")
@@ -293,10 +318,15 @@ extension LiveGianClientService {
         switch kind {
         case "session.updated":
             try value.closed(["kind", "session"])
-            emit(.canonical(sequence: sequence, generation: generation, body: .session(try RemoteMapping.session(value["session"], host: scope.host))), scope: scope)
+            let session = try RemoteMapping.session(value["session"], host: scope.host)
+            advanceSessionFences([session.id])
+            emit(.canonical(sequence: sequence, generation: generation, body: .session(session)), scope: scope)
         case "interaction.updated":
             try value.closed(["kind", "interaction"])
-            emit(.canonical(sequence: sequence, generation: generation, body: .interaction(try RemoteMapping.interaction(value["interaction"]))), scope: scope)
+            let interaction = try RemoteMapping.interaction(value["interaction"])
+            advanceSessionFences([interaction.sessionID])
+            if interaction.sessionID == subscribedSession { subscribedCards.insert(interaction.id) }
+            emit(.canonical(sequence: sequence, generation: generation, body: .interaction(interaction)), scope: scope)
         case "attention.updated":
             try value.closed(["kind", "attention"])
             let values = try RemoteMapping.attention(value.array("attention"))

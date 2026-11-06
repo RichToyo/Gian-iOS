@@ -88,7 +88,9 @@ extension LiveGianClientService {
             try checkEpoch(captured)
             guard directoryMembershipGeneration == generation, directoryInvalidationGeneration == canonicalInvalidation,
                   directoryPageReads[request.view] == read else { throw RemoteClientError.cancelled }
-            return .page(try RemoteMapping.directoryPage(result, scope: scope, request: request))
+            let page = try RemoteMapping.directoryPage(result, scope: scope, request: request)
+            noteDirectoryEntries(page.entries, scope: scope)
+            return .page(page)
         } catch {
             let safe = note(error)
             return safe == .capabilityDenied ? .denied : .failed(safe.safeDescription)

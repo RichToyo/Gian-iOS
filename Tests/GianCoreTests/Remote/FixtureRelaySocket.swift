@@ -45,6 +45,14 @@ final class FixtureRelaySocket: RemoteWebSocket {
     var commandRequests: [WireValue] = []
     var advertisedFeatures: [WireValue] = []
     var subscriptionInteractions: [WireValue] = []
+    /// Per-subscribe cards, consumed in order before `subscriptionInteractions`.
+    var subscriptionInteractionReplies: [[WireValue]] = []
+    var subscribeDenied = false
+    /// Like a Host chat outside an open task: no task, and left out of the snapshot.
+    var tasklessSession = false
+    var sessionStatus = "done"
+    /// Answers `directory.list` with these entries once `directoryReplies` runs out.
+    var defaultDirectoryEntries: [WireValue]?
     var holdSubscriptionReplies = false
     var heldSubscriptionCommands: [WireValue] = []
     let subscriptionHeld = RemoteMailbox(limit: 8)
@@ -159,14 +167,26 @@ final class FixtureRelaySocket: RemoteWebSocket {
                 if holdDirectoryReplies {
                     heldDirectoryCommands.append(message); try directoryHeld.push(.null); return
                 }
+                if directoryReplies.isEmpty, let defaultDirectoryEntries {
+                    let view = try message["params"].string("view")
+                    let entries = view == "tasks" ? defaultDirectoryEntries.filter { !$0["task"].isNull } : defaultDirectoryEntries
+                    directoryReplies = [.object(["version": .int(1), "view": .string(view), "as_of": .int(fixture.milliseconds),
+                        "revision": .string("directory-r1"), "state": .string("complete"), "entries": .array(entries), "next_cursor": .null])]
+                }
                 guard !directoryReplies.isEmpty else { throw RemoteClientError.invalidPayload }
                 result = directoryReplies.removeFirst()
             case "session.subscribe":
+                if subscribeDenied {
+                    try push(.object(["type": .string("command.result"), "command_id": .string(id), "attempt_id": message["attempt_id"],
+                        "ok": .bool(false), "error": .object(["code": .string("REMOTE_CAPABILITY_DENIED"), "message": .string("Unavailable")])]))
+                    return
+                }
                 if holdSubscriptionReplies {
                     heldSubscriptionCommands.append(message); try subscriptionHeld.push(.null); return
                 }
                 var data: [String: WireValue] = ["session": session, "cursor": .string("fixture-cursor")]
-                if directoryEnabled { data["interactions"] = .array(subscriptionInteractions) }
+                let cards = subscriptionInteractionReplies.isEmpty ? subscriptionInteractions : subscriptionInteractionReplies.removeFirst()
+                if directoryEnabled { data["interactions"] = .array(cards) }
                 result = .object(data)
             case "session.page":
                 if pageDenied {
@@ -256,8 +276,24 @@ final class FixtureRelaySocket: RemoteWebSocket {
             "ok": .bool(true), "data": result]))
     }
     var session: WireValue { .object(["id": .string(fixture.sessionID), "revision": .string("session-r1"), "name": .string("Fixture conversation"),
-        "task_id": .string(fixture.taskID), "workspace_id": .string(fixture.workspaceID), "agent": .object(["id": .string(fixture.agentID), "name": .string("Fixture Agent"), "proxy": .string("fixture")]),
-        "status": .string("done"), "queue": .object(["revision": .string("queue-r1"), "entries": .array([])]), "updated_at": .string("2026-09-01T00:00:00Z")]) }
+        "task_id": tasklessSession ? .null : .string(fixture.taskID), "workspace_id": .string(fixture.workspaceID), "agent": .object(["id": .string(fixture.agentID), "name": .string("Fixture Agent"), "proxy": .string("fixture")]),
+        "status": .string(sessionStatus), "queue": .object(["revision": .string("queue-r1"), "entries": .array([])]), "updated_at": .string("2026-09-01T00:00:00Z")]) }
+    /// The next canonical frame after the snapshot, as the Host stamps it.
+    func patch(_ body: [String: WireValue]) throws {
+        let base = stateRevision
+        stateRevision = "state-r\(eventSequence + 2)"
+        try push(.object(["type": .string("state.patch"), "host_generation": .string(fixture.generation), "event_sequence": .int(eventSequence),
+            "base_revision": .string(base), "revision": .string(stateRevision), "patch": .object(body)]))
+        eventSequence += 1
+    }
+    /// How the Host publishes any update of a chat outside an open task.
+    func removeSessionPatch(_ id: String) throws {
+        try patch(["sessions": .object(["upsert": .array([]), "remove_ids": .strings([id])])])
+    }
+    func directoryHint() throws {
+        try push(.object(["type": .string("directory.changed"), "version": .int(1), "host_generation": .string(fixture.generation),
+            "revision": .string("directory-\(eventSequence)")]))
+    }
     var snapshot: WireValue {
         var capabilities: [String: WireValue] = [:]
         for capability in BusinessCapability.allCases { capabilities[capability.rawValue] = .object(["state": .string(capability == .sessionSend && sendDenied ? "denied" : "supported")]) }
@@ -265,8 +301,9 @@ final class FixtureRelaySocket: RemoteWebSocket {
             "host_generation": .string(fixture.generation), "revision": .string(stateRevision), "event_sequence": .int(eventSequence),
             "host": .object(["id": .string(fixture.hostID), "name": .string("Fixture Host"), "online": .bool(true), "version": .string("fixture/1")]),
             "workspaces": .array([.object(["id": .string(fixture.workspaceID), "name": .string("Fixture Repo")])]),
-            "tasks": .array([.object(["id": .string(fixture.taskID), "name": .string("Fixture Task"), "updated_at": .string("2026-09-01T00:00:00Z"), "session_ids": .strings([fixture.sessionID])])]),
-            "sessions": .array([session]), "interactions": .array([]), "capabilities": .object(capabilities), "attention": .array([]), "catalog_revision": .string("catalog-r1")])
+            "tasks": .array([.object(["id": .string(fixture.taskID), "name": .string("Fixture Task"), "updated_at": .string("2026-09-01T00:00:00Z"),
+                "session_ids": .strings(tasklessSession ? [] : [fixture.sessionID])])]),
+            "sessions": .array(tasklessSession ? [] : [session]), "interactions": .array([]), "capabilities": .object(capabilities), "attention": .array([]), "catalog_revision": .string("catalog-r1")])
     }
     var catalog: WireValue { .object(["catalog_revision": .string("catalog-r1"), "workspaces": .array([.object(["id": .string(fixture.workspaceID), "name": .string("Fixture Repo")])]),
         "agents": .array([.object(["id": .string(fixture.agentID), "name": .string("Fixture Agent"), "proxy": .string("fixture"), "readiness": .string("ready")])]),

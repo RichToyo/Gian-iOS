@@ -76,6 +76,7 @@ extension LiveGianClientService {
         pendingReadSnapshots.removeAll()
         subscribedSession = nil; desiredSession = nil; latestTranscriptTurns.removeAll()
         fileDescriptors.removeAll()
+        stopSubscriptionRefresh()
     }
 
     func connectionClosed(_ error: RemoteClientError, scope: ClientScope, epoch captured: Int) {
@@ -93,6 +94,7 @@ extension LiveGianClientService {
         snapshotParts = nil; snapshot = nil; capabilities = nil; stagedSnapshot = nil; catalog = nil
         pendingReadSnapshots.removeAll()
         subscribedSession = nil; fileDescriptors.removeAll()
+        stopSubscriptionRefresh()
         lastFailure = error
         diagnostic(.connectionClosed(error), scope: scope)
         emit(.snapshotRequired(.cryptoResumed), scope: scope)
