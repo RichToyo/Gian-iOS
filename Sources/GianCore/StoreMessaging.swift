@@ -910,7 +910,12 @@ extension GianClientStore {
         }
         if let session = sessions.first(where: { $0.id == sessionID }),
            session.status == .running || session.status == .pending {
-            if let code = requireCapability(.queueAdd) { return reject(code) }
+            if let code = requireCapability(.queueAdd) {
+                // Nothing was sent; leave the composer editable, not in flight.
+                state.composer.send = .failed(intent, message: "This Host can't queue a message while the Agent is working. The draft was kept.")
+                persist()
+                return reject(code)
+            }
         }
         let sendID: CommandID = mint()
         intent.sendID = sendID

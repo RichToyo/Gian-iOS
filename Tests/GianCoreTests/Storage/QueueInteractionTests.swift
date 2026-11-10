@@ -87,6 +87,27 @@ struct QueueInteractionTests {
         #expect(service.queueRequests.isEmpty)
     }
 
+    @Test func sendWhileRunningWithoutQueueSupportLeavesComposerEditable() async throws {
+        let service = ControlledService()
+        prepare(service)
+        if let index = service.base.script.directory.capabilities.firstIndex(where: { $0.capability == .queueAdd }) {
+            service.base.script.directory.capabilities[index].state = .unsupported
+        }
+        let clock = ManualGianClock(instant: PreviewFixtures.instant)
+        let store = GianClientStore(service: service, clock: clock, storage: InMemoryGianStorage())
+        _ = try await signIn(store, clock: clock)
+        _ = await store.dispatch(.selectConversation(PreviewFixtures.sessionID))
+        // Translating first is what leaves the composer mid-send.
+        var translation = translationState(revision: 1, configRevision: 1)
+        translation.enabled = true
+        store.state.translations[PreviewFixtures.sessionID] = translation
+        _ = await store.dispatch(.editDraftText("While the Agent works"))
+        #expect(!(await store.dispatch(.send)).isApplied)
+        #expect(service.sendRequest == nil)
+        #expect(!store.state.composer.send.isInFlight)
+        #expect(store.state.composer.draft.text == "While the Agent works")
+    }
+
     @Test func lateQueueReceiptDoesNotOverwriteNewerSnapshot() async throws {
         let service = ControlledService()
         prepare(service)
