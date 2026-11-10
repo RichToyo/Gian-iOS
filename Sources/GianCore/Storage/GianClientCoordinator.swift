@@ -173,6 +173,10 @@ public final class GianClientCoordinator {
     private func makeRefreshTask(scope: ClientScope) -> Task<GianDispatchResult, Never> {
         refreshID += 1
         let request = refreshID
+        // Syncing from now on, not from when the task first runs: a restored
+        // session is offline until then, and the title would show it.
+        if store.state.sync.needsSnapshot { store.state.connection = .resyncing }
+        else { store.markConnectionNotReady(.resyncing, reason: .cryptoResumed) }
         let task = Task { @MainActor [weak self] () -> GianDispatchResult in
             guard let self else { return .rejected(.staleOperation) }
             defer { if request == self.refreshID { self.refreshTask = nil } }
@@ -180,8 +184,6 @@ public final class GianClientCoordinator {
                 return .rejected(.staleOperation)
             }
             do {
-                if self.store.state.sync.needsSnapshot { self.store.state.connection = .resyncing }
-                else { self.store.markConnectionNotReady(.resyncing, reason: .cryptoResumed) }
                 for _ in 0..<3 {
                     try await self.runtime.connect(scope: scope)
                     self.store.synchronizeServiceEpoch()

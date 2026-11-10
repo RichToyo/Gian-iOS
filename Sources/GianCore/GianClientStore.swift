@@ -278,7 +278,15 @@ public final class GianClientStore {
                 if let lifecycle = service as? any GianClientLifecycle { await lifecycle.disconnect() }
                 return result
             }
-            return recoverLocalStorage()
+            let result = recoverLocalStorage()
+            // Going to the background disconnects on purpose; coming back
+            // reconnects (the coordinator reads a fresh snapshot), as when the
+            // network returns. It is not an unreachable Host.
+            if readyScope() != nil, !storageLoadFailed, !storageWritesBlocked,
+               state.localConnectivity == .available, state.connection == .offline {
+                state.connection = .resyncing
+            }
+            return result
         case .refreshDirectory: return await refresh()
         case .retrySynchronization:
             guard let eventCoordinator else { return reject(.capabilityUnsupported) }
