@@ -28,6 +28,9 @@ public struct RemoteServiceDiagnostic: Sendable, Equatable {
     public let host: HostID?
     public let epoch: Int
     public let status: RemoteDiagnosticStatus
+    /// `connectionClosed` only: the connection had been working and the
+    /// service is already reconnecting on its own.
+    public var reconnecting = false
 }
 
 /// Deliberately excludes remote error text, URLs, tokens and payloads.

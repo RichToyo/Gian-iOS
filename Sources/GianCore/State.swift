@@ -87,6 +87,9 @@ public enum ConnectionProjection: Sendable, Equatable {
     case online
     case hostOffline
     case resyncing
+    /// A working connection dropped and the service is reconnecting on its
+    /// own. Not offline unless that attempt fails too.
+    case reconnecting
     case deviceRevoked
     case versionMismatch(hostVersion: String)
 }

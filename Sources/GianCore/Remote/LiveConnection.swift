@@ -100,7 +100,12 @@ extension LiveGianClientService {
         else { fileDescriptors = fileDescriptors.filter { $0.value.sessionID == desiredSession } }
         stopSubscriptionRefresh()
         lastFailure = error
-        diagnostic(.connectionClosed(error), scope: scope)
+        let retries = error != .notAuthorized && error != .deviceRevoked && !intentionalDisconnect && !overflowed
+            && error != .cancelled && error != .integrity && error != .versionMismatch && error != .invalidPayload
+            && error != .serverIdentityChanged && reconnect == nil
+        // A working connection that dropped is reconnecting, not offline (yet):
+        // only a failed reconnect attempt is reported as a plain loss.
+        diagnostic(.connectionClosed(error), scope: scope, reconnecting: retries && reconnectAttempt == 0)
         emit(.snapshotRequired(.cryptoResumed), scope: scope)
         if error == .notAuthorized {
             do { try invalidateAccount(server: scope.server, account: scope.account) } catch { _ = note(error) }
@@ -116,9 +121,7 @@ extension LiveGianClientService {
             } catch { _ = note(error) }
             return
         }
-        guard !intentionalDisconnect, !overflowed, error != .cancelled, error != .integrity,
-              error != .versionMismatch, error != .invalidPayload, error != .serverIdentityChanged,
-              reconnect == nil else { return }
+        guard retries else { return }
         reconnectAttempt += 1
         // Back off to one try every 32 s, but keep trying: going to the
         // background, losing the network or signing out disconnects on purpose.

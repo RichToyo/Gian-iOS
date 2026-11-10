@@ -334,6 +334,7 @@ enum ConnectivityPresentation: Equatable, Sendable {
         case .offline: self = .offlineHistory
         case .hostOffline: self = .hostOffline
         case .resyncing: self = .resyncing
+        case .reconnecting: self = .reconnecting
         case .deviceRevoked: self = .deviceRevoked
         case .versionMismatch(let version): self = .versionMismatch(version)
         }

@@ -101,9 +101,9 @@ public final class LiveGianClientService: GianClientLifecycle {
             diagnostic(.resyncRequired(.gapEvicted), scope: scope)
         }
     }
-    func diagnostic(_ status: RemoteDiagnosticStatus, scope: ClientScope? = nil) {
+    func diagnostic(_ status: RemoteDiagnosticStatus, scope: ClientScope? = nil, reconnecting: Bool = false) {
         diagnosticContinuation.yield(RemoteServiceDiagnostic(server: scope?.server,
-            account: scope?.account, host: scope?.host, epoch: epoch, status: status))
+            account: scope?.account, host: scope?.host, epoch: epoch, status: status, reconnecting: reconnecting))
     }
 
     func http(server: ServerAddress, path: String, method: String = "POST", body: WireValue? = nil,

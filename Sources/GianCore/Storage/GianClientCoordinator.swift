@@ -469,7 +469,15 @@ public final class GianClientCoordinator {
             }
             else if error == .deviceRevoked, let scope = store.readyScope() { store.hideHost(scope) }
             else if error == .versionMismatch { store.markConnectionNotReady(.versionMismatch(hostVersion: "unknown"), reason: nil) }
-            else if store.readyScope() != nil { store.markConnectionNotReady(.offline, reason: .cryptoResumed) }
+            else if store.readyScope() != nil {
+                if diagnostic.reconnecting, store.state.localConnectivity == .available, store.state.foreground == .foreground {
+                    // A drop the service is already reconnecting from: nothing
+                    // is known to be wrong unless that attempt fails as well.
+                    // Not `.resyncing`, so no second connection races it.
+                    store.serviceDiagnostic = nil
+                    store.markConnectionNotReady(.reconnecting, reason: .cryptoResumed)
+                } else { store.markConnectionNotReady(.offline, reason: .cryptoResumed) }
+            }
         case .resyncRequired(let reason):
             if let producer = runtime as? any DirectoryReadinessReporting, producer.acceptedDirectory != nil {
                 // Proven stale at the producer. Preserve any newer local need.
