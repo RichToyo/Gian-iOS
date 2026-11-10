@@ -84,6 +84,9 @@ struct AdaptiveRoot: View {
     @State private var showsSearch = false
     @State private var showsAddHost = false
     @State private var keyboardIndependentSize: CGSize = .zero
+    /// The window size while the keyboard is up, applied once it hides.
+    @State private var deferredWindowSize: CGSize?
+    @State private var keyboardVisible = false
     @State private var appearance: SettingsScreen.Appearance = .system
     @AppStorage("gian.appearance") private var storedAppearance: String = SettingsScreen.Appearance.system.rawValue
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -131,20 +134,34 @@ struct AdaptiveRoot: View {
                 }
             }
         }
+        // The layout follows the window, never the keyboard: re-deciding
+        // split vs stack while it is up rebuilds the tree under the focused
+        // composer, which dismisses the keyboard again (expanded portrait reads
+        // as landscape above a keyboard, and bars can change the insets too).
+        // So the size is the whole window, ignoring every safe area, and it is
+        // held while the keyboard shows.
         .background {
             GeometryReader { geometry in
                 Color.clear.preference(key: WideLayoutSizeKey.self, value: geometry.size)
             }
-            .ignoresSafeArea(.keyboard)
+            .ignoresSafeArea()
             .allowsHitTesting(false)
         }
         .onPreferenceChange(WideLayoutSizeKey.self) { size in
-            // Rotation, folding and resizing change the width; the keyboard
-            // only takes height. Re-deciding on a height-only change would
-            // rebuild the tree under the focused composer (expanded portrait
-            // reads as landscape above a keyboard).
-            guard size.width > 0, size.height > 0, size.width != keyboardIndependentSize.width else { return }
-            keyboardIndependentSize = size
+            guard size.width > 0, size.height > 0 else { return }
+            if keyboardVisible, keyboardIndependentSize != .zero {
+                deferredWindowSize = size
+            } else if size.width != keyboardIndependentSize.width {
+                keyboardIndependentSize = size
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+            keyboardVisible = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardDidHideNotification)) { _ in
+            keyboardVisible = false
+            if let size = deferredWindowSize, size.width != keyboardIndependentSize.width { keyboardIndependentSize = size }
+            deferredWindowSize = nil
         }
         .preferredColorScheme(colorScheme)
         .onAppear {
