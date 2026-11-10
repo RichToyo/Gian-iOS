@@ -108,7 +108,10 @@ struct ComposerView: View {
                 style: .continuous
             )
         )
-        .onChange(of: isFocused) { _, focused in onFocusChange(focused) }
+        .onChange(of: isFocused) { _, focused in
+            GianLog.keyboard.debug("composer focus \(focused), busy \(isBusy)")
+            onFocusChange(focused)
+        }
         .onChange(of: draft) { _, value in
             if let index = pendingEchoes.firstIndex(of: value) {
                 // One of our own edits arriving; later ones are still on the way.
@@ -143,7 +146,10 @@ struct ComposerView: View {
                 .background {
                     Color.clear
                         .contentShape(Rectangle())
-                        .onTapGesture { if !isBusy { isFocused = true } }
+                        .onTapGesture {
+                            GianLog.keyboard.debug("composer box tapped, busy \(isBusy)")
+                            if !isBusy { isFocused = true }
+                        }
                 }
 
             if let moreMenu, !moreMenu.isEmpty {

@@ -128,8 +128,10 @@ struct AdaptiveRoot: View {
     var body: some View {
         GeometryReader { geometry in
             let measured = keyboardIndependentSize == .zero ? geometry.size : keyboardIndependentSize
+            let split = WideLayoutOrientation.usesSplitView(size: measured, isRegularWidth: isWide)
+            let _ = GianLog.layout.debug("layout \(split ? "split" : "stack", privacy: .public) for \(measured.width)x\(measured.height), regular \(isWide)")
             Group {
-                if WideLayoutOrientation.usesSplitView(size: measured, isRegularWidth: isWide) {
+                if split {
                     wideLayout
                 } else {
                     narrowLayout(isExpandedPortrait: isWide)
@@ -139,30 +141,32 @@ struct AdaptiveRoot: View {
         // The layout follows the window, never the keyboard: re-deciding
         // split vs stack while it is up rebuilds the tree under the focused
         // composer, which dismisses the keyboard again (expanded portrait reads
-        // as landscape above a keyboard, and bars can change the insets too).
-        // So the size is the whole window, ignoring every safe area, and it is
-        // held while the keyboard shows.
+        // as landscape above a keyboard). A geometry reader can't see the
+        // window (even ignoring safe areas it measured an inset rect that bars
+        // change), so a UIKit probe reports the window's bounds, which only
+        // rotation, folding and resizing change. Held while the keyboard shows.
         .background {
-            GeometryReader { geometry in
-                Color.clear.preference(key: WideLayoutSizeKey.self, value: geometry.size)
+            WindowSizeProbe { size in
+                GianLog.layout.debug("window \(size.width)x\(size.height), keyboard \(keyboardVisible), regular \(isWide)")
+                if keyboardVisible, keyboardIndependentSize != .zero {
+                    deferredWindowSize = size
+                } else {
+                    keyboardIndependentSize = size
+                }
             }
-            .ignoresSafeArea()
             .allowsHitTesting(false)
         }
-        .onPreferenceChange(WideLayoutSizeKey.self) { size in
-            guard size.width > 0, size.height > 0 else { return }
-            if keyboardVisible, keyboardIndependentSize != .zero {
-                deferredWindowSize = size
-            } else if size.width != keyboardIndependentSize.width {
-                keyboardIndependentSize = size
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { note in
+            GianLog.keyboard.debug("will show \(String(describing: note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey]), privacy: .public)")
             keyboardVisible = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+            GianLog.keyboard.debug("will hide")
+        }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardDidHideNotification)) { _ in
+            GianLog.keyboard.debug("did hide")
             keyboardVisible = false
-            if let size = deferredWindowSize, size.width != keyboardIndependentSize.width { keyboardIndependentSize = size }
+            if let size = deferredWindowSize { keyboardIndependentSize = size }
             deferredWindowSize = nil
         }
         .preferredColorScheme(colorScheme)
@@ -436,9 +440,43 @@ enum WideLayoutOrientation {
     }
 }
 
-private struct WideLayoutSizeKey: PreferenceKey {
-    static let defaultValue: CGSize = .zero
-    static func reduce(value: inout CGSize, nextValue: () -> CGSize) { value = nextValue() }
+/// Reports its window's bounds whenever they change (rotation, folding,
+/// resizing). Unlike a geometry reader, the window never shrinks for the
+/// keyboard or for bars.
+private struct WindowSizeProbe: UIViewRepresentable {
+    let onChange: (CGSize) -> Void
+
+    func makeUIView(context: Context) -> Probe {
+        let probe = Probe()
+        probe.onChange = onChange
+        return probe
+    }
+
+    func updateUIView(_ probe: Probe, context: Context) {
+        probe.onChange = onChange
+    }
+
+    final class Probe: UIView {
+        var onChange: (CGSize) -> Void = { _ in }
+        private var reported: CGSize = .zero
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            report()
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            report()
+        }
+
+        private func report() {
+            guard let size = window?.bounds.size, size.width > 0, size.height > 0, size != reported else { return }
+            reported = size
+            // Outside the layout pass that noticed it.
+            DispatchQueue.main.async { [weak self] in self?.onChange(size) }
+        }
+    }
 }
 
 /// The detail placeholder's global pair, placed for the layout.
