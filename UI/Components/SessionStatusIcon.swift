@@ -23,6 +23,7 @@ struct SessionStatusIcon: View {
     }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.gianAccent) private var accent
     private let size: CGFloat = 16
 
     var body: some View {
@@ -49,10 +50,10 @@ struct SessionStatusIcon: View {
     private var ring: some View {
         let ring = Circle()
             .strokeBorder(
-                AngularGradient(colors: [Palette.g1, Palette.g2, Palette.g3, Palette.g2, Palette.g1], center: .center),
+                AngularGradient(colors: ringColors, center: .center),
                 lineWidth: size * 0.21
             )
-            .shadow(color: Palette.glow.opacity(0.6), radius: 2)
+            .shadow(color: accent.statusGlow, radius: 2)
         if reduceMotion {
             ring
         } else {
@@ -69,14 +70,14 @@ struct SessionStatusIcon: View {
     @ViewBuilder
     private var disc: some View {
         if !needsAttention {
-            Palette.accent.mask(knockout)
+            accent.color.mask(knockout)
         } else if reduceMotion {
-            Palette.flow.mask(knockout).shadow(color: Palette.glow.opacity(0.6), radius: 2)
+            flow.mask(knockout).shadow(color: accent.statusGlow, radius: 2)
         } else {
             // Flowing gradient and a slow breathe, as on the desktop (4 s
             // each); every loop ends where it starts.
             Rectangle()
-                .fill(Palette.flow)
+                .fill(flow)
                 .keyframeAnimator(initialValue: 0.0, repeating: true) { content, phase in
                     content.scaleEffect(2.3, anchor: UnitPoint(x: phase, y: 0.5))
                 } keyframes: { _ in
@@ -84,7 +85,7 @@ struct SessionStatusIcon: View {
                     CubicKeyframe(0.0, duration: 2)
                 }
                 .mask(knockout)
-                .shadow(color: Palette.glow.opacity(0.6), radius: 2)
+                .shadow(color: accent.statusGlow, radius: 2)
                 .keyframeAnimator(initialValue: 1.125, repeating: true) { content, scale in
                     content.scaleEffect(scale)
                 } keyframes: { _ in
@@ -92,6 +93,18 @@ struct SessionStatusIcon: View {
                     CubicKeyframe(1.125, duration: 2)
                 }
         }
+    }
+
+    /// The accent's status gradient around the ring.
+    private var ringColors: [Color] {
+        let stops = accent.statusGradient
+        return [stops[0], stops[1], stops[2], stops[1], stops[0]]
+    }
+
+    /// 115° like the desktop's `linear-gradient(115deg, …)`.
+    private var flow: LinearGradient {
+        let stops = accent.statusGradient
+        return LinearGradient(colors: stops + [stops[0]], startPoint: UnitPoint(x: 0.08, y: 0.18), endPoint: UnitPoint(x: 0.92, y: 0.82))
     }
 
     /// The disc with the glyph cut out of it.
@@ -111,22 +124,6 @@ struct SessionStatusIcon: View {
         case .waiting, .running: Pause()
         }
     }
-}
-
-/// Gian's status gradient for the default (azure) accent, from the desktop's
-/// oklch tokens: three stops swept around the accent hue, plus its glow.
-private enum Palette {
-    static let g1 = Color(light: 0x00B29E, dark: 0x00BFAA)
-    static let g2 = Color(light: 0x00B8FF, dark: 0x00CCFF)
-    static let g3 = Color(light: 0x7C63D6, dark: 0x876FE4)
-    static let glow = Color(light: 0x4EB6F3, dark: 0x62C9FF)
-    static let accent = Color(light: 0x007DAE, dark: 0x32B3E6)
-    /// 115° like the desktop's `linear-gradient(115deg, …)`.
-    static let flow = LinearGradient(
-        colors: [g1, g2, g3, g1],
-        startPoint: UnitPoint(x: 0.08, y: 0.18),
-        endPoint: UnitPoint(x: 0.92, y: 0.82)
-    )
 }
 
 // Glyphs in the desktop's 16-unit viewBox, scaled to the frame.

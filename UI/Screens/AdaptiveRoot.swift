@@ -89,6 +89,7 @@ struct AdaptiveRoot: View {
     @State private var keyboardVisible = false
     @State private var appearance: SettingsScreen.Appearance = .system
     @AppStorage("gian.appearance") private var storedAppearance: String = SettingsScreen.Appearance.system.rawValue
+    @AppStorage(GianAccent.storageKey) private var storedAccent: String = GianAccent.default.rawValue
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     private var isWide: Bool { horizontalSizeClass == .regular }
@@ -119,6 +120,7 @@ struct AdaptiveRoot: View {
     private var conversationSettings: ConversationSettingsPresentation? { presentation.conversationSettings }
     private var newChatSettings: ConversationSettingsPresentation? { presentation.newChatSettings }
     private var serverAddress: String { presentation.serverAddress }
+    private var accent: GianAccent { GianAccent(rawValue: storedAccent) ?? .default }
     private var openConversationID: SessionID? {
         if case .conversation(let id) = navigation.destination { id } else { nil }
     }
@@ -203,6 +205,7 @@ struct AdaptiveRoot: View {
                         serverOutcomeUnconfirmed: serverOutcomeUnconfirmed,
                         invalidationUnconfirmed: invalidationUnconfirmed,
                         appearance: $appearance,
+                        accent: Binding(get: { accent }, set: { storedAccent = $0.rawValue }),
                         onBack: onCloseSettings,
                         onSignOut: onSignOut,
                         onChangeServer: onChangeServer,
@@ -213,6 +216,8 @@ struct AdaptiveRoot: View {
             }
         }
         .addHostSheet(isPresented: $showsAddHost, pairing: addHost)
+        // Outermost, so the sheets get it too.
+        .environment(\.gianAccent, accent)
     }
 
     private var currentHost: HostItem? {

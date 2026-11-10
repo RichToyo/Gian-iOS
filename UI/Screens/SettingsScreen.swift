@@ -25,6 +25,8 @@ struct SettingsScreen: View {
     var invalidationUnconfirmed: Bool = false
 
     @Binding var appearance: Appearance
+    /// Tints the user's bubble and the status icons, as on the desktop.
+    @Binding var accent: GianAccent
 
     var onBack: () -> Void = {}
     var onSignOut: () -> Void = {}
@@ -110,6 +112,7 @@ struct SettingsScreen: View {
             }
             .pickerStyle(.inline)
             .labelsHidden()
+            AccentPicker(selection: $accent)
         }
     }
 
@@ -181,5 +184,44 @@ private struct ChangeServerSheet: View {
             }
         }
         .onAppear { address = current }
+    }
+}
+
+/// The desktop's accent swatches: one circle per preset, the chosen one ringed.
+private struct AccentPicker: View {
+    @Binding var selection: GianAccent
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: GianTheme.Metrics.paddingSmall) {
+            HStack {
+                Text("Accent")
+                Spacer()
+                Text(selection.name)
+                    .foregroundStyle(GianTheme.Colors.secondaryLabel)
+            }
+            HStack(spacing: 0) {
+                ForEach(GianAccent.allCases) { accent in
+                    Button {
+                        selection = accent
+                    } label: {
+                        Circle()
+                            .fill(accent.swatch)
+                            .frame(width: 26, height: 26)
+                            .padding(3)
+                            .overlay {
+                                if accent == selection {
+                                    Circle().strokeBorder(accent.swatch, lineWidth: 2)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, minHeight: GianTheme.Metrics.minHitTarget)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(accent.name)
+                    .accessibilityAddTraits(accent == selection ? .isSelected : [])
+                }
+            }
+        }
+        .padding(.vertical, 4)
     }
 }

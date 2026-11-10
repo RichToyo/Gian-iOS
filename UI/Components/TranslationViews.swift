@@ -70,17 +70,15 @@ struct ReadingTranslationStatus: View {
 /// e.g. "Translation · Chinese" / "Sent as · English".
 struct LanguageTag: View {
     let label: String
-    var onColoredBackground = false
+    /// The surrounding text color, e.g. inside the user's accent bubble.
+    var tint: Color? = nil
 
     var body: some View {
         Text(label)
             .font(GianTheme.Typography.badge)
-            .foregroundStyle(onColoredBackground ? Color.white.opacity(0.9) : GianTheme.Colors.secondaryLabel)
+            .foregroundStyle((tint ?? GianTheme.Colors.secondaryLabel).opacity(tint == nil ? 1 : 0.9))
             .padding(.horizontal, GianTheme.Metrics.paddingSmall)
             .padding(.vertical, 2)
-            .background(
-                onColoredBackground ? Color.white.opacity(0.16) : GianTheme.Colors.secondaryLabel.opacity(0.12),
-                in: Capsule()
-            )
+            .background((tint ?? GianTheme.Colors.secondaryLabel).opacity(0.12), in: Capsule())
     }
 }

@@ -78,6 +78,28 @@ final class GianUITests: XCTestCase {
         XCTAssertLessThan(abs(tag.frame.maxX - translated.frame.maxX), 4)
     }
 
+    /// Gian's accents, Plum by default; the choice tints bubbles and status.
+    func testAccentPickerDefaultsToPlumAndChanges() throws {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments += ["-previewScript", "fullDirectory", "-previewReady", "-previewDestination", "settings"]
+        app.launch()
+        let plum = app.buttons["Plum"]
+        XCTAssertTrue(plum.waitForExistence(timeout: 30))
+        for _ in 0..<4 where !plum.isHittable { app.collectionViews.firstMatch.swipeUp() }
+        XCTAssertTrue(plum.isSelected, "Plum is the default accent")
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "accent-picker"
+        shot.lifetime = .keepAlways
+        add(shot)
+        app.buttons["Ink"].tap()
+        XCTAssertTrue(app.buttons["Ink"].isSelected)
+        XCTAssertFalse(plum.isSelected)
+        // Leave the default for the next run (the choice persists).
+        plum.tap()
+        XCTAssertTrue(plum.isSelected)
+    }
+
     func testBannerOpensItsConversationInExpandedPortrait() throws {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()

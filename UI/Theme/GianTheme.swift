@@ -34,8 +34,6 @@ enum GianTheme {
         static let failure = Color(light: 0xFF3B30, dark: 0xFF3B30)
         /// Code block background.
         static let codeBackground = Color(light: 0xECECF1, dark: 0x1C1C1E)
-        /// User bubble background (iMessage-style blue).
-        static let userBubble = Color(light: 0x0A84FF, dark: 0x0A84FF)
     }
 
     // MARK: - Brand

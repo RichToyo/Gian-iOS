@@ -13,35 +13,38 @@ struct UserMessageView: View {
     var onDownloadAttachment: (AttachmentID) -> Void = { _ in }
     var onPreviewAttachment: (AttachmentID) -> Void = { _ in }
 
+    @Environment(\.gianAccent) private var accent
+
     var body: some View {
         VStack(alignment: .trailing, spacing: 4) {
             if !row.text.isEmpty {
                 VStack(alignment: .trailing, spacing: 6) {
                     Text(row.text)
                         .font(GianTheme.Typography.body)
-                        .foregroundStyle(.white)
+                        .foregroundStyle(accent.text)
                         .textSelection(.enabled)
 
                     if let sent = row.sentTranslation,
                        let translated = sent.presentableText {
                         VStack(alignment: .trailing, spacing: 6) {
-                            LanguageTag(label: "Sent as · \(sent.targetLanguage)", onColoredBackground: true)
+                            LanguageTag(label: "Sent as · \(sent.targetLanguage)", tint: accent.text)
                                 .accessibilityIdentifier("sent-translation-label")
                             Text(translated)
                                 .font(GianTheme.Typography.body)
-                                .foregroundStyle(.white.opacity(0.9))
+                                .foregroundStyle(accent.text.opacity(0.85))
                                 .textSelection(.enabled)
                         }
                         .padding(.top, 6)
                         .overlay(alignment: .top) {
-                            Rectangle().fill(Color.white.opacity(0.4)).frame(height: 0.5)
+                            Rectangle().fill(accent.text.opacity(0.25)).frame(height: 0.5)
                         }
                     }
                 }
                 .padding(.horizontal, GianTheme.Metrics.paddingMedium)
                 .padding(.vertical, GianTheme.Metrics.paddingSmall)
+                // Gian's bubble: the soft accent under accent-colored text.
                 .background(
-                    GianTheme.Colors.userBubble,
+                    accent.soft,
                     in: RoundedRectangle(
                         cornerRadius: GianTheme.Metrics.bubbleRadius,
                         style: .continuous
