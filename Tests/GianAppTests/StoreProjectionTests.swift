@@ -33,6 +33,64 @@ final class StoreProjectionTests: XCTestCase {
         XCTAssertEqual(revoked?.retryConnection, false)
     }
 
+    /// Grey Wi-Fi is for a Host the app can't reach; a drop being reconnected
+    /// and catching up spin; the exclamation is for real failures only.
+    func testOnlyRealOfflineAndFailuresLookLikeIt() {
+        XCTAssertEqual(ConnectivityPresentation(.reconnecting), .reconnecting)
+        let reconnecting = ConversationStatusPresentation.make(connectivity: .reconnecting, diagnostic: .none, transcriptSync: .syncing)
+        XCTAssertEqual(reconnecting?.label, "Reconnecting")
+        XCTAssertEqual(reconnecting?.symbol, "arrow.triangle.2.circlepath")
+        XCTAssertEqual(reconnecting?.isActivity, true)
+        XCTAssertEqual(reconnecting?.isError, false)
+        let syncing = ConversationStatusPresentation.make(connectivity: .hidden, diagnostic: .none, transcriptSync: .syncing)
+        XCTAssertEqual(syncing?.label, "Syncing")
+        XCTAssertEqual(syncing?.isActivity, true)
+        XCTAssertEqual(ConversationStatusPresentation.make(connectivity: .resyncing, diagnostic: .none, transcriptSync: .idle)?.isActivity, true)
+        let offline = ConversationStatusPresentation.make(connectivity: ConnectivityPresentation(.offline), diagnostic: .none, transcriptSync: .syncing)
+        XCTAssertEqual(offline?.symbol, "wifi.slash")
+        XCTAssertEqual(offline?.isActivity, false)
+        let failed = ConversationStatusPresentation.make(connectivity: .hidden, diagnostic: .none, transcriptSync: .failed)
+        XCTAssertEqual(failed?.symbol, "exclamationmark.triangle")
+        XCTAssertEqual(failed?.isError, true)
+        XCTAssertEqual(failed?.isActivity, false)
+    }
+
+    /// The title takes a status change once it has lasted a moment, so a quick
+    /// sync never flickers; details of the status shown change at once.
+    func testTitleStatusSettlesBeforeItChanges() {
+        let chat = id("settle-chat", SessionID.self)
+        let quiet = ConversationStatusInputs(session: chat, connectivity: .hidden, diagnostic: .none, transcriptSync: .idle)
+        var syncing = quiet; syncing.transcriptSync = .syncing
+        var resyncing = syncing; resyncing.connectivity = .resyncing
+        var failed = quiet; failed.transcriptSync = .failed
+
+        let opening = ConversationStatusInputs.next(shown: quiet, latest: syncing)
+        XCTAssertEqual(opening.now, quiet)
+        XCTAssertTrue(opening.settling)
+        // Same status ("Syncing"), other details: at once.
+        let catchingUp = ConversationStatusInputs.next(shown: syncing, latest: resyncing)
+        XCTAssertEqual(catchingUp.now, resyncing)
+        XCTAssertFalse(catchingUp.settling)
+        // Clearing, or turning into a failure, settles as well.
+        XCTAssertEqual(ConversationStatusInputs.next(shown: syncing, latest: quiet).now, syncing)
+        XCTAssertTrue(ConversationStatusInputs.next(shown: syncing, latest: failed).settling)
+        XCTAssertEqual(ConversationStatusInputs.next(shown: quiet, latest: quiet).now, quiet)
+
+        // Another chat doesn't inherit the previous chat's messages status.
+        let other = id("settle-other", SessionID.self)
+        var otherSyncing = syncing; otherSyncing.session = other
+        let switched = ConversationStatusInputs.next(shown: failed, latest: otherSyncing)
+        XCTAssertEqual(switched.now, ConversationStatusInputs(session: other, connectivity: .hidden, diagnostic: .none, transcriptSync: .idle))
+        XCTAssertNil(switched.now.status)
+        XCTAssertTrue(switched.settling)
+        // The connection is the same in every chat.
+        var offline = quiet; offline.connectivity = .offlineHistory
+        var otherOffline = offline; otherOffline.session = other
+        XCTAssertEqual(ConversationStatusInputs.next(shown: offline, latest: otherOffline).now, otherOffline)
+        XCTAssertEqual(ConversationStatusInputs.quiet.status, nil)
+        XCTAssertEqual(ConversationStatusInputs.settle, .milliseconds(300))
+    }
+
     private let now = Date(timeIntervalSince1970: 1_781_000_000)
 
     private func id<Kind>(_ raw: String, _ type: ScopedID<Kind>.Type) -> ScopedID<Kind> {

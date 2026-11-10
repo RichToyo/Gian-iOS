@@ -46,6 +46,10 @@ final class AppPresentation {
     @ObservationIgnored private var rowsInput: StoreProjection.TranscriptRowsInput?
     @ObservationIgnored private var rows: [TranscriptRow] = []
     @ObservationIgnored private var directoryInput: DirectoryInput?
+    /// The chat title's status inputs as shown, and newer ones while they settle.
+    @ObservationIgnored private var shownStatus = ConversationStatusInputs.quiet
+    @ObservationIgnored private var settlingStatus: ConversationStatusInputs?
+    @ObservationIgnored private var statusSettle: Task<Void, Never>?
 
     private struct DirectoryInput: Equatable {
         let directory: DirectoryProjection
@@ -97,13 +101,25 @@ final class AppPresentation {
         assign(\.hosts, StoreProjection.hosts(state))
         assign(\.directory, projectedDirectory(state))
         assign(\.navigation, state.navigation)
-        assign(\.conversation, StoreProjection.activeConversation(state) { input in
+        var conversation = StoreProjection.activeConversation(state) { input in
             if input != rowsInput {
                 rows = StoreProjection.transcriptRows(input)
                 rowsInput = input
             }
             return rows
-        })
+        }
+        let status = ConversationStatusInputs(session: conversation?.id, connectivity: ConnectivityPresentation(state.connection),
+            diagnostic: StoreProjection.diagnostic(store.serviceDiagnostic), transcriptSync: conversation?.transcriptSync ?? .idle)
+        if state.foreground == .foreground { settleStatus(status) } else {
+            // The background (inactive included) disconnects on purpose and
+            // coming back reconnects: rather than come back offline, the title
+            // keeps what it showed, taking only changes that apply at once.
+            shownStatus = ConversationStatusInputs.next(shown: shownStatus, latest: status).now
+            holdStatus()
+        }
+        conversation?.connectivity = shownStatus.connectivity
+        conversation?.transcriptSync = shownStatus.transcriptSync
+        assign(\.conversation, conversation)
         assign(\.composer, state.composer)
         assign(\.workspaces, state.workspaces)
         assign(\.agents, state.agents)
@@ -111,7 +127,7 @@ final class AppPresentation {
         assign(\.mutationsReady, ready)
         assign(\.directoryNegotiated, state.capabilities.directoryNegotiated)
         assign(\.canRetryUncertainCreate, StoreProjection.canRetryUncertainCreate(state, mutationsReady: ready))
-        assign(\.diagnostic, StoreProjection.diagnostic(store.serviceDiagnostic))
+        assign(\.diagnostic, shownStatus.diagnostic)
         assign(\.storageError, state.storageError)
         assign(\.serverOutcomeUnconfirmed, store.serverOutcomeUnconfirmed)
         assign(\.invalidationUnconfirmed, store.authorizationInvalidationUnconfirmed)
@@ -130,6 +146,38 @@ final class AppPresentation {
         assign(\.logoTrigger, AgentLogoTrigger(store))
         assign(\.optionsTrigger, AgentOptionsTrigger(store))
         assign(\.restorationHint, RestorationHintSelection(state))
+    }
+
+    /// The chat title shows a status change once it has lasted
+    /// `ConversationStatusInputs.settle`, so a quick sync or reconnect never
+    /// flickers in it. Only the title reads these inputs.
+    private func settleStatus(_ latest: ConversationStatusInputs) {
+        let (now, settling) = ConversationStatusInputs.next(shown: shownStatus, latest: latest)
+        shownStatus = now
+        guard settling else { holdStatus(); return }
+        // Newer details of the status already settling don't restart it.
+        let restarts = settlingStatus?.status?.label != latest.status?.label
+        settlingStatus = latest
+        guard restarts || statusSettle == nil else { return }
+        statusSettle?.cancel()
+        statusSettle = Task { [weak self] in
+            try? await Task.sleep(for: ConversationStatusInputs.settle)
+            guard let self, !Task.isCancelled, let settled = self.settlingStatus else { return }
+            self.shownStatus = settled
+            self.settlingStatus = nil
+            self.statusSettle = nil
+            if var current = self.conversation, current.id == settled.session {
+                current.connectivity = settled.connectivity
+                current.transcriptSync = settled.transcriptSync
+                self.assign(\.conversation, current)
+            }
+            self.assign(\.diagnostic, settled.diagnostic)
+        }
+    }
+
+    private func holdStatus() {
+        settlingStatus = nil
+        statusSettle?.cancel(); statusSettle = nil
     }
 
     private func projectedDirectory(_ state: GianClientState) -> DirectoryPresentation {

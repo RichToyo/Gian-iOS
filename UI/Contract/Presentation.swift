@@ -358,22 +358,24 @@ enum DiagnosticPresentation: Equatable, Sendable {
     case resyncRequired(reason: String)
 }
 
-struct ConversationStatusPresentation: Equatable {
+struct ConversationStatusPresentation: Equatable, Sendable {
     let label: String
     let symbol: String
     let details: [String]
     let retryConnection: Bool
     let retryMessages: Bool
     let isError: Bool
+    /// Work in progress (reconnecting, syncing): the symbol spins.
+    var isActivity = false
 
     static func make(connectivity: ConnectivityPresentation, diagnostic: DiagnosticPresentation,
                      transcriptSync: TranscriptSyncState) -> Self? {
         var details: [String] = []
-        var primary: (String, String, Bool)?
+        var primary: (label: String, symbol: String, error: Bool, activity: Bool)?
         var retryConnection = false
         var retryMessages = false
-        func add(_ label: String, _ symbol: String, _ detail: String, error: Bool = false) {
-            if primary == nil { primary = (label, symbol, error) }
+        func add(_ label: String, _ symbol: String, _ detail: String, error: Bool = false, activity: Bool = false) {
+            if primary == nil { primary = (label, symbol, error, activity) }
             details.append(detail)
         }
         switch connectivity {
@@ -399,18 +401,48 @@ struct ConversationStatusPresentation: Equatable {
             if connectivity != .deviceRevoked { retryConnection = true }
         }
         switch connectivity {
-        case .reconnecting: add("Reconnecting", "arrow.triangle.2.circlepath", "Reconnecting to the Host.")
-        case .resyncing: add("Syncing", "arrow.triangle.2.circlepath", "Catching up with the Host.")
+        case .reconnecting: add("Reconnecting", "arrow.triangle.2.circlepath", "Reconnecting to the Host.", activity: true)
+        case .resyncing: add("Syncing", "arrow.triangle.2.circlepath", "Catching up with the Host.", activity: true)
         default: break
         }
         if case .resyncRequired = diagnostic {
             add("Sync required", "arrow.triangle.2.circlepath", "Synchronization is required.", error: true)
             retryConnection = true
         }
-        if transcriptSync == .syncing { add("Syncing", "arrow.triangle.2.circlepath", "Synchronizing messages.") }
+        if transcriptSync == .syncing { add("Syncing", "arrow.triangle.2.circlepath", "Synchronizing messages.", activity: true) }
         guard let primary else { return nil }
-        return Self(label: primary.0, symbol: primary.1, details: details,
-                    retryConnection: retryConnection, retryMessages: retryMessages, isError: primary.2)
+        return Self(label: primary.label, symbol: primary.symbol, details: details, retryConnection: retryConnection,
+                    retryMessages: retryMessages, isError: primary.error, isActivity: primary.activity)
+    }
+}
+
+/// What the chat title's status is made of. The title shows these once they
+/// have settled, so a quick sync or reconnect never flickers in it.
+struct ConversationStatusInputs: Equatable, Sendable {
+    var session: SessionID?
+    var connectivity: ConnectivityPresentation
+    var diagnostic: DiagnosticPresentation
+    var transcriptSync: TranscriptSyncState
+
+    /// Nothing to show.
+    static let quiet = Self(session: nil, connectivity: .hidden, diagnostic: .none, transcriptSync: .idle)
+
+    /// A status shows, changes or clears once it has lasted this long.
+    static let settle: Duration = .milliseconds(300)
+
+    var status: ConversationStatusPresentation? {
+        .make(connectivity: connectivity, diagnostic: diagnostic, transcriptSync: transcriptSync)
+    }
+
+    /// What the title shows at once when `latest` arrives while it shows
+    /// `shown`, and whether `latest` follows once it has settled. New details
+    /// of the status shown apply at once. Another chat starts from nothing
+    /// shown for its messages, not from the previous chat's.
+    static func next(shown: Self, latest: Self) -> (now: Self, settling: Bool) {
+        var now = shown
+        if now.session != latest.session { now.session = latest.session; now.transcriptSync = .idle }
+        if now.status?.label == latest.status?.label { return (latest, false) }
+        return (now, true)
     }
 }
 

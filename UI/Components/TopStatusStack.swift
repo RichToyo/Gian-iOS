@@ -87,19 +87,29 @@ struct TopStatusStack: View {
     }
 }
 
+/// The chat title's status. `AppPresentation` only passes one that has lasted
+/// a moment; when it clears, the title simply fades it out.
 struct ConversationStatusView: View {
     let status: ConversationStatusPresentation
     var onRetryConnection: () -> Void
     var onRetryMessages: () -> Void
     @State private var showsDetails = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Button { showsDetails = true } label: {
-            Label(status.label, systemImage: status.symbol)
-                .font(GianTheme.Typography.caption)
-                .foregroundStyle(status.isError ? GianTheme.Colors.failure : GianTheme.Colors.secondaryLabel)
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
+            Label {
+                Text(status.label)
+            } icon: {
+                // Reconnecting and syncing spin until they finish.
+                Image(systemName: status.symbol)
+                    .symbolEffect(.rotate, options: .repeat(.continuous), isActive: status.isActivity && !reduceMotion)
+            }
+            .font(GianTheme.Typography.caption)
+            .foregroundStyle(status.isError ? GianTheme.Colors.failure : GianTheme.Colors.secondaryLabel)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .contentTransition(.opacity)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Connection status: \(status.label)")
