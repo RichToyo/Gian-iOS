@@ -38,6 +38,8 @@ final class FixtureTransport: RemoteTransport {
     var requests: [URLRequest] = []
     var handler: ((URLRequest) async throws -> RemoteHTTPResponse)?
     var socket: (any RemoteWebSocket)?
+    /// When set, each connection gets the socket this makes (and `socket` is set to it).
+    var makeSocket: (() -> any RemoteWebSocket)?
     func request(_ request: URLRequest, maximumResponseBytes: Int) async throws -> RemoteHTTPResponse {
         requests.append(request)
         guard let handler else { throw RemoteClientError.transport }
@@ -47,6 +49,7 @@ final class FixtureTransport: RemoteTransport {
     }
     func openWebSocket(_ request: URLRequest) async throws -> any RemoteWebSocket {
         requests.append(request)
+        if let makeSocket { socket = makeSocket() }
         guard let socket else { throw RemoteClientError.transport }
         return socket
     }
