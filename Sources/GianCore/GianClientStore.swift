@@ -1083,14 +1083,32 @@ public final class GianClientStore {
             transcriptSync: .syncing
         )
         let sync = beginTranscriptSync(session: id)
+        // Until the connection is back a read could only fail. The chat stays
+        // syncing: the coordinator reads it once caught up, as it does a cached one.
+        if transcriptAwaitsConnection {
+            state.conversation?.hydratedFromCache = true
+            return .applied
+        }
         let token = epoch
         let navigation = navigationEpoch
-        let page = await service.pageTranscript(scope: scope, sessionID: id, cursor: nil)
+        var page = await service.pageTranscript(scope: scope, sessionID: id, cursor: nil)
+        // An update of the chat, or another read of it, overtook the read: the
+        // Host is fine, so read again (bounded) rather than report a failure.
+        var rereads = 0
+        while page.superseded, rereads < 2, responseIsCurrent(token), navigation == navigationEpoch, currentSessionID == id {
+            rereads += 1
+            page = await service.pageTranscript(scope: scope, sessionID: id, cursor: nil)
+        }
         guard responseIsCurrent(token), state.currentHostID == scope.host else {
             finishTranscriptSync(sync, session: id, state: .failed)
             return reject(.staleOperation)
         }
         guard !page.failed else {
+            // The connection went away meanwhile: read again once it is back.
+            if transcriptAwaitsConnection, navigation == navigationEpoch, currentSessionID == id {
+                state.conversation?.hydratedFromCache = true
+                return .applied
+            }
             finishTranscriptSync(sync, session: id, state: .failed)
             return .applied
         }
@@ -1138,6 +1156,19 @@ public final class GianClientStore {
         guard ticket.sequence == transcriptSyncSequence, ticket.epoch == epoch, currentSessionID == session,
               state.conversation?.session.id == session else { return }
         state.conversation?.transcriptSync = value
+    }
+
+    /// A running coordinator reconciles the open chat when it is marked for
+    /// catch-up (`hydratedFromCache`) once it has read a fresh snapshot, so a
+    /// read that has to wait for that is syncing, not failed.
+    var coordinatorReadsTranscript: Bool {
+        eventCoordinator?.isRunning == true && !storageLoadFailed && !storageWritesBlocked
+    }
+
+    /// Not connected, or not caught up yet: the coordinator's next snapshot,
+    /// and its reconciliation of the open chat, are still to come.
+    var transcriptAwaitsConnection: Bool {
+        coordinatorReadsTranscript && (state.connection != .online || state.sync.needsSnapshot || requiresFreshSnapshot)
     }
 
     private func openBanner(_ id: BannerID) async -> GianDispatchResult {

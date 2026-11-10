@@ -228,6 +228,11 @@ extension GianClientStore {
             }
         }
         state.conversation?.hydratedFromCache = true
+        // The coordinator reads the open chat again once caught up, so an
+        // earlier failed read is retried rather than still failed.
+        if coordinatorReadsTranscript, state.conversation?.transcriptSync == .failed {
+            state.conversation?.transcriptSync = .syncing
+        }
     }
 
     func finishPendingRemoteLogout() async {

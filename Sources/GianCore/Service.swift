@@ -495,12 +495,17 @@ public struct TranscriptPageResponse: Sendable, Equatable {
     public var cursor: String?
     public var hasOlder: Bool
     public var failed: Bool
+    /// A failed read that something newer overtook: the chat changed, or
+    /// another read of it started, while it was in flight. Reading again is
+    /// expected to work; it says nothing about the chat or the connection.
+    public var superseded: Bool
 
-    public init(items: [TranscriptItem], cursor: String?, hasOlder: Bool, failed: Bool = false) {
+    public init(items: [TranscriptItem], cursor: String?, hasOlder: Bool, failed: Bool = false, superseded: Bool = false) {
         self.items = items
         self.cursor = cursor
         self.hasOlder = hasOlder
-        self.failed = failed
+        self.failed = failed || superseded
+        self.superseded = superseded
     }
 }
 

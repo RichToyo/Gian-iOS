@@ -32,7 +32,8 @@ extension GianClientStore {
             guard responseIsCurrent(token), navigation == navigationEpoch, currentSessionID == session, !Task.isCancelled else {
                 return reject(.staleOperation)
             }
-            guard !page.failed else { return reject(.notFound) }
+            // The coordinator reads again when an update of the chat overtook this read.
+            guard !page.failed else { return reject(page.superseded ? .staleOperation : .notFound) }
             if latest == nil { latest = page }
             for item in page.items {
                 switch item.body {

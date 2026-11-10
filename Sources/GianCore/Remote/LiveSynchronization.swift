@@ -76,7 +76,9 @@ extension LiveGianClientService {
             if safe == .capabilityDenied || safe == .server(code: "RESOURCE_NOT_FOUND", retryAfter: nil) {
                 sessionBecameUnavailable(sessionID, scope: scope)
             }
-            return TranscriptPageResponse(items: [], cursor: cursor, hasOlder: false, failed: true)
+            // An update of this chat, another subscribe or a new connection
+            // overtook the read (the fences above and in `subscribe`).
+            return TranscriptPageResponse(items: [], cursor: cursor, hasOlder: false, failed: true, superseded: safe == .cancelled)
         }
     }
 
