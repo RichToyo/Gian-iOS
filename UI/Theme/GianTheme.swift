@@ -36,10 +36,6 @@ enum GianTheme {
         static let codeBackground = Color(light: 0xECECF1, dark: 0x1C1C1E)
         /// User bubble background (iMessage-style blue).
         static let userBubble = Color(light: 0x0A84FF, dark: 0x0A84FF)
-        /// Tinted pill backgrounds for status badges.
-        static func statusTint(_ color: Color, scheme: ColorScheme) -> Color {
-            color.opacity(scheme == .dark ? 0.22 : 0.14)
-        }
     }
 
     // MARK: - Brand

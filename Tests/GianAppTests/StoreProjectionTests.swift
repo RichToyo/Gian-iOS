@@ -78,6 +78,21 @@ final class StoreProjectionTests: XCTestCase {
         XCTAssertEqual(StatusBadge(status: .done, attention: .running), .working)
     }
 
+    /// Gian's row-end glyph: a finished conversation shows only while unread,
+    /// and only waiting or unread rows ask for attention.
+    @MainActor
+    func testRowStatusIconFollowsGianReadRules() {
+        XCTAssertEqual(SessionStatusIcon(badge: .working, unread: false)?.kind, .running)
+        XCTAssertEqual(SessionStatusIcon(badge: .waiting, unread: false)?.needsAttention, true)
+        XCTAssertEqual(SessionStatusIcon(badge: .failed, unread: true)?.needsAttention, true)
+        XCTAssertEqual(SessionStatusIcon(badge: .failed, unread: false)?.needsAttention, false)
+        XCTAssertEqual(SessionStatusIcon(badge: .idle, unread: true)?.kind, .done)
+        XCTAssertNil(SessionStatusIcon(badge: .idle, unread: false))
+        var unread = summary("s1", repo: "r", activity: now)
+        unread.unread = true
+        XCTAssertTrue(StoreProjection.conversationRow(unread).unread)
+    }
+
     // MARK: - Directory grouping
 
     func testReposGroupedByWorkspaceAndSortedByActivity() {

@@ -133,7 +133,8 @@ enum StoreProjection {
             agentName: summary.agentName,
             repoName: summary.repositoryName,
             badge: badge,
-            lastActivity: summary.lastActivityAt
+            lastActivity: summary.lastActivityAt,
+            unread: summary.unread
         )
     }
 

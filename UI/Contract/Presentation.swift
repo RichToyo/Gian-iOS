@@ -113,6 +113,9 @@ struct ConversationRowItem: Identifiable, Equatable, Sendable {
     var repoName: String?
     var badge: StatusBadge
     var lastActivity: Date?
+    /// The Host's read state; a finished conversation shows its status icon
+    /// only while unread.
+    var unread = false
 }
 
 struct TaskGroupItem: Identifiable, Equatable, Sendable {

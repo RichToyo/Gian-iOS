@@ -1,52 +1,44 @@
 import SwiftUI
 import GianCore
 
-/// Directory row: Agent icon, user-language title with last activity, a
-/// subtitle (repository, or the Agent where the group already names the
-/// repository) and the state pill. Selection dispatches upward.
+/// Directory row: the title on the first line; the Agent's icon on the
+/// second, with the repository (Tasks, search) or the last activity (Repos,
+/// whose group already names the repository); Gian's status icon at the end.
 struct ConversationRow: View {
     let item: ConversationRowItem
     var isSelected: Bool = false
-    /// False inside repository groups, where the header already names it.
+    /// False inside repository groups, where the header already names it and
+    /// the row shows its time instead.
     var showsRepo: Bool = true
     var onSelect: () -> Void
 
-    private var subtitle: String? {
-        showsRepo ? (item.repoName ?? item.agentName) : item.agentName
+    private var detail: String? {
+        if showsRepo { return item.repoName }
+        return item.lastActivity.map { RowTimestamp.text(for: $0) }
     }
 
     var body: some View {
         Button(action: onSelect) {
-            HStack(spacing: GianTheme.Metrics.paddingMedium) {
-                AgentAvatar(
-                    logo: item.agent,
-                    name: item.agentName,
-                    size: GianTheme.Metrics.avatarMedium
-                )
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(alignment: .firstTextBaseline, spacing: GianTheme.Metrics.paddingSmall) {
-                        Text(item.title)
-                            .font(GianTheme.Typography.title)
-                            .foregroundStyle(GianTheme.Colors.label)
-                            .lineLimit(1)
-                        Spacer(minLength: 0)
-                        if let lastActivity = item.lastActivity {
-                            Text(RowTimestamp.text(for: lastActivity))
-                                .font(.footnote)
-                                .foregroundStyle(GianTheme.Colors.secondaryLabel)
-                                .monospacedDigit()
-                        }
-                    }
-                    HStack(spacing: GianTheme.Metrics.paddingSmall) {
-                        if let subtitle {
-                            Text(subtitle)
+            HStack(spacing: GianTheme.Metrics.paddingSmall) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(item.title)
+                        .font(GianTheme.Typography.title)
+                        .foregroundStyle(GianTheme.Colors.label)
+                        .lineLimit(1)
+                    HStack(spacing: 6) {
+                        AgentAvatar(logo: item.agent, name: item.agentName, size: 16)
+                        if let detail {
+                            Text(detail)
                                 .font(GianTheme.Typography.caption)
                                 .foregroundStyle(GianTheme.Colors.secondaryLabel)
+                                .monospacedDigit()
                                 .lineLimit(1)
                         }
-                        Spacer(minLength: 0)
-                        StatusPill(badge: item.badge)
                     }
+                }
+                Spacer(minLength: 0)
+                if let status = SessionStatusIcon(badge: item.badge, unread: item.unread) {
+                    status
                 }
             }
             .padding(.horizontal, GianTheme.Metrics.paddingMedium)
@@ -145,6 +137,15 @@ struct DirectoryGroupHeader: View {
                 agent: .codex, agentName: "Codex", repoName: "infra",
                 badge: .failed, lastActivity: .now
             ),
+            onSelect: {}
+        )
+        ConversationRow(
+            item: ConversationRowItem(
+                id: SessionID(rawValue: "c4")!, title: "Chart build times",
+                agent: .claude, agentName: "Claude", repoName: "infra",
+                badge: .idle, lastActivity: .now, unread: true
+            ),
+            showsRepo: false,
             onSelect: {}
         )
     }
