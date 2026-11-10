@@ -251,6 +251,7 @@ extension GianClientStore {
     }
 
     func mergeDirectoryMetadata(_ entries: [DirectoryEntry]) {
+        var discovered: [TaskRecord] = []
         for entry in entries {
             pendingSessionAccess.removeValue(forKey: entry.session.id)
             deniedSessionAccess.remove(entry.session.id)
@@ -270,9 +271,18 @@ extension GianClientStore {
             else { state.workspaces.append(entry.workspace) }
             if let task = entry.task {
                 if let index = taskRecords.firstIndex(where: { $0.id == task.id }) { taskRecords[index] = task }
-                else { taskRecords.append(task) }
+                else if let index = discovered.firstIndex(where: { $0.id == task.id }) { discovered[index] = task }
+                else { discovered.append(task) }
             }
         }
+        insertDiscoveredTasks(discovered)
+    }
+
+    /// `taskRecords` keeps the Host's task order (Gian's). A task this device has
+    /// not seen yet was created since its last snapshot, and Gian lists tasks
+    /// never reordered by hand newest first above the manual order, so it goes on top.
+    func insertDiscoveredTasks(_ tasks: [TaskRecord]) {
+        taskRecords.insert(contentsOf: tasks, at: 0)
     }
 
     func projectDirectoryMembership(now: Date) {
@@ -295,12 +305,15 @@ extension GianClientStore {
         let eligibleTasks = Dictionary(grouping: tasks.filter { entry in
             entry.task?.status == .open && entry.session.taskID == entry.task?.id && entry.session.completedAt == nil
         }, by: { $0.task!.id })
+        // Pages arrive in Host ID order; groups follow Gian's task order and rows
+        // their first-seen order, so a later page never reshuffles shown rows.
+        let taskOrder = TaskOrder(taskRecords)
         state.directory.tasks = eligibleTasks.filter { _, rows in
             rows.contains { tasksTimeFilter.includes($0.session, now: now) || $0.session.id == currentSessionID }
         }
+            .sorted { taskOrder.precedes($0.key, $1.key) }
             .map { id, rows in TaskSection(id: id, title: rows[0].task!.title,
-                conversations: rows.map { DirectoryFilter.summary($0.session, names: names) }.sorted { $0.id.rawValue < $1.id.rawValue }) }
-            .sorted { $0.id.rawValue < $1.id.rawValue }
+                conversations: rows.map(\.session).sorted(by: conversationOrder.precedes).map { DirectoryFilter.summary($0, names: names) }) }
         let recentRepos = repos.filter { reposTimeFilter.includes($0.session, now: now) || $0.session.id == currentSessionID }
         state.directory.repos = recentRepos.map { DirectoryFilter.summary($0.session, names: names) }
         state.directory.repositories = Dictionary(grouping: recentRepos, by: { $0.workspace.id }).map { id, rows in

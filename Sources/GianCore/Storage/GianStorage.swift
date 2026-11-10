@@ -34,6 +34,8 @@ public struct StoredHostState: Codable, Equatable, Sendable {
     public var transcriptCursors: [SessionID: StoredTranscriptCursor] = [:]
     public var sessions: [SessionRecord] = []
     public var tasks: [TaskRecord] = []
+    /// Tasks-view conversation order, first seen first (see `ConversationOrder`).
+    var conversationOrder: [SessionID]?
     public var workspaces: [WorkspaceRecord] = []
     public var agents: [AgentRecord] = []
     public var interactions: [InteractionRecord] = []

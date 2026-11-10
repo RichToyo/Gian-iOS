@@ -77,6 +77,7 @@ public final class GianClientStore {
     @ObservationIgnored var invalidatedHosts: [ClientScope: Date] = [:]
     @ObservationIgnored var sessions: [SessionRecord] = []
     @ObservationIgnored var taskRecords: [TaskRecord] = []
+    @ObservationIgnored var conversationOrder = ConversationOrder()
     @ObservationIgnored var searchHits: [SessionRecord] = []
     @ObservationIgnored var verifiedTranscriptDownloads: [AttachmentID: VerifiedTranscriptDownload] = [:]
     @ObservationIgnored var transcriptDownloadRequests: [AttachmentID: Int] = [:]
@@ -472,6 +473,7 @@ public final class GianClientStore {
 
     func reproject() {
         let query = state.directory.searchQuery
+        conversationOrder.note(sessions)
         let projection = DirectoryFilter.project(
             now: clock.now(),
             authority: state.directory.authority,
@@ -479,7 +481,8 @@ public final class GianClientStore {
             sessions: sessions,
             workspaces: state.workspaces,
             query: query.isEmpty ? nil : query,
-            searchCandidates: searchHits
+            searchCandidates: searchHits,
+            conversationOrder: conversationOrder
         )
         let evaluated = clock.now()
         state.directory = DirectoryProjection(
@@ -513,7 +516,8 @@ public final class GianClientStore {
             state.directory.temporarySearchResult = DirectoryFilter.summary(session, names: names)
         }
         projectDirectoryStatus()
-        state.openTasks = taskRecords.filter { $0.status == .open }.sorted { $0.id.rawValue < $1.id.rawValue }
+        // New chat's task picker lists open tasks in Gian's order too.
+        state.openTasks = taskRecords.filter { $0.status == .open }
         scheduleDirectoryExpiry(now: evaluated)
     }
 
@@ -540,6 +544,7 @@ public final class GianClientStore {
             }
             bundle.sessions = sessions
             bundle.tasks = taskRecords
+            bundle.conversationOrder = conversationOrder.persisted
             bundle.workspaces = state.workspaces
             bundle.agents = state.agents
             bundle.interactions = state.interactions
@@ -643,6 +648,7 @@ public final class GianClientStore {
             pendingSessionAccess[id] = sessionAccessSequence
         }
         taskRecords = bundle.tasks
+        conversationOrder = ConversationOrder(bundle.conversationOrder ?? [])
         state.workspaces = bundle.workspaces
         state.agents = bundle.agents
         state.interactions = bundle.interactions
@@ -819,6 +825,7 @@ public final class GianClientStore {
         state.foreground = foreground
         sessions = []
         taskRecords = []
+        conversationOrder = ConversationOrder()
         searchHits = []
         directoryViews = [:]
         manualDirectoryRecoveries = [:]
@@ -892,6 +899,7 @@ public final class GianClientStore {
         serviceDiagnostic = nil
         sessions = []
         taskRecords = []
+        conversationOrder = ConversationOrder()
         searchHits = []
         directoryViews = [:]
         manualDirectoryRecoveries = [:]
@@ -1029,6 +1037,7 @@ public final class GianClientStore {
         state.sync = SyncProjection(cursor: nil, needsSnapshot: true, reason: .generationChanged)
         sessions = []
         taskRecords = []
+        conversationOrder = ConversationOrder()
         searchHits = []
         directoryViews = [:]
         manualDirectoryRecoveries = [:]

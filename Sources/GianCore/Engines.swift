@@ -374,21 +374,22 @@ enum DirectoryFilter {
         sessions: [SessionRecord],
         workspaces: [WorkspaceRecord],
         query: String?,
-        searchCandidates: [SessionRecord]
+        searchCandidates: [SessionRecord],
+        conversationOrder: ConversationOrder = ConversationOrder()
     ) -> Projection {
         var names: [WorkspaceID: String] = [:]
         for workspace in workspaces { names[workspace.id] = workspace.name }
+        // `tasks` is already in the Host's (Gian's) order and is not re-sorted.
         let visibleTasks = tasks
             .filter { $0.status == .open }
-            .sorted { $0.id.rawValue < $1.id.rawValue }
             .map { task in
                 TaskSection(
                     id: task.id,
                     title: task.title,
                     conversations: sessions
                         .filter { $0.taskID == task.id && $0.authorized && !$0.archived && $0.completedAt == nil }
+                        .sorted(by: conversationOrder.precedes)
                         .map { summary($0, names: names) }
-                        .sorted(by: sortRows)
                 )
             }
         let legacy = authority == .legacyOpenDoingTasksOnly

@@ -230,6 +230,8 @@ extension GianClientStore {
                 navigationEpoch += 1
             }
         }
+        // Snapshot tasks are in Gian's order (`TaskManager.listTasks`). Tasks known only
+        // from a newer directory page stay above them, where Gian puts new tasks.
         taskRecords = expanded ? taskRecords.filter { prior in !payload.tasks.contains(where: { $0.id == prior.id }) } + payload.tasks : payload.tasks
         state.workspaces = expanded ? state.workspaces.filter { prior in !payload.workspaces.contains(where: { $0.id == prior.id }) } + payload.workspaces : payload.workspaces
         state.agents = payload.agents
@@ -423,10 +425,13 @@ extension GianClientStore {
                 navigationEpoch += 1; state.conversation = nil; state.navigation.destination = .home
             }
         }
+        // A known task keeps its place in the Host's order; a new one goes on top.
+        var createdTasks: [TaskRecord] = []
         for task in patch.tasks {
             if let index = taskRecords.firstIndex(where: { $0.id == task.id }) { taskRecords[index] = task }
-            else { taskRecords.append(task) }
+            else { createdTasks.append(task) }
         }
+        insertDiscoveredTasks(createdTasks)
         for id in patch.removedTasks {
             if let index = taskRecords.firstIndex(where: { $0.id == id }) { taskRecords[index].status = .completed }
             for index in sessions.indices where sessions[index].taskID == id {

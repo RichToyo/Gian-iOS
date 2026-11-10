@@ -300,6 +300,7 @@ extension GianClientStore {
         state.pendingStop = .idle
         sessions = []
         taskRecords = []
+        conversationOrder = ConversationOrder()
         searchHits = []
         directoryViews = [:]
         manualDirectoryRecoveries = [:]

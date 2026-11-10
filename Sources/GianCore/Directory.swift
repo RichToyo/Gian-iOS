@@ -38,6 +38,69 @@ public struct DirectoryPageStatus: Codable, Sendable, Equatable {
     public var isLoading: Bool { phase == .loading }
 }
 
+/// Gian lists a task's open conversations in the user's manual drag order and
+/// otherwise oldest first (`subtasksFor` in Gian's TasksView). The Host sends
+/// neither the drag order nor creation times, and its own lists are by recent
+/// update (snapshot) or by ID (directory pages). The closest faithful order is
+/// therefore the one in which this device first learned of each conversation:
+/// rows never move with activity, and a new conversation joins the bottom of
+/// its task as it does in Gian.
+struct ConversationOrder: Equatable, Sendable {
+    /// The most IDs kept on disk; an older one is seeded again if seen later.
+    static let limit = 4_096
+    private(set) var ids: [SessionID] = []
+    private var ranks: [SessionID: Int] = [:]
+
+    init(_ ids: [SessionID] = []) {
+        for id in ids.suffix(Self.limit) where ranks[id] == nil {
+            ranks[id] = self.ids.count
+            self.ids.append(id)
+        }
+    }
+
+    var persisted: [SessionID]? { ids.isEmpty ? nil : Array(ids.suffix(Self.limit)) }
+
+    /// Conversations first seen together are seeded least recently updated
+    /// first, the nearest stand-in for creation order the Host provides.
+    mutating func note(_ sessions: [SessionRecord]) {
+        let fresh = sessions.filter { ranks[$0.id] == nil }
+        guard !fresh.isEmpty else { return }
+        for session in fresh.sorted(by: Self.seed) where ranks[session.id] == nil {
+            ranks[session.id] = ids.count
+            ids.append(session.id)
+        }
+    }
+
+    func precedes(_ lhs: SessionRecord, _ rhs: SessionRecord) -> Bool {
+        switch (ranks[lhs.id], ranks[rhs.id]) {
+        case let (left?, right?): left < right
+        case (.some, nil): true
+        case (nil, .some): false
+        case (nil, nil): Self.seed(lhs, rhs)
+        }
+    }
+
+    private static func seed(_ lhs: SessionRecord, _ rhs: SessionRecord) -> Bool {
+        lhs.updatedAt == rhs.updatedAt ? lhs.id.rawValue < rhs.id.rawValue : lhs.updatedAt < rhs.updatedAt
+    }
+}
+
+/// Open tasks in the order the Host lists them, which is Gian's: tasks never
+/// reordered by hand newest first, then the manual drag order.
+struct TaskOrder {
+    private var ranks: [TaskID: Int] = [:]
+
+    init(_ tasks: [TaskRecord]) {
+        for (index, task) in tasks.enumerated() where ranks[task.id] == nil { ranks[task.id] = index }
+    }
+
+    func precedes(_ lhs: TaskID, _ rhs: TaskID) -> Bool {
+        let left = ranks[lhs] ?? .max
+        let right = ranks[rhs] ?? .max
+        return left == right ? lhs.rawValue < rhs.rawValue : left < right
+    }
+}
+
 public struct RepositorySection: Sendable, Equatable, Identifiable {
     public var id: WorkspaceID
     public var title: String
