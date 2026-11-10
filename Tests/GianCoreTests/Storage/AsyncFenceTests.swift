@@ -118,6 +118,57 @@ struct AsyncFenceTests {
         #expect(store.state.composer.send == .idle)
     }
 
+    @Test func sendOriginalWhileTranslatingSendsTheTextAsWritten() async throws {
+        let service = ControlledService()
+        let clock = ManualGianClock(instant: PreviewFixtures.instant)
+        let store = GianClientStore(service: service, clock: clock, ids: SequenceIDGenerator(), storage: InMemoryGianStorage())
+        _ = try await signIn(store, clock: clock)
+        _ = await store.dispatch(.selectConversation(PreviewFixtures.sessionID))
+        store.state.translations[PreviewFixtures.sessionID] = translationState(revision: 1, configRevision: 1)
+        _ = await store.dispatch(.editDraftText("Original"))
+        service.holdNextTranslation = true
+        let pending = Task { await store.dispatch(.send) }
+        for _ in 0..<100 where service.translation == nil { await Task.yield() }
+        let completion = try #require(service.translation)
+        let request = try #require(service.translationRequest)
+        service.translation = nil
+        #expect((await store.dispatch(.sendOriginal)).isApplied)
+        #expect(service.base.sendCount == 1)
+        #expect(service.sendRequest?.text == "Original")
+        #expect(service.sendRequest?.translation == .original)
+        // The translation settling late can't send it a second time.
+        completion.resume(returning: .settled(request.requestID, record: nil, error: "Late"))
+        _ = await pending.value
+        #expect(service.base.sendCount == 1)
+    }
+
+    @Test func takeTextBackAfterAFailedTranslationKeepsTheDraft() async throws {
+        let service = ControlledService()
+        let clock = ManualGianClock(instant: PreviewFixtures.instant)
+        let store = GianClientStore(service: service, clock: clock, ids: SequenceIDGenerator(), storage: InMemoryGianStorage())
+        _ = try await signIn(store, clock: clock)
+        _ = await store.dispatch(.selectConversation(PreviewFixtures.sessionID))
+        store.state.translations[PreviewFixtures.sessionID] = translationState(revision: 1, configRevision: 1)
+        _ = await store.dispatch(.editDraftText("Original"))
+        service.holdNextTranslation = true
+        let pending = Task { await store.dispatch(.send) }
+        for _ in 0..<100 where service.translation == nil { await Task.yield() }
+        let completion = try #require(service.translation)
+        let request = try #require(service.translationRequest)
+        service.translation = nil
+        completion.resume(returning: .settled(request.requestID, record: nil, error: "The translation Agent is offline."))
+        _ = await pending.value
+        guard case .failed(let intent, _) = store.state.composer.send else {
+            Issue.record("expected a failed translation, got \(store.state.composer.send)")
+            return
+        }
+        #expect(intent.stage == .translation)
+        #expect((await store.dispatch(.reclaimTranslationDraft)).isApplied)
+        #expect(store.state.composer.send == .idle)
+        #expect(store.state.composer.draft.text == "Original")
+        #expect(service.base.sendCount == 0)
+    }
+
     @Test func canonicalSuccessBeforeLostAckIsNotRegressedToUnknown() async throws {
         let service = ControlledService()
         let clock = ManualGianClock(instant: PreviewFixtures.instant)

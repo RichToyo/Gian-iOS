@@ -40,6 +40,25 @@ struct PreviewStoreContainer<Content: View>: View {
         switch GianAppComposition.previewDestination {
         case "repos": _ = await store.dispatch(.selectDirectoryView(.repos))
         case "chat": _ = await store.dispatch(.selectConversation(PreviewFixtures.sessionID))
+        case "chatTranslate":
+            // A translated send in progress (see -previewSlowTranslation /
+            // -previewFailedTranslation).
+            _ = await store.dispatch(.selectConversation(PreviewFixtures.sessionID))
+            if let server = ServerAddress(parsing: PreviewFixtures.server) {
+                let scope = ClientScope(server: server, account: PreviewFixtures.account, host: PreviewFixtures.hostID)
+                var translation = TranslationSessionState.unsupported
+                translation.supported = true
+                translation.enabled = true
+                translation.configured = true
+                translation.sendingLanguage = "en"
+                translation.readingLanguage = "es"
+                translation.revision = 1
+                translation.configRevision = 1
+                _ = store.ingest(InboundEnvelope(scope: scope, event: .translation(
+                    sessionID: PreviewFixtures.sessionID, update: .state(translation, authoritativeBaseline: true))))
+            }
+            _ = await store.dispatch(.editDraftText("Revisa la línea de amarre"))
+            Task { _ = await store.dispatch(.send) }
         case "chatLong", "chatLongStream":
             _ = await store.dispatch(.selectConversation(PreviewFixtures.sessionID))
             if let server = ServerAddress(parsing: PreviewFixtures.server) {

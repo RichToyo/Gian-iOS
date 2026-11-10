@@ -700,11 +700,12 @@ enum StoreProjection {
             day: Calendar.current.startOfDay(for: now)
         )
 
+        let transcriptRows = rows(input)
         return ActiveConversationPresentation(
             id: sessionID,
             title: session.title,
             hostName: state.hosts.first { $0.id == session.hostID }?.name ?? "Host",
-            rows: rows(input),
+            rows: transcriptRows,
             hasOlderPages: conversation.hasOlder,
             connectivity: ConnectivityPresentation(state.connection),
             banner: banner(state),
@@ -717,8 +718,45 @@ enum StoreProjection {
             canRemoveQueue: state.capabilities.state(of: .queueRemove) == .supported,
             canClearQueue: state.capabilities.state(of: .queueClear) == .supported,
             canSendQueueNow: state.capabilities.state(of: .queueSendNow) == .supported
-                && (!isTurnActive || state.capabilities.state(of: .turnSteer) == .supported)
+                && (!isTurnActive || state.capabilities.state(of: .turnSteer) == .supported),
+            pendingSend: pendingSend(state, sessionID: sessionID, rows: transcriptRows),
+            holdsDraft: holdsDraft(state, sessionID: sessionID)
         )
+    }
+
+    /// The composer's message while it is on its way to this conversation, as
+    /// the desktop shows it: translating, then sending, or a failed
+    /// translation awaiting the user's choice. Nil once the transcript has it.
+    static func pendingSend(_ state: GianClientState, sessionID: SessionID, rows: [TranscriptRow]) -> PendingSendRow? {
+        let draft = state.composer.draft
+        guard let phase = pendingPhase(state, sessionID: sessionID),
+              !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.attachments.isEmpty
+        else { return nil }
+        if case .sending = phase {
+            let lastUser = rows.reversed().lazy.compactMap { row -> UserRow? in
+                if case .user(let user) = row { return user }
+                return nil
+            }.first
+            if lastUser?.text == draft.text { return nil }
+        }
+        return PendingSendRow(text: draft.text, attachmentCount: draft.attachments.count, phase: phase)
+    }
+
+    /// The composer holds its draft back (shown as the pending message) from
+    /// Send until the message is sent or the user takes the text back.
+    static func holdsDraft(_ state: GianClientState, sessionID: SessionID) -> Bool {
+        pendingPhase(state, sessionID: sessionID) != nil
+    }
+
+    private static func pendingPhase(_ state: GianClientState, sessionID: SessionID) -> PendingSendRow.Phase? {
+        guard let intent = state.composer.send.intent, intent.sessionID == sessionID,
+              intent.draftID == state.composer.draft.id else { return nil }
+        switch state.composer.send {
+        case .awaitingTranslation: return .translating
+        case .sending(let intent): return .sending(showsStatus: intent.translationReceiptID != nil || intent.explicitOriginal)
+        case .failed(let intent, let message) where intent.stage == .translation: return .failed(message)
+        default: return nil
+        }
     }
 
     // MARK: - Private helpers

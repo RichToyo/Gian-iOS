@@ -210,6 +210,13 @@ extension GianClientStore {
     }
 
     func sendOriginal() async -> GianDispatchResult {
+        if case .awaitingTranslation = state.composer.send {
+            // As on the desktop: stop translating and send the text as written.
+            let cancelled = await reclaim()
+            guard cancelled.isApplied else { return cancelled }
+            guard state.composer.send == .idle else { return reject(.uncertainOutcome) }
+            return await performSend(explicitOriginal: true, reusedRequestID: nil)
+        }
         guard case .failed(let prior, _) = state.composer.send, prior.stage == .translation else {
             return reject(.translationUnavailable)
         }

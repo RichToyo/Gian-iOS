@@ -63,6 +63,10 @@ public struct PreviewScript: Sendable, Equatable {
     public var translatedText: String
     public var translationUnknown: Bool
     public var translationPageText: String
+    /// Seconds a send translation takes, so its pending state can be seen.
+    public var translationDelay: Double = 0
+    /// Fails send translations with this message.
+    public var translationFailure: String?
 
     public init(
         account: AccountIdentity,
@@ -407,6 +411,8 @@ public final class PreviewGianClientService: GianClientServicing {
     public func requestTranslation(scope: ClientScope, request: TranslationRequest) async -> TranslationCommandResponse {
         _ = scope
         translationRequestCount += 1
+        if script.translationDelay > 0 { try? await Task.sleep(for: .seconds(script.translationDelay)) }
+        if let failure = script.translationFailure { return .settled(request.requestID, record: nil, error: failure) }
         if script.translationUnknown { return .unknown(request.requestID) }
         let text = script.translatedText
         let record = TranslationReducer.verifiedRecord(

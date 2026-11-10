@@ -760,6 +760,15 @@ extension GianClientStore {
     }
 
     func reclaim() async -> GianDispatchResult {
+        // Take text back after a failed translation: nothing was sent and the
+        // text is still the composer's draft, so dropping the operation hands
+        // it back, as editing the failed draft would.
+        if case .failed(let intent, _) = state.composer.send, intent.stage == .translation, !intent.sendDispatched {
+            state.composer.send = .idle
+            state.composer.notice = .none
+            if let scope = readyScope() { memory.update(scope) { $0.submittedDrafts[intent.draftID] = nil } }
+            return persistenceResult()
+        }
         guard case .awaitingTranslation(var intent) = state.composer.send,
               let scope = readyScope(),
               let sessionID = intent.sessionID,

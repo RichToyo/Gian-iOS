@@ -251,6 +251,9 @@ enum TranscriptRow: Equatable, Identifiable, Sendable {
 /// Presentation of the durable send pipeline for the composer accessory area.
 enum SendPhasePresentation: Equatable, Sendable {
     case editable
+    /// The draft is shown in the transcript as a pending message; the
+    /// composer stays empty until it is sent or taken back.
+    case held
     case creating
     case translating
     case sending
@@ -458,6 +461,27 @@ struct ActiveConversationPresentation: Equatable, Sendable {
     var canRemoveQueue = false
     var canClearQueue = false
     var canSendQueueNow = false
+    /// The user's message on its way, shown after the transcript.
+    var pendingSend: PendingSendRow? = nil
+    /// The composer stays empty while its draft is on its way.
+    var holdsDraft = false
+}
+
+/// The user's message while it is on its way (the desktop's "echo"): dimmed
+/// at the end of the transcript until the Host has it, with the translation's
+/// status and choices beneath. The composer is empty meanwhile.
+struct PendingSendRow: Equatable, Sendable {
+    enum Phase: Equatable, Sendable {
+        case translating
+        /// `showsStatus` for a send that went through translation; a plain
+        /// send is only dimmed.
+        case sending(showsStatus: Bool)
+        case failed(String)
+    }
+
+    let text: String
+    let attachmentCount: Int
+    let phase: Phase
 }
 
 /// The options a conversation can change while it runs, for the composer's ⋯

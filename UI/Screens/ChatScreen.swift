@@ -107,7 +107,12 @@ struct ChatScreen: View {
                         attachmentData: attachmentData,
                         autoLoadImages: mutationsReady,
                         onDownloadAttachment: mutationsReady ? onDownloadAttachment : { _ in },
-                        onPreviewAttachment: previewAttachment
+                        onPreviewAttachment: previewAttachment,
+                        pendingSend: conversation.pendingSend,
+                        pendingActionsEnabled: mutationsReady,
+                        onSendOriginal: onSendOriginal,
+                        onRetryTranslationSend: onRetryTranslationSend,
+                        onTakeTextBack: onCancelTranslationSend
                     )
                     Color.clear.frame(height: 1).id("transcript-latest")
                 }
@@ -333,14 +338,18 @@ struct ChatScreen: View {
                           onMutation: onMutateQueue, onRecover: onRecoverQueue)
                     .id(conversation.id)
             }
+            // While the draft is on its way it shows as the pending message
+            // in the transcript, and the composer stays empty, as on the desktop.
+            let held = conversation.holdsDraft
             ComposerView(
             draft: Binding(
-                get: { composer.draft.text },
+                get: { held ? "" : composer.draft.text },
                 set: onEditDraft
             ),
-            attachments: composer.draft.attachments,
-            sendPhase: SendPhasePresentation(composer.send),
-            notice: ComposerNoticePresentation(composer.notice),
+            attachments: held ? [] : composer.draft.attachments,
+            sendPhase: held ? .held : SendPhasePresentation(composer.send),
+            // The pending message carries its own status and choices.
+            notice: held ? .none : ComposerNoticePresentation(composer.notice),
             isTurnActive: conversation.isTurnActive,
             remoteReady: mutationsReady,
             thumbnail: thumbnail,

@@ -2,7 +2,7 @@ import SwiftUI
 import GianCore
 
 /// User message bubble. The original text always renders; a verified sent
-/// translation is shown beneath with a language tag. Attachments render from
+/// translation is shown beneath it, labelled, in its own box. Attachments render from
 /// Core descriptors with cache-aware download/preview states.
 struct UserMessageView: View {
     let row: UserRow
@@ -18,28 +18,10 @@ struct UserMessageView: View {
     var body: some View {
         VStack(alignment: .trailing, spacing: 4) {
             if !row.text.isEmpty {
-                VStack(alignment: .trailing, spacing: 6) {
-                    Text(row.text)
-                        .font(GianTheme.Typography.body)
-                        .foregroundStyle(accent.text)
-                        .textSelection(.enabled)
-
-                    if let sent = row.sentTranslation,
-                       let translated = sent.presentableText {
-                        VStack(alignment: .trailing, spacing: 6) {
-                            LanguageTag(label: "Sent as · \(sent.targetLanguage)", tint: accent.text)
-                                .accessibilityIdentifier("sent-translation-label")
-                            Text(translated)
-                                .font(GianTheme.Typography.body)
-                                .foregroundStyle(accent.text.opacity(0.85))
-                                .textSelection(.enabled)
-                        }
-                        .padding(.top, 6)
-                        .overlay(alignment: .top) {
-                            Rectangle().fill(accent.text.opacity(0.25)).frame(height: 0.5)
-                        }
-                    }
-                }
+                Text(row.text)
+                    .font(GianTheme.Typography.body)
+                    .foregroundStyle(accent.text)
+                    .textSelection(.enabled)
                 .padding(.horizontal, GianTheme.Metrics.paddingMedium)
                 .padding(.vertical, GianTheme.Metrics.paddingSmall)
                 // Gian's bubble: the soft accent under accent-colored text.
@@ -63,6 +45,29 @@ struct UserMessageView: View {
                     onDownload: { onDownloadAttachment(attachmentID) },
                     onPreview: { onPreviewAttachment(attachmentID) }
                 )
+            }
+            // As on the desktop: the original stays the message; what the Agent
+            // received sits beneath it, labelled, in its own box.
+            if let sent = row.sentTranslation, let translated = sent.presentableText {
+                VStack(alignment: .trailing, spacing: 6) {
+                    Text("The translated text sent to the LM is shown below")
+                        .font(.caption)
+                        .foregroundStyle(GianTheme.Colors.secondaryLabel)
+                        .accessibilityIdentifier("sent-translation-label")
+                    Text(translated)
+                        .font(GianTheme.Typography.caption)
+                        .foregroundStyle(GianTheme.Colors.label)
+                        .textSelection(.enabled)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(GianTheme.Colors.card, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .strokeBorder(GianTheme.Colors.separator, lineWidth: 1)
+                        )
+                        .accessibilityIdentifier("sent-translation")
+                }
+                .padding(.top, 8)
             }
         }
         .frame(maxWidth: .infinity, alignment: .trailing)

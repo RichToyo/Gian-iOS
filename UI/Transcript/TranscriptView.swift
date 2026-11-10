@@ -22,6 +22,12 @@ struct TranscriptView: View {
     var autoLoadImages: Bool = false
     var onDownloadAttachment: (AttachmentID) -> Void = { _ in }
     var onPreviewAttachment: (AttachmentID) -> Void = { _ in }
+    /// The user's message on its way, after the last row.
+    var pendingSend: PendingSendRow? = nil
+    var pendingActionsEnabled = true
+    var onSendOriginal: () -> Void = {}
+    var onRetryTranslationSend: () -> Void = {}
+    var onTakeTextBack: () -> Void = {}
 
     var body: some View {
         LazyVStack(spacing: GianTheme.Metrics.paddingMedium) {
@@ -96,6 +102,16 @@ struct TranscriptView: View {
                 case .notice(_, let severity, let code):
                     noticeRow(severity: severity, code: code)
                 }
+            }
+            if let pendingSend {
+                PendingSendView(
+                    row: pendingSend,
+                    actionsEnabled: pendingActionsEnabled,
+                    onSendOriginal: onSendOriginal,
+                    onRetryTranslation: onRetryTranslationSend,
+                    onTakeTextBack: onTakeTextBack
+                )
+                .id("pending-send")
             }
         }
         .scrollTargetLayout()

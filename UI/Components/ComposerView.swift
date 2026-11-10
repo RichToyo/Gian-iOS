@@ -72,7 +72,7 @@ struct ComposerView: View {
 
     private var isBusy: Bool {
         switch sendPhase {
-        case .creating, .translating, .sending: true
+        case .creating, .translating, .sending, .held: true
         case .editable, .failed, .uncertain: false
         }
     }
@@ -82,7 +82,7 @@ struct ComposerView: View {
     }
 
     private var hasAccessory: Bool {
-        notice.message != nil || sendPhase != .editable || !attachments.isEmpty
+        notice.message != nil || (sendPhase != .editable && sendPhase != .held) || !attachments.isEmpty
     }
 
     var body: some View {
@@ -188,7 +188,7 @@ struct ComposerView: View {
     @ViewBuilder
     private var phaseAccessory: some View {
         switch sendPhase {
-        case .editable:
+        case .editable, .held:
             EmptyView()
         case .creating:
             busyRow("Creating conversation…")

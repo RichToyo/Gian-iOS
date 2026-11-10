@@ -69,13 +69,52 @@ final class GianUITests: XCTestCase {
         let translated = app.staticTexts["Hello there."]
         XCTAssertTrue(translated.waitForExistence(timeout: 30))
         let original = app.staticTexts["Hello."]
-        let tag = app.staticTexts["sent-translation-label"]
+        let label = app.staticTexts["sent-translation-label"]
+        let box = app.descendants(matching: .any)["sent-translation"]
         let bubble = app.descendants(matching: .any).matching(identifier: "user-message-bubble")
             .containing(.staticText, identifier: "Hello.").firstMatch
-        XCTAssertTrue(bubble.exists && original.exists && tag.exists)
+        XCTAssertTrue(bubble.exists && original.exists && label.exists && box.exists)
         XCTAssertLessThan(bubble.frame.width, app.windows.firstMatch.frame.width * 0.8)
-        XCTAssertLessThan(abs(original.frame.maxX - translated.frame.maxX), 4)
-        XCTAssertLessThan(abs(tag.frame.maxX - translated.frame.maxX), 4)
+        // As on the desktop: the translation sits beneath the bubble, labelled,
+        // and both hug the trailing edge.
+        XCTAssertGreaterThan(box.frame.minY, bubble.frame.maxY)
+        XCTAssertLessThan(label.frame.midY, box.frame.minY)
+        XCTAssertLessThan(abs(box.frame.maxX - bubble.frame.maxX), 4)
+        XCTAssertLessThanOrEqual(abs(label.frame.maxX - box.frame.maxX), 5)
+    }
+
+    /// As on the desktop: Send empties the composer at once and the message
+    /// shows, dimmed, with "Translating" and Send original beneath it.
+    func testTranslatedSendShowsThePendingMessageUntilSent() throws {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments += ["-previewScript", "fullDirectory", "-previewReady",
+                                "-previewDestination", "chatTranslate", "-previewSlowTranslation"]
+        app.launch()
+        let pending = app.descendants(matching: .any)["pending-user-message"]
+        XCTAssertTrue(pending.waitForExistence(timeout: 30))
+        XCTAssertTrue(app.descendants(matching: .any)["Translating"].exists)
+        let message = app.textFields["Message"].exists ? app.textFields["Message"] : app.textViews["Message"]
+        XCTAssertFalse((message.value as? String ?? "").contains("amarre"), "The composer is empty while the message is on its way")
+        app.buttons["Send original"].tap()
+        XCTAssertTrue(pending.waitForNonExistence(timeout: 10))
+    }
+
+    /// A failed translation sends nothing; the user retries, sends the
+    /// original, or takes the text back into the composer.
+    func testFailedTranslationOffersTakeTextBack() throws {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments += ["-previewScript", "fullDirectory", "-previewReady",
+                                "-previewDestination", "chatTranslate", "-previewFailedTranslation"]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["The translation Agent is offline."].waitForExistence(timeout: 30))
+        XCTAssertTrue(app.buttons["Retry translation"].exists)
+        XCTAssertTrue(app.buttons["Send original"].exists)
+        app.buttons["Take text back"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["pending-user-message"].waitForNonExistence(timeout: 10))
+        let restored = app.descendants(matching: .any).matching(NSPredicate(format: "value CONTAINS 'amarre'")).firstMatch
+        XCTAssertTrue(restored.waitForExistence(timeout: 5), "The text is back in the composer")
     }
 
     /// Gian's accents, Plum by default; the choice tints bubbles and status.

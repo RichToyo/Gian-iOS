@@ -95,6 +95,8 @@ enum GianAppComposition {
                     QueuedMessage(id: "preview-queued-1", text: "Fictional queued message")
                 ])
             }
+            if arguments.contains("-previewSlowTranslation") { script.translationDelay = 60 }
+            if arguments.contains("-previewFailedTranslation") { script.translationFailure = "The translation Agent is offline." }
             return makePreviewStore(script: script)
         default: return nil
         }

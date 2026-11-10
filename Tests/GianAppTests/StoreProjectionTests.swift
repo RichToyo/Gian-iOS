@@ -602,6 +602,41 @@ final class StoreProjectionTests: XCTestCase {
         XCTAssertEqual(SendPhasePresentation(.succeeded(intent)), .editable)
     }
 
+    /// The desktop's translated send: the message shows as pending from Send
+    /// until the transcript has it, and the composer holds it back meanwhile.
+    func testPendingSendFollowsTheTranslatedSend() {
+        let session = id("session-1", SessionID.self)
+        let draftID = id("draft-1", DraftID.self)
+        var state = GianClientState.signedOut()
+        state.composer.draft = DraftDocument(id: draftID, hostID: nil, target: .conversation(session),
+                                             text: "Hola", attachments: [], updatedAt: now)
+        var intent = DurableSendIntent(draftID: draftID, stage: .translation, sessionID: session)
+        func pending(_ rows: [TranscriptRow] = []) -> PendingSendRow.Phase? {
+            StoreProjection.pendingSend(state, sessionID: session, rows: rows)?.phase
+        }
+
+        state.composer.send = .awaitingTranslation(intent)
+        XCTAssertEqual(pending(), .translating)
+        XCTAssertTrue(StoreProjection.holdsDraft(state, sessionID: session))
+
+        state.composer.send = .failed(intent, message: "Offline")
+        XCTAssertEqual(pending(), .failed("Offline"))
+
+        intent.stage = .send
+        intent.translationReceiptID = id("receipt-1", TranslationRecordID.self)
+        state.composer.send = .sending(intent)
+        XCTAssertEqual(pending(), .sending(showsStatus: true))
+        let delivered = TranscriptRow.user(UserRow(id: id("u1", TranscriptItemID.self), text: "Hola",
+                                                   attachmentIDs: [], sentTranslation: nil))
+        XCTAssertNil(pending([delivered]), "Shown once, by the transcript, once delivered")
+        XCTAssertTrue(StoreProjection.holdsDraft(state, sessionID: session))
+
+        state.composer.send = .failed(intent, message: "Send failed")
+        XCTAssertNil(pending(), "A failed send (not translation) keeps the draft in the composer")
+        state.composer.send = .idle
+        XCTAssertFalse(StoreProjection.holdsDraft(state, sessionID: session))
+    }
+
     // MARK: - Banner
 
     func testBannerPicksLatestAndShowsCoalescedCount() {
