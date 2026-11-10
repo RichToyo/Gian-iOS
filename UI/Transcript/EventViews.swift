@@ -13,7 +13,7 @@ struct WorkCardView: View {
 
     init(card: WorkCard) {
         self.card = card
-        _isExpanded = State(initialValue: false)
+        _isExpanded = State(initialValue: card.phase == .failed)
     }
 
     var body: some View {
@@ -297,4 +297,8 @@ enum TurnOutcomePresentation: Equatable, Sendable {
         TurnOutcomeRow(outcome: .failed)
     }
     .padding()
+}
+
+extension WorkCardView: Equatable {
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool { lhs.card == rhs.card }
 }

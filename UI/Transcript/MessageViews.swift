@@ -54,7 +54,7 @@ struct UserMessageView: View {
                 TranscriptAttachmentView(
                     presentation: attachmentPresentation(attachmentID),
                     isImage: attachmentIsImage(attachmentID),
-                    imageData: attachmentData(attachmentID),
+                    imageData: { attachmentData(attachmentID) },
                     autoLoadEnabled: autoLoadImages,
                     attachmentNumber: index + 1,
                     onDownload: { onDownloadAttachment(attachmentID) },
@@ -164,6 +164,17 @@ struct AssistantMessageView: View {
                 )
             }
         }
+    }
+}
+
+extension AssistantMessageView: Equatable {
+    /// The closures only dispatch for this row; the row and the flags decide
+    /// what renders.
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.row == rhs.row
+            && lhs.translationEnabled == rhs.translationEnabled
+            && lhs.translationAvailable == rhs.translationAvailable
+            && lhs.recoveryEnabled == rhs.recoveryEnabled
     }
 }
 

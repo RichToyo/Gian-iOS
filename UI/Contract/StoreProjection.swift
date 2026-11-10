@@ -653,31 +653,57 @@ enum StoreProjection {
 
     // MARK: - Active conversation
 
-    static func activeConversation(_ state: GianClientState) -> ActiveConversationPresentation? {
+    /// Everything the transcript rows depend on, so callers can reuse rows
+    /// while it is unchanged. `day` keeps relative day labels current.
+    struct TranscriptRowsInput: Equatable {
+        let items: [TranscriptItem]
+        let interactions: [InteractionRecord]
+        let translation: TranslationSessionState?
+        let agent: AgentLogo
+        let agentName: String
+        let isTurnActive: Bool
+        let day: Date
+    }
+
+    static func transcriptRows(_ input: TranscriptRowsInput, now: Date = Date()) -> [TranscriptRow] {
+        transcriptRows(
+            items: input.items,
+            interactions: input.interactions,
+            translation: input.translation,
+            agent: input.agent,
+            agentName: input.agentName,
+            now: now,
+            isTurnActive: input.isTurnActive
+        )
+    }
+
+    static func activeConversation(
+        _ state: GianClientState,
+        now: Date = Date(),
+        rows: (TranscriptRowsInput) -> [TranscriptRow] = { StoreProjection.transcriptRows($0) }
+    ) -> ActiveConversationPresentation? {
         guard let conversation = state.conversation,
               case .conversation(let sessionID) = state.navigation.destination,
               conversation.session.id == sessionID
         else { return nil }
         let session = conversation.session
-        let translationState = state.translations[sessionID]
         let translationPresentation = sessionTranslation(state, sessionID: sessionID)
-        let interactions = state.interactions.filter { $0.sessionID == sessionID }
-        let agent = AgentLogo(pluginID: session.pluginID, agentName: session.agentName)
         let isTurnActive = session.status == .running || session.status == .pending
+        let input = TranscriptRowsInput(
+            items: conversation.items,
+            interactions: state.interactions.filter { $0.sessionID == sessionID },
+            translation: state.translations[sessionID],
+            agent: AgentLogo(pluginID: session.pluginID, agentName: session.agentName),
+            agentName: session.agentName,
+            isTurnActive: isTurnActive,
+            day: Calendar.current.startOfDay(for: now)
+        )
 
         return ActiveConversationPresentation(
             id: sessionID,
             title: session.title,
             hostName: state.hosts.first { $0.id == session.hostID }?.name ?? "Host",
-            rows: transcriptRows(
-                items: conversation.items,
-                interactions: interactions,
-                translation: translationState,
-                agent: agent,
-                agentName: session.agentName,
-                now: Date(),
-                isTurnActive: isTurnActive
-            ),
+            rows: rows(input),
             hasOlderPages: conversation.hasOlder,
             connectivity: ConnectivityPresentation(state.connection),
             banner: banner(state),

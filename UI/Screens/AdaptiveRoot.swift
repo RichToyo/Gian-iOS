@@ -10,23 +10,10 @@ import GianCore
 /// construction. Back and new-chat dismissal dispatch `.returnHome`; no device
 /// dimensions are hardcoded.
 struct AdaptiveRoot: View {
-    let hosts: [HostItem]
-    let directory: DirectoryPresentation
-    let navigation: NavigationState
-    let conversation: ActiveConversationPresentation?
-    let composer: ComposerProjection
-    let workspaces: [WorkspaceRecord]
-    let agents: [AgentRecord]
-    let openTasks: [TaskGroupItem]
-    /// Authoritative mutation gate from the store.
-    var mutationsReady: Bool = true
-    var directoryNegotiated: Bool = false
-    var canRetryUncertainCreate: Bool = false
-    var diagnostic: DiagnosticPresentation = .none
-    /// Honest storage/sync disclosures from the store.
-    var storageError: String? = nil
-    var serverOutcomeUnconfirmed: Bool = false
-    var invalidationUnconfirmed: Bool = false
+    /// Store values, observed one by one. Each screen below is built inside its
+    /// own `PresentationSurface`, so it re-renders only for the values it shows;
+    /// this body reads navigation alone.
+    let presentation: AppPresentation
 
     /// UI-local thumbnails captured at attachment pick time.
     var thumbnail: (AttachmentID) -> Image? = { _ in nil }
@@ -71,15 +58,8 @@ struct AdaptiveRoot: View {
     var onPageTranslation: (TranslationRecordID) -> Void = { _ in }
     var onSelectWorkspace: (WorkspaceID) -> Void = { _ in }
     var onSelectAgent: (AgentID) -> Void = { _ in }
-    /// Model options of the currently selected Agent (Host catalog). Empty or
-    /// absent means the legacy Host provides no catalog — no picker renders.
-    var selectedAgentModels: [AgentModelRecord] = []
     var onSelectModel: (String?) -> Void = { _ in }
     var onSelectTask: (TaskID?) -> Void = { _ in }
-    /// Composer ⋯ options: the open conversation (`session.update`) and the
-    /// new-chat selection (sent with creation).
-    var conversationSettings: ConversationSettingsPresentation? = nil
-    var newChatSettings: ConversationSettingsPresentation? = nil
     var onSetConversationModel: (String?) -> Void = { _ in }
     var onSetConversationThinking: (String?) -> Void = { _ in }
     var onSetConversationFast: (Bool) -> Void = { _ in }
@@ -98,7 +78,6 @@ struct AdaptiveRoot: View {
     var onDownloadAttachment: (AttachmentID) -> Void = { _ in }
     var attachmentData: (AttachmentID) -> Data? = { _ in nil }
     var attachmentDescriptorName: (AttachmentID) -> String = { _ in "Attachment" }
-    var serverAddress: String = ""
     /// Pairing another Host from the Host menu or Settings.
     var addHost = AddHostPresentation()
 
@@ -110,6 +89,36 @@ struct AdaptiveRoot: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     private var isWide: Bool { horizontalSizeClass == .regular }
+
+    // Presentation values, read where each surface builds its screen.
+    private var hosts: [HostItem] { presentation.hosts }
+    private var directory: DirectoryPresentation { presentation.directory }
+    private var navigation: NavigationState { presentation.navigation }
+    private var conversation: ActiveConversationPresentation? { presentation.conversation }
+    private var composer: ComposerProjection { presentation.composer }
+    private var workspaces: [WorkspaceRecord] { presentation.workspaces }
+    private var agents: [AgentRecord] { presentation.agents }
+    private var openTasks: [TaskGroupItem] { presentation.openTasks }
+    /// Authoritative mutation gate from the store.
+    private var mutationsReady: Bool { presentation.mutationsReady }
+    private var directoryNegotiated: Bool { presentation.directoryNegotiated }
+    private var canRetryUncertainCreate: Bool { presentation.canRetryUncertainCreate }
+    private var diagnostic: DiagnosticPresentation { presentation.diagnostic }
+    /// Honest storage/sync disclosures from the store.
+    private var storageError: String? { presentation.storageError }
+    private var serverOutcomeUnconfirmed: Bool { presentation.serverOutcomeUnconfirmed }
+    private var invalidationUnconfirmed: Bool { presentation.invalidationUnconfirmed }
+    /// Model options of the currently selected Agent (Host catalog). Empty or
+    /// absent means the legacy Host provides no catalog — no picker renders.
+    private var selectedAgentModels: [AgentModelRecord] { presentation.selectedAgentModels }
+    /// Composer ⋯ options: the open conversation (`session.update`) and the
+    /// new-chat selection (sent with creation).
+    private var conversationSettings: ConversationSettingsPresentation? { presentation.conversationSettings }
+    private var newChatSettings: ConversationSettingsPresentation? { presentation.newChatSettings }
+    private var serverAddress: String { presentation.serverAddress }
+    private var openConversationID: SessionID? {
+        if case .conversation(let id) = navigation.destination { id } else { nil }
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -145,20 +154,22 @@ struct AdaptiveRoot: View {
             storedAppearance = value.rawValue
         }
         .sheet(isPresented: $showsSearch) {
-            SearchScreen(
-                directory: directory,
-                onQueryChange: onSearch,
-                onSelectConversation: { id in
-                    showsSearch = false
-                    onSelectSearchResult(id)
-                },
-                onLoadMore: onLoadMoreDirectory,
-                onRefresh: onRefreshDirectory,
-                onClose: {
-                    showsSearch = false
-                    onClearSearch()
-                }
-            )
+            PresentationSurface {
+                SearchScreen(
+                    directory: directory,
+                    onQueryChange: onSearch,
+                    onSelectConversation: { id in
+                        showsSearch = false
+                        onSelectSearchResult(id)
+                    },
+                    onLoadMore: onLoadMoreDirectory,
+                    onRefresh: onRefreshDirectory,
+                    onClose: {
+                        showsSearch = false
+                        onClearSearch()
+                    }
+                )
+            }
         }
         .sheet(
             isPresented: Binding(
@@ -167,19 +178,21 @@ struct AdaptiveRoot: View {
             )
         ) {
             NavigationStack {
-                SettingsScreen(
-                            serverAddress: serverAddress,
-                    hosts: hosts,
-                    storageError: storageError,
-                    serverOutcomeUnconfirmed: serverOutcomeUnconfirmed,
-                    invalidationUnconfirmed: invalidationUnconfirmed,
-                    appearance: $appearance,
-                    onBack: onCloseSettings,
-                    onSignOut: onSignOut,
-                    onChangeServer: onChangeServer,
-                    onEvictAttachmentCache: onEvictAttachmentCache,
-                    addHost: addHost
-                )
+                PresentationSurface {
+                    SettingsScreen(
+                        serverAddress: serverAddress,
+                        hosts: hosts,
+                        storageError: storageError,
+                        serverOutcomeUnconfirmed: serverOutcomeUnconfirmed,
+                        invalidationUnconfirmed: invalidationUnconfirmed,
+                        appearance: $appearance,
+                        onBack: onCloseSettings,
+                        onSignOut: onSignOut,
+                        onChangeServer: onChangeServer,
+                        onEvictAttachmentCache: onEvictAttachmentCache,
+                        addHost: addHost
+                    )
+                }
             }
         }
         .addHostSheet(isPresented: $showsAddHost, pairing: addHost)
@@ -215,16 +228,16 @@ struct AdaptiveRoot: View {
 
     private func narrowLayout(isExpandedPortrait: Bool) -> some View {
         NavigationStack(path: narrowPath) {
-            home(selectedConversationID: nil, isSidebar: false, onToggleSidebar: nil)
+            PresentationSurface { home(selectedConversationID: nil, isSidebar: false, onToggleSidebar: nil) }
                 .background(GianTheme.Colors.background)
                 .navigationDestination(for: Route.self) { route in
                     switch route {
                     case .newChat:
-                        newChatScreen
+                        PresentationSurface { newChatScreen }
                             // Close (top of the bar) dismisses; no Back too.
                             .navigationBarBackButtonHidden()
                     case .conversation:
-                        chatSurface
+                        PresentationSurface { chatSurface }
                     }
                 }
         }
@@ -235,12 +248,12 @@ struct AdaptiveRoot: View {
     /// Expanded landscape keeps the list beside the conversation.
     private var wideLayout: some View {
         NavigationSplitView(columnVisibility: .constant(.all)) {
-            home(selectedConversationID: conversation?.id, isSidebar: true, onToggleSidebar: nil)
+            PresentationSurface { home(selectedConversationID: openConversationID, isSidebar: true, onToggleSidebar: nil) }
                 .navigationSplitViewColumnWidth(min: 280, ideal: 320, max: 380)
                 .toolbar(removing: .sidebarToggle)
         } detail: {
             NavigationStack {
-                detailContent
+                PresentationSurface { detailContent }
             }
         }
         .navigationSplitViewStyle(.balanced)
@@ -332,7 +345,9 @@ struct AdaptiveRoot: View {
         if let conversation {
             ChatScreen(
                 conversation: conversation,
-                composer: composer,
+                // Read where the composer is built, so typing re-renders the
+                // composer and not the transcript.
+                composer: { presentation.composer },
                 mutationsReady: mutationsReady,
                 diagnostic: diagnostic,
                 thumbnail: thumbnail,

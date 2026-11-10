@@ -8,7 +8,9 @@ import GianCore
 /// via closures.
 struct ChatScreen: View {
     let conversation: ActiveConversationPresentation
-    let composer: ComposerProjection
+    /// Read inside the composer's own surface, so typing doesn't re-render
+    /// the transcript.
+    let composer: () -> ComposerProjection
     /// Authoritative mutation gate from the store; controls stay editable for
     /// drafts, but remote actions (send/interaction/translation/download) are
     /// disabled until catch-up completes.
@@ -66,6 +68,9 @@ struct ChatScreen: View {
     /// Per-frame scroll bookkeeping; a plain reference, so dragging does not
     /// re-render the transcript.
     @State private var scroll = TranscriptScrollTracker()
+    /// The top row, bound to the scroll view. Kept in state: a binding whose
+    /// value changes outside an update reads as a request to scroll to it.
+    @State private var visibleRowID: String?
     @State private var olderPageAnchor: String?
     @State private var awaitingOlderPage = false
 
@@ -77,7 +82,7 @@ struct ChatScreen: View {
                         Button("Load earlier messages") {
                             followsLatest = false
                             awaitingOlderPage = true
-                            olderPageAnchor = stableAnchor(for: scroll.topRowID)
+                            olderPageAnchor = stableAnchor(for: visibleRowID)
                             onPageOlder()
                         }
                         .font(GianTheme.Typography.caption)
@@ -112,13 +117,7 @@ struct ChatScreen: View {
             }
             .id(conversation.id)
             .defaultScrollAnchor(.bottom, for: .initialOffset)
-            .scrollPosition(id: Binding(
-                get: { scroll.topRowID },
-                set: { value in
-                    scroll.topRowID = value
-                    if awaitingOlderPage && scroll.userScrolling { olderPageAnchor = stableAnchor(for: value) }
-                }
-            ), anchor: .top)
+            .scrollPosition(id: $visibleRowID, anchor: .top)
             .scrollDismissesKeyboard(.interactively)
             .onScrollGeometryChange(for: TranscriptScrollEdges.self) { geometry in
                 return TranscriptScrollEdges(
@@ -163,8 +162,12 @@ struct ChatScreen: View {
             .onChange(of: conversation.id) { _, _ in
                 followsLatest = true
                 scroll = TranscriptScrollTracker()
+                visibleRowID = nil
                 awaitingOlderPage = false
                 olderPageAnchor = nil
+            }
+            .onChange(of: visibleRowID) { _, value in
+                if awaitingOlderPage && scroll.userScrolling { olderPageAnchor = stableAnchor(for: value) }
             }
             .onChange(of: latestScrollRequest) { _, _ in
                 awaitingOlderPage = false
@@ -203,7 +206,7 @@ struct ChatScreen: View {
             .padding(.top, GianTheme.Metrics.paddingSmall)
         }
         .safeAreaBar(edge: .bottom) {
-            composerArea
+            PresentationSurface { composerArea }
         }
         .background(GianTheme.Colors.background)
         .navigationTitle(conversation.title)
@@ -274,9 +277,17 @@ struct ChatScreen: View {
     private func followLatest(_ proxy: ScrollViewProxy, animated: Bool, force: Bool = false) {
         let scroll = scroll
         if animated { scroll.animationEnds = .now + 0.25 }
+        // Automatic follows coalesce: one pending scroll at a time, so a
+        // streamed chunk doesn't queue several that could land as a swipe starts.
+        let automatic = !force && !animated
+        if automatic {
+            guard !scroll.followPending else { return }
+            scroll.followPending = true
+        }
         func following() -> Bool { force || (followsLatest && !scroll.userScrolling && !awaitingOlderPage) }
         Task { @MainActor in
             await Task.yield()
+            if automatic { scroll.followPending = false }
             guard following() else { return }
             if animated {
                 withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("transcript-latest", anchor: .bottom) }
@@ -287,6 +298,16 @@ struct ChatScreen: View {
             } else if force || Date.now >= scroll.animationEnds {
                 proxy.scrollTo("transcript-latest", anchor: .bottom)
             }
+        }
+    }
+
+    /// The queue panel stays while there is a queue or a command in flight; a
+    /// failure that left the queue empty has nothing to act on.
+    private var showsQueue: Bool {
+        if conversation.queue?.entries.isEmpty == false { return true }
+        switch conversation.queueCommand {
+        case .pending, .uncertain: return true
+        case .failed, nil: return false
         }
     }
 
@@ -301,8 +322,9 @@ struct ChatScreen: View {
     // MARK: - Composer
 
     private var composerArea: some View {
-        VStack(spacing: GianTheme.Metrics.paddingSmall) {
-            if conversation.queue?.entries.isEmpty == false || conversation.queueCommand != nil {
+        let composer = composer()
+        return VStack(spacing: GianTheme.Metrics.paddingSmall) {
+            if showsQueue {
                 let queue = conversation.queue ?? SessionQueue(revision: "", entries: [])
                 QueueList(queue: queue, command: conversation.queueCommand,
                           enabled: mutationsReady, canUpdate: conversation.canUpdateQueue,
@@ -479,9 +501,9 @@ private struct QueueList: View {
 
 @MainActor
 private final class TranscriptScrollTracker {
-    var topRowID: String?
     var nearBottom = true
     var userScrolling = false
+    var followPending = false
     var animationEnds = Date.distantPast
 }
 

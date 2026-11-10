@@ -56,63 +56,59 @@ struct RestorationHintSelection: Equatable {
 struct AppRootView: View {
     let store: GianClientStore
 
+    /// Store values observed one by one; see `AppPresentation`. This body reads
+    /// only values that rarely change, so the screens below aren't rebuilt on
+    /// every store change.
+    @State private var presentation: AppPresentation
+
     /// UI-local thumbnail cache populated when the user picks an attachment.
     /// Presentation-only; bytes live in the core's scoped memory.
     @State private var thumbnails: [String: Image] = [:]
 
     @Environment(\.scenePhase) private var scenePhase
 
+    init(store: GianClientStore) {
+        self.store = store
+        _presentation = State(initialValue: AppPresentation(store: store))
+    }
+
     var body: some View {
         content
-            .environment(\.agentLogoImages, store.state.agentLogos)
+            .environment(\.agentLogoImages, presentation.agentLogos)
             .task {
                 await observeConnectivity()
             }
+            .task {
+                await presentation.track(store)
+            }
             // Agents' own logos, once the Host is connected and whenever its
             // Agents change.
-            .task(id: AgentLogoTrigger(store)) {
+            .task(id: presentation.logoTrigger) {
                 if store.mutationsReady { _ = await store.dispatch(.loadAgentLogos) }
             }
             // The ⋯ options of the Agent in view: (re)read once the Host is
             // ready, so a conversation opened (or restored) mid-resync still
             // gets them.
-            .task(id: AgentOptionsTrigger(store)) {
-                let trigger = AgentOptionsTrigger(store)
+            .task(id: presentation.optionsTrigger) {
+                let trigger = presentation.optionsTrigger
                 if trigger.ready, let agent = trigger.agent { _ = await store.dispatch(.loadAgentOptions(agent)) }
             }
             .onChange(of: scenePhase) { _, phase in
                 dispatch(.setForeground(phase == .active ? .foreground : .background))
             }
-            .onChange(of: RestorationHintSelection(store.state)) { _, selection in
+            .onChange(of: presentation.restorationHint) { _, selection in
                 recordRestorationHint(selection)
             }
     }
 
     @ViewBuilder
     private var content: some View {
-        switch store.state.phase {
+        switch presentation.phase {
         case .ready:
             AdaptiveRoot(
-                hosts: StoreProjection.hosts(store.state),
-                directory: StoreProjection.directory(store.state),
-                navigation: store.state.navigation,
-                conversation: StoreProjection.activeConversation(store.state),
-                composer: store.state.composer,
-                workspaces: store.state.workspaces,
-                agents: store.state.agents,
-                openTasks: store.state.openTasks.map { TaskGroupItem(id: $0.id, title: $0.title, conversations: []) },
-                mutationsReady: store.mutationsReady,
-                directoryNegotiated: store.state.capabilities.directoryNegotiated,
-                canRetryUncertainCreate: StoreProjection.canRetryUncertainCreate(
-                    store.state,
-                    mutationsReady: store.mutationsReady
-                ),
-                diagnostic: StoreProjection.diagnostic(store.serviceDiagnostic),
-                storageError: store.state.storageError,
-                serverOutcomeUnconfirmed: store.serverOutcomeUnconfirmed,
-                invalidationUnconfirmed: store.authorizationInvalidationUnconfirmed,
+                presentation: presentation,
                 thumbnail: { attachmentID in
-                    store.state.composer.draft.attachments
+                    presentation.composer.draft.attachments
                         .first { $0.id == attachmentID }
                         .flatMap { thumbnails[$0.sha256] }
                 },
@@ -168,11 +164,8 @@ struct AppRootView: View {
                     dispatch(.selectAgent(agentID))
                     dispatch(.selectModel(nil))
                 },
-                selectedAgentModels: selectedAgentModels,
                 onSelectModel: { dispatch(.selectModel($0)) },
                 onSelectTask: { dispatch(.selectTask($0)) },
-                conversationSettings: StoreProjection.conversationSettings(store.state, mutationsReady: store.mutationsReady),
-                newChatSettings: StoreProjection.newChatSettings(store.state, mutationsReady: store.mutationsReady),
                 onSetConversationModel: { dispatch(.setConversationModel($0)) },
                 onSetConversationThinking: { dispatch(.setConversationThinking($0)) },
                 onSetConversationFast: { dispatch(.setConversationFast($0)) },
@@ -209,11 +202,10 @@ struct AppRootView: View {
                 attachmentDescriptorName: {
                     store.transcriptFileDescriptor(for: $0)?.name ?? "Attachment"
                 },
-                serverAddress: store.state.server?.absoluteString ?? "—",
                 addHost: AddHostPresentation(
-                    isWaiting: store.state.pendingPairing != nil,
-                    didPair: { if case .paired = store.state.pairingOutcome { true } else { false } }(),
-                    notice: StoreProjection.pairingNotice(store.state.pairingOutcome),
+                    isWaiting: presentation.pairing.isWaiting,
+                    didPair: presentation.pairing.didPair,
+                    notice: presentation.pairing.notice,
                     onPairPayload: { dispatch(.beginHostPairingFromQR($0)) },
                     onPairCode: { dispatch(.beginHostPairingWithCode($0)) },
                     onRefresh: { dispatch(.refreshHostPairing) },
@@ -257,11 +249,6 @@ struct AppRootView: View {
                 )
             }
         }
-    }
-
-    private var selectedAgentModels: [AgentModelRecord] {
-        guard let agentID = store.state.composer.selection.agentID else { return [] }
-        return store.state.agents.first { $0.id == agentID }?.models ?? []
     }
 
     // MARK: - Dispatch

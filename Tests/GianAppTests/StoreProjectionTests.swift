@@ -22,6 +22,17 @@ final class StoreProjectionTests: XCTestCase {
             diagnostic: .none, transcriptSync: .idle)?.label, "Access revoked")
     }
 
+    func testLostConnectionOffersRetryExceptForARevokedDevice() {
+        let lost = ConversationStatusPresentation.make(connectivity: .hidden,
+            diagnostic: .connectionClosed(message: "Connection closed"), transcriptSync: .idle)
+        XCTAssertEqual(lost?.retryConnection, true)
+        XCTAssertEqual(ConversationStatusPresentation.make(connectivity: .hostOffline,
+            diagnostic: .none, transcriptSync: .idle)?.retryConnection, true)
+        let revoked = ConversationStatusPresentation.make(connectivity: .deviceRevoked,
+            diagnostic: .connectionClosed(message: "Connection closed"), transcriptSync: .idle)
+        XCTAssertEqual(revoked?.retryConnection, false)
+    }
+
     private let now = Date(timeIntervalSince1970: 1_781_000_000)
 
     private func id<Kind>(_ raw: String, _ type: ScopedID<Kind>.Type) -> ScopedID<Kind> {

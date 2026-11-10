@@ -72,8 +72,12 @@ struct TranscriptView: View {
                             }
                         }
                     )
+                    // Unchanged messages skip re-rendering (and re-reading their
+                    // markdown) while another row streams.
+                    .equatable()
                 case .work(let card):
                     WorkCardView(card: card)
+                        .equatable()
                 case .interaction(let record):
                     InteractionCard(record: record) { actionID, values in
                         onRespondToInteraction(record.id, actionID, values)

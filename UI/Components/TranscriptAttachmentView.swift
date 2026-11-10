@@ -18,7 +18,9 @@ enum InlineImagePolicy {
 struct TranscriptAttachmentView: View {
     let presentation: AttachmentFilePresentation
     var isImage: Bool = false
-    var imageData: Data? = nil
+    /// Verified bytes, read only when a cached image needs decoding: reading
+    /// re-verifies the bytes, too costly to repeat on every render.
+    var imageData: () -> Data? = { nil }
     var autoLoadEnabled: Bool = false
     var attachmentNumber: Int? = nil
     var onDownload: () -> Void = {}
@@ -32,17 +34,21 @@ struct TranscriptAttachmentView: View {
             .onChange(of: autoLoadEnabled) { _, enabled in
                 if !enabled { requestedAutomatically = false }
             }
+            // Loaded once; if the cache later drops it, load it again on sight.
+            .onChange(of: isCached) { _, cached in
+                if cached { requestedAutomatically = false }
+            }
             .task(id: shouldAutoDownload) {
                 guard shouldAutoDownload, !requestedAutomatically else { return }
                 requestedAutomatically = true
                 onDownload()
             }
-            .task(id: imageData) {
-                guard isImage, let imageData else {
+            .task(id: isImage && isCached) {
+                guard isImage, isCached else {
                     thumbnail = nil; imageDecodeFinished = false
                     return
                 }
-                thumbnail = Self.makeThumbnail(imageData)
+                thumbnail = imageData().flatMap(Self.makeThumbnail)
                 imageDecodeFinished = true
             }
     }
@@ -51,14 +57,25 @@ struct TranscriptAttachmentView: View {
         InlineImagePolicy.shouldLoad(isImage: isImage, enabled: autoLoadEnabled, presentation: presentation)
     }
 
+    private var isCached: Bool {
+        if case .cached = presentation { true } else { false }
+    }
+
     @ViewBuilder
     private var content: some View {
         switch presentation {
         case .unknown:
             note(icon: "questionmark.folder", text: "Attachment details are unavailable.", tint: GianTheme.Colors.secondaryLabel)
         case .readyToDownload(let name, let byteCount, let previewable):
-            if isImage && previewable {
+            if isImage && previewable && !(autoLoadEnabled && requestedAutomatically) {
                 note(icon: "photo", text: autoLoadEnabled ? "Loading image…" : "Image waiting for connection.", tint: GianTheme.Colors.secondaryLabel)
+            } else if isImage && previewable {
+                // The automatic load already ran and didn't stick: the user decides.
+                Button(action: onDownload) {
+                    rowContent(icon: "photo", name: name, detail: "Load image", tint: GianTheme.Colors.tint)
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("Loads the image")
             } else {
                 Button(action: onDownload) {
                     rowContent(icon: "arrow.down.circle", name: name, detail: byteCountText(byteCount), tint: GianTheme.Colors.tint)
@@ -97,7 +114,7 @@ struct TranscriptAttachmentView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Open image \(name)")
-            } else if isImage, previewable, imageData != nil, !imageDecodeFinished {
+            } else if isImage, previewable, !imageDecodeFinished {
                 ProgressView().frame(width: 120, height: 100)
             } else if previewable {
                 Button(action: onPreview) {
