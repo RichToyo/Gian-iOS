@@ -362,7 +362,7 @@ final class StoreProjectionTests: XCTestCase {
         XCTAssertTrue(final.isFinalResult)
     }
 
-    func testRunningWorkCardKeepsItsPlaceWhenTheTurnEnds() {
+    func testRunningWorkCardStaysAtTheTurnsEndUntilItEnds() {
         let user = item("user", turn: 1, turnID: "turn-1", seconds: 0,
                         body: .user(text: "Fix it", deliveryID: nil, attachmentIDs: [], translation: nil))
         let intro = item("intro", turn: 1, turnID: "turn-1", seconds: 1, body: .assistant(text: "Checking", delta: false))
@@ -382,8 +382,40 @@ final class StoreProjectionTests: XCTestCase {
                 }
         }
         XCTAssertEqual(order([user, intro, command], active: true), ["user", "intro", "work"])
-        XCTAssertEqual(order([user, intro, command, answer], active: true), ["user", "intro", "work", "answer"])
+        // New text arrives above the running card, in order.
+        XCTAssertEqual(order([user, intro, command, answer], active: true), ["user", "intro", "answer", "work"])
+        // The card moves above the final answer once, when the turn ends.
         XCTAssertEqual(order([user, intro, command, answer, end], active: false), ["user", "intro", "work", "answer"])
+    }
+
+    func testRunningWorkCardNeverHopsOverTextAsWorkAndTextAlternate() {
+        let user = item("user", turn: 1, turnID: "turn-1", seconds: 0,
+                        body: .user(text: "Fix it", deliveryID: nil, attachmentIDs: [], translation: nil))
+        let steps = [
+            item("text-1", turn: 1, turnID: "turn-1", seconds: 1, body: .assistant(text: "Looking", delta: false)),
+            item("tool-1", turn: 1, turnID: "turn-1", seconds: 2, body: .command(status: .success, exitCode: 0)),
+            item("text-2", turn: 1, turnID: "turn-1", seconds: 3, body: .assistant(text: "Found it", delta: false)),
+            item("tool-2", turn: 1, turnID: "turn-1", seconds: 4, body: .fileRead),
+            item("text-3", turn: 1, turnID: "turn-1", seconds: 5, body: .assistant(text: "Fixed", delta: false)),
+        ]
+        var shown: [String] = []
+        for count in 1...steps.count {
+            let order = StoreProjection.transcriptRows(items: [user] + steps.prefix(count), interactions: [],
+                                                       translation: nil, agent: .claude, agentName: "Claude",
+                                                       now: now, isTurnActive: true)
+                .compactMap { row -> String? in
+                    switch row {
+                    case .user(let value): value.id.rawValue
+                    case .assistant(let value): value.id.rawValue
+                    case .work: "work"
+                    default: nil
+                    }
+                }
+            // Every message shown so far keeps its order; the card is always last.
+            XCTAssertEqual(Array(order.filter { $0 != "work" }.prefix(shown.count)), shown)
+            if order.contains("work") { XCTAssertEqual(order.last, "work") }
+            shown = order.filter { $0 != "work" }
+        }
     }
 
     func testInteractionPlacedAfterItsTurn() {

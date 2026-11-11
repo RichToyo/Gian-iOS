@@ -525,7 +525,6 @@ enum StoreProjection {
         var lastIndex: [Int: Int] = [:]
         var pendingInteractionIndex: [Int: Int] = [:]
         var firstWorkIndex: [Int: Int] = [:]
-        var lastWorkIndex: [Int: Int] = [:]
         var resultIndex: [Int: Int] = [:]
         var outcomeIndex: [Int: Int] = [:]
         for (index, row) in rows.enumerated() {
@@ -534,7 +533,6 @@ enum StoreProjection {
             switch row {
             case .work(let card):
                 if firstWorkIndex[number] == nil { firstWorkIndex[number] = index }
-                lastWorkIndex[number] = index
                 if cards[number] == nil { cards[number] = card }
                 else { cards[number]?.events.append(contentsOf: card.events) }
             case .assistant(let assistant) where finalAssistants[number] == assistant.id:
@@ -574,9 +572,9 @@ enum StoreProjection {
             else if let index = outcomeIndex[number] { anchor = index }
             else if let index = pendingInteractionIndex[number] { anchor = index }
             else if !isTurnActive, let index = firstWorkIndex[number] { anchor = index }
-            // A running turn's text after its latest work is where the card
-            // settles when the turn ends, so the card never hops over the answer.
-            else if ending == nil, let index = resultIndex[number], index > (lastWorkIndex[number] ?? -1) { anchor = index }
+            // As in Gian, a running turn's card stays at the turn's end, below
+            // its newest text: text arrives above it in order, and the card
+            // moves once, above the final answer, when the turn ends.
             else { anchor = (lastIndex[number] ?? rows.count - 1) + 1 }
             insertions[anchor, default: []].append((number, card))
         }
