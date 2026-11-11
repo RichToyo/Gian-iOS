@@ -149,15 +149,19 @@ enum StoreProjection {
         let temporaryID = state.directory.temporarySearchResult?.id
         let created = state.directory.temporaryCreatedResults.filter { $0.id != temporaryID }
         let temporaryIDs = Set(created.map(\.id)).union(temporaryID.map { [$0] } ?? [])
+        // Rows show their time to the minute, and carry it so: a streaming
+        // reply moves the exact time with every chunk, which would otherwise
+        // re-render the list each time. Repos sort by the exact time first.
+        let shownRow = { (summary: ConversationSummary) in Self.toTheMinute(conversationRow(summary)) }
         let taskGroups = showsTasks ? state.directory.tasks.map { section in
             TaskGroupItem(
                 id: section.id,
                 title: section.title,
-                conversations: section.conversations.filter { !temporaryIDs.contains($0.id) }.map(conversationRow)
+                conversations: section.conversations.filter { !temporaryIDs.contains($0.id) }.map(shownRow)
             )
         }.filter { !$0.conversations.isEmpty } : []
 
-        let repoGroups = showsRepos ? state.directory.repositories.map { section in
+        let repoGroups: [RepoGroupItem] = showsRepos ? state.directory.repositories.map { section in
             RepoGroupItem(
                 id: section.id,
                 repoName: section.title,
@@ -168,6 +172,10 @@ enum StoreProjection {
             let lhsDate = lhs.conversations.first?.lastActivity ?? .distantPast
             let rhsDate = rhs.conversations.first?.lastActivity ?? .distantPast
             return lhsDate == rhsDate ? lhs.id.rawValue < rhs.id.rawValue : lhsDate > rhsDate
+        }.map { (group: RepoGroupItem) -> RepoGroupItem in
+            var group = group
+            group.conversations = group.conversations.map(Self.toTheMinute)
+            return group
         } : []
 
         return DirectoryPresentation(
@@ -176,16 +184,22 @@ enum StoreProjection {
             repos: repoGroups,
             reposAvailability: availability(of: state.directory.reposSupport, in: state.directory.legacyLimitations),
             searchQuery: state.directory.searchQuery,
-            searchResults: showsSearch ? state.directory.searchResults.map(conversationRow) : [],
+            searchResults: showsSearch ? state.directory.searchResults.map(shownRow) : [],
             searchAvailability: availability(of: state.directory.searchSupport, in: state.directory.legacyLimitations),
             tasksPage: state.directory.tasksPage,
             reposPage: state.directory.reposPage,
             searchPage: state.directory.searchPage,
             timeFilter: state.navigation.directoryView == .tasks ? state.directory.tasksTimeFilter : state.directory.reposTimeFilter,
-            temporarySearchResult: state.directory.temporarySearchResult.map(conversationRow),
+            temporarySearchResult: state.directory.temporarySearchResult.map(shownRow),
             temporarySearchGeneration: state.directory.temporarySearchGeneration,
-            temporaryCreatedResults: created.map(conversationRow)
+            temporaryCreatedResults: created.map(shownRow)
         )
+    }
+
+    private static func toTheMinute(_ row: ConversationRowItem) -> ConversationRowItem {
+        var row = row
+        row.lastActivity = row.lastActivity.map { Date(timeIntervalSinceReferenceDate: ($0.timeIntervalSinceReferenceDate / 60).rounded(.down) * 60) }
+        return row
     }
 
     private static func showsRows(for page: DirectoryPageStatus) -> Bool {

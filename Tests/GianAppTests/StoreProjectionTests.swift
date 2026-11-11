@@ -184,6 +184,25 @@ final class StoreProjectionTests: XCTestCase {
         XCTAssertEqual(directory.repos[0].conversations.map(\.title), ["Title s-new", "Title s-mid"])
     }
 
+    /// A streaming reply moves a chat's activity with every chunk; the list
+    /// (which shows minutes) only changes when the shown minute or order does.
+    func testListChangesOnlyWhenTheShownMinuteOrOrderDoes() {
+        let minute = Date(timeIntervalSinceReferenceDate: (now.timeIntervalSinceReferenceDate / 60).rounded(.down) * 60)
+        let workspace = id("workspace-gian", WorkspaceID.self)
+        func directory(streaming: TimeInterval, other: TimeInterval) -> DirectoryPresentation {
+            var state = GianClientState.signedOut()
+            state.directory.repositories = [RepositorySection(id: workspace, title: "gian-dev", conversations: [
+                summary("s-other", repo: "gian-dev", activity: minute.addingTimeInterval(other)),
+                summary("s-stream", repo: "gian-dev", activity: minute.addingTimeInterval(streaming)),
+            ])]
+            return StoreProjection.directory(state)
+        }
+        XCTAssertEqual(directory(streaming: 10, other: 5), directory(streaming: 11, other: 5))
+        XCTAssertEqual(directory(streaming: 10, other: 5).repos[0].conversations.map(\.title),
+                       ["Title s-stream", "Title s-other"], "sorted by the exact time")
+        XCTAssertNotEqual(directory(streaming: 10, other: 5), directory(streaming: 61, other: 5))
+    }
+
     func testReposUnsupportedSurfacesLegacyMessage() {
         var state = GianClientState.signedOut()
         state.directory.reposSupport = .unsupported(.reposDirectory)
