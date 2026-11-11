@@ -34,11 +34,7 @@ enum MarkdownCache {
 
     static func inline(_ text: String) -> AttributedString? {
         if let cached = inlineCache[text] { return cached }
-        var options = AttributedString.MarkdownParsingOptions(
-            interpretedSyntax: .inlineOnlyPreservingWhitespace
-        )
-        options.allowsExtendedAttributes = true
-        guard let attributed = try? AttributedString(markdown: text, options: options) else { return nil }
+        guard let attributed = InlineMarkdown.attributed(text) else { return nil }
         reserve(text.utf8.count)
         inlineCache[text] = attributed
         return attributed
@@ -52,6 +48,11 @@ enum MarkdownCache {
             cachedCharacters = 0
         }
         cachedCharacters += characters
+    }
+
+    /// Text with its inline Markdown rendered, or as written if it can't be parsed.
+    static func text(_ source: String) -> Text {
+        inline(source).map(Text.init) ?? Text(source)
     }
 }
 
@@ -98,10 +99,7 @@ struct MarkdownBlockView: View {
     }
 
     private func inlineText(_ text: String) -> Text {
-        if let attributed = MarkdownCache.inline(text) {
-            return Text(attributed)
-        }
-        return Text(text)
+        MarkdownCache.text(text)
     }
 
     private func headingFont(_ level: Int) -> Font {
@@ -199,7 +197,8 @@ struct TableBlockView: View {
     private func row(cells: [String], isHeader: Bool) -> some View {
         HStack(spacing: 0) {
             ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in
-                Text(cell)
+                // Cells carry inline Markdown (bold, code, links) like paragraphs.
+                MarkdownCache.text(cell)
                     .font(isHeader ? GianTheme.Typography.caption.weight(.semibold) : GianTheme.Typography.caption)
                     .foregroundStyle(isHeader ? GianTheme.Colors.secondaryLabel : GianTheme.Colors.label)
                     .frame(maxWidth: .infinity, alignment: .leading)
