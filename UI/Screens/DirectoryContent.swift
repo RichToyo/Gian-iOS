@@ -26,11 +26,13 @@ struct DirectoryContent: View {
                        currentPage.phase != .denied, currentPage.phase != .unsupported {
                         ConversationRow(item: result, isSelected: result.id == selectedConversationID,
                                         showsRepo: true, onSelect: { onSelectConversation(result.id) })
+                            .equatable()
                     }
                     if currentPage.phase != .denied && currentPage.phase != .unsupported {
                         ForEach(directory.temporaryCreatedResults) { result in
                             ConversationRow(item: result, isSelected: result.id == selectedConversationID,
                                             showsRepo: true, onSelect: { onSelectConversation(result.id) })
+                                .equatable()
                         }
                     }
                     switch directory.view {
@@ -125,6 +127,8 @@ struct DirectoryContent: View {
                             showsRepo: collection != .repos,
                             onSelect: { onSelectConversation(conversation.id) }
                         )
+                        // Unchanged rows skip re-rendering when the directory updates.
+                        .equatable()
                     }
                 }
             }
@@ -355,6 +359,7 @@ struct SearchScreen: View {
                                     item: conversation,
                                     onSelect: { onSelectConversation(conversation.id) }
                                 )
+                                .equatable()
                             }
                             DirectoryPageStatusView(
                                 collection: .search,

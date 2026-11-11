@@ -57,6 +57,13 @@ struct ConversationRow: View {
     }
 }
 
+extension ConversationRow: Equatable {
+    /// Selecting dispatches for this row; the item and display decide what renders.
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.item == rhs.item && lhs.isSelected == rhs.isSelected && lhs.showsRepo == rhs.showsRepo
+    }
+}
+
 /// Messages-style row time: clock time today, weekday this week, else date.
 enum RowTimestamp {
     static func text(for date: Date, now: Date = .now, calendar: Calendar = .current) -> String {
