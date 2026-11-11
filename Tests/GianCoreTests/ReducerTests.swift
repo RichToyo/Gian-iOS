@@ -214,6 +214,18 @@ struct ReducerTests {
         #expect(ordered.records.map(\.id) == [verified.id, second.id])
     }
 
+    @Test func itemsStampedTheSameInstantKeepTheOrderTheyArrivedIn() throws {
+        let at = PreviewFixtures.instant
+        // Ids that sort the other way round from their arrival.
+        let text = transcriptItem(id: "zz-text", turn: 1, text: "Looking", at: at)
+        var tool = transcriptItem(id: "aa-tool", turn: 1, text: "", at: at)
+        tool.body = .command(status: .running, exitCode: nil)
+        let live = try #require(TranscriptLog.applyingLive(existing: [text], item: tool))
+        #expect(live.map(\.id.rawValue) == ["zz-text", "aa-tool"])
+        #expect(TranscriptLog.merge(existing: [], incoming: [text, tool]).map(\.id.rawValue) == ["zz-text", "aa-tool"])
+        #expect(TranscriptLog.merge(existing: live, incoming: [tool, text]).map(\.id.rawValue) == ["zz-text", "aa-tool"])
+    }
+
     @Test func transcriptDedupOrderAndSequence() {
         let older = transcriptItem(id: "item-b", turn: 1, text: "First", at: PreviewFixtures.instant)
         var newer = transcriptItem(id: "item-a", turn: 2, text: "Second", at: PreviewFixtures.instant.addingTimeInterval(10))

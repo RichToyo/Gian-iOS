@@ -132,12 +132,14 @@ enum TranscriptLog {
             return merged
         }
         if let index { merged.remove(at: index) }
+        // After everything that started no later, so items stamped the same
+        // instant keep the order they arrived in (as Gian shows them).
         var lower = 0
         var upper = merged.count
         while lower < upper {
             let middle = lower + (upper - lower) / 2
-            if ordered(merged[middle], next) { lower = middle + 1 }
-            else { upper = middle }
+            if startsBefore(next, merged[middle]) { upper = middle }
+            else { lower = middle + 1 }
         }
         merged.insert(next, at: lower)
         return merged
@@ -181,14 +183,18 @@ enum TranscriptLog {
             }
             byID[item.id] = item
         }
-        let merged = order.compactMap { byID[$0] }
-        return merged.sorted(by: ordered)
+        // By turn and start; items that started the same instant keep the
+        // order they were first seen in.
+        return order.compactMap { byID[$0] }.enumerated().sorted { lhs, rhs in
+            if startsBefore(lhs.element, rhs.element) { return true }
+            if startsBefore(rhs.element, lhs.element) { return false }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
     }
 
-    private static func ordered(_ lhs: TranscriptItem, _ rhs: TranscriptItem) -> Bool {
+    private static func startsBefore(_ lhs: TranscriptItem, _ rhs: TranscriptItem) -> Bool {
         if lhs.turn != rhs.turn { return lhs.turn < rhs.turn }
-        if lhs.timestamp != rhs.timestamp { return lhs.timestamp < rhs.timestamp }
-        return lhs.id.rawValue < rhs.id.rawValue
+        return lhs.timestamp < rhs.timestamp
     }
 }
 
