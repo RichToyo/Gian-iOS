@@ -29,6 +29,27 @@ final class GianUITests: XCTestCase {
         XCTAssertTrue((typed.value as? String ?? "").contains("Fictional draft"))
     }
 
+    /// Run on an expanded display (an unfolded Duo, or an iPad). Rotating to
+    /// landscape — even mid-typing, keyboard up — brings the list in beside the
+    /// conversation.
+    func testRotatingExpandedPortraitToLandscapeShowsTheListBesideTheChat() throws {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments += ["-previewScript", "fullDirectory", "-previewReady", "-previewDestination", "chat"]
+        app.launch()
+        XCTAssertGreaterThan(app.windows.firstMatch.frame.width, 600, "Run this test on an expanded display")
+        let message = app.textFields["Message"]
+        XCTAssertTrue(message.waitForExistence(timeout: 30))
+        let listRow = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Old quiet")).firstMatch
+        XCTAssertFalse(listRow.exists && listRow.isHittable, "Expanded portrait shows the conversation full page")
+        message.tap()
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let beside = expectation(for: NSPredicate(format: "exists == true AND hittable == true"), evaluatedWith: listRow)
+        wait(for: [beside], timeout: 10)
+        XCTAssertTrue(app.textFields["Message"].exists, "The conversation stays open beside the list")
+        XCUIDevice.shared.orientation = .portrait
+    }
+
     func testExpandedPortraitUsesFullPageConversationNavigation() throws {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()

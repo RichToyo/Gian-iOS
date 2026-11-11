@@ -83,10 +83,8 @@ struct AdaptiveRoot: View {
 
     @State private var showsSearch = false
     @State private var showsAddHost = false
+    /// The window's size, from `WindowSizeProbe`.
     @State private var keyboardIndependentSize: CGSize = .zero
-    /// The window size while the keyboard is up, applied once it hides.
-    @State private var deferredWindowSize: CGSize?
-    @State private var keyboardVisible = false
     @State private var appearance: SettingsScreen.Appearance = .system
     @AppStorage("gian.appearance") private var storedAppearance: String = SettingsScreen.Appearance.system.rawValue
     @AppStorage(GianAccent.storageKey) private var storedAccent: String = GianAccent.default.rawValue
@@ -144,30 +142,21 @@ struct AdaptiveRoot: View {
         // as landscape above a keyboard). A geometry reader can't see the
         // window (even ignoring safe areas it measured an inset rect that bars
         // change), so a UIKit probe reports the window's bounds, which only
-        // rotation, folding and resizing change. Held while the keyboard shows.
+        // rotation, folding and resizing change — so a rotation with the
+        // keyboard up still re-decides (holding it then kept landscape in the
+        // portrait stack, without the list).
         .background {
             WindowSizeProbe { size in
-                GianLog.layout.debug("window \(size.width)x\(size.height), keyboard \(keyboardVisible), regular \(isWide)")
-                if keyboardVisible, keyboardIndependentSize != .zero {
-                    deferredWindowSize = size
-                } else {
-                    keyboardIndependentSize = size
-                }
+                GianLog.layout.debug("window \(size.width)x\(size.height), regular \(isWide)")
+                keyboardIndependentSize = size
             }
             .allowsHitTesting(false)
         }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { note in
             GianLog.keyboard.debug("will show \(String(describing: note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey]), privacy: .public)")
-            keyboardVisible = true
         }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
             GianLog.keyboard.debug("will hide")
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardDidHideNotification)) { _ in
-            GianLog.keyboard.debug("did hide")
-            keyboardVisible = false
-            if let size = deferredWindowSize { keyboardIndependentSize = size }
-            deferredWindowSize = nil
         }
         .preferredColorScheme(colorScheme)
         .onAppear {
