@@ -69,7 +69,7 @@ struct AppRootView: View {
 
     init(store: GianClientStore) {
         self.store = store
-        _presentation = State(initialValue: AppPresentation(store: store))
+        _presentation = State(initialValue: AppPresentation.shared(for: store))
     }
 
     var body: some View {

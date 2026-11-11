@@ -72,6 +72,32 @@ final class AppPresentation {
         sync(store)
     }
 
+    /// The store's presentation, built once. SwiftUI evaluates a view's
+    /// `@State` initial value on every init of the view, and building a
+    /// presentation reads the store: inside the parent's body, that made the
+    /// parent depend on the store, so every store change (each streamed chunk)
+    /// re-ran the app's root and built a full presentation only to drop it.
+    static func shared(for store: GianClientStore) -> AppPresentation {
+        built.removeAll { $0.store == nil || $0.presentation == nil }
+        if let presentation = built.first(where: { $0.store === store })?.presentation { return presentation }
+        let presentation = AppPresentation(store: store)
+        built.append(Built(store: store, presentation: presentation))
+        return presentation
+    }
+
+    /// Kept alive by the view state holding it.
+    private final class Built {
+        weak var store: GianClientStore?
+        weak var presentation: AppPresentation?
+
+        init(store: GianClientStore, presentation: AppPresentation) {
+            self.store = store
+            self.presentation = presentation
+        }
+    }
+
+    private static var built: [Built] = []
+
     /// Re-syncs after every store change until cancelled. Changes made in one
     /// main-actor turn are coalesced into one sync. Only the store is tracked
     /// (not this object's own values, which the sync reads to compare).
