@@ -29,6 +29,8 @@ struct TranscriptView: View {
     var onRetryTranslationSend: () -> Void = {}
     var onTakeTextBack: () -> Void = {}
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
         LazyVStack(spacing: GianTheme.Metrics.paddingMedium) {
             ForEach(rows) { row in
@@ -104,7 +106,7 @@ struct TranscriptView: View {
                     noticeRow(severity: severity, code: code)
                 }
                 }
-                .transition(Self.arrival)
+                .transition(arrival)
             }
             if let pendingSend {
                 PendingSendView(
@@ -115,7 +117,7 @@ struct TranscriptView: View {
                     onTakeTextBack: onTakeTextBack
                 )
                 .id("pending-send")
-                .transition(Self.arrival)
+                .transition(arrival)
             }
         }
         // New messages, cards and the pending message settle in instead of
@@ -127,8 +129,12 @@ struct TranscriptView: View {
         .padding(.vertical, GianTheme.Metrics.paddingSmall)
     }
 
-    /// Rises a little as it fades in; fades out.
-    private static let arrival = AnyTransition.asymmetric(
+    /// Rises a little as it fades in (only fades with Reduce Motion); fades out.
+    private var arrival: AnyTransition {
+        reduceMotion ? .opacity : Self.rise
+    }
+
+    private static let rise = AnyTransition.asymmetric(
         insertion: .opacity.combined(with: .offset(y: 10)),
         removal: .opacity
     )

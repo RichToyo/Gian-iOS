@@ -233,6 +233,10 @@ private struct TranscriptScroller: View {
     @State private var visibleRowID: String?
     @State private var olderPageAnchor: String?
     @State private var awaitingOlderPage = false
+    /// While following and not touched, growth keeps the latest line in place
+    /// in the same frame (the scroll view's own anchor), instead of a scroll
+    /// a moment later.
+    @State private var pinsLatest = true
 
     private var conversation: ActiveConversationPresentation { chat.conversation }
     private var mutationsReady: Bool { chat.mutationsReady }
@@ -287,6 +291,7 @@ private struct TranscriptScroller: View {
             }
             .id(conversation.id)
             .defaultScrollAnchor(.bottom, for: .initialOffset)
+            .defaultScrollAnchor(pinsLatest ? .bottom : .top, for: .sizeChanges)
             .scrollPosition(id: $visibleRowID, anchor: .top)
             .scrollDismissesKeyboard(.interactively)
             .onScrollGeometryChange(for: TranscriptScrollEdges.self) { geometry in
@@ -308,6 +313,7 @@ private struct TranscriptScroller: View {
                 switch phase {
                 case .tracking, .interacting, .decelerating:
                     scroll.userScrolling = true
+                    if pinsLatest { pinsLatest = false }
                 case .idle:
                     if scroll.userScrolling {
                         if followsLatest != scroll.nearBottom { followsLatest = scroll.nearBottom }
@@ -315,6 +321,7 @@ private struct TranscriptScroller: View {
                         if scroll.nearBottom { awaitingOlderPage = false; olderPageAnchor = nil }
                     }
                     scroll.userScrolling = false
+                    if pinsLatest != followsLatest { pinsLatest = followsLatest }
                 default: break
                 }
             }
@@ -328,6 +335,10 @@ private struct TranscriptScroller: View {
                 if new.shouldFollow(after: old) {
                     followLatest(proxy, animated: false)
                 }
+            }
+            .onChange(of: followsLatest) { _, follows in
+                let pins = follows && !scroll.userScrolling
+                if pinsLatest != pins { pinsLatest = pins }
             }
             .onChange(of: conversation.id) { _, _ in
                 followsLatest = true
