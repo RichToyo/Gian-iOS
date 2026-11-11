@@ -110,6 +110,7 @@ enum GianAppComposition {
 
     /// `-previewDestination repos|chat|newChat|settings` (with `-previewReady`)
     /// opens that surface once ready, so screenshots need no UI automation.
+    /// `chatAgent` also replays agent turns into the chat (PreviewAgentTurn).
     static var previewDestination: String? {
         let arguments = ProcessInfo.processInfo.arguments
         guard let index = arguments.firstIndex(of: "-previewDestination"),

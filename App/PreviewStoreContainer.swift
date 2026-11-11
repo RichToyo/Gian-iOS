@@ -108,6 +108,9 @@ struct PreviewStoreContainer<Content: View>: View {
                                           body: .assistant(text: "Fictional notification", delta: false))
                 _ = store.ingest(InboundEnvelope(scope: scope, event: .transcript(sessionID: session, item: item)))
             }
+        case "chatAgent":
+            _ = await store.dispatch(.selectConversation(PreviewFixtures.sessionID))
+            await PreviewAgentTurn.play(store)
         case "newChat": _ = await store.dispatch(.openNewChat)
         case "settings": _ = await store.dispatch(.openSettings)
         default: break
