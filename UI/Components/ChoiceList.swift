@@ -21,12 +21,30 @@ struct ChoiceList: View {
     var additionalHeader: String? = nil
     var additionalRows: [ChoiceListRow] = []
     var actions: [ChoiceListRow] = []
+    /// Back to the list this one was opened from (shown before the header).
+    var onBack: (() -> Void)? = nil
 
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if let header {
+            if let onBack {
+                Button(action: onBack) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left")
+                            .font(.caption.weight(.semibold))
+                        Text(header ?? "Back")
+                            .font(GianTheme.Typography.caption.weight(.semibold))
+                    }
+                    .foregroundStyle(GianTheme.Colors.secondaryLabel)
+                    .padding(.horizontal, 16)
+                    .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Back")
+                .accessibilityHint(header.map { "Leaves \($0)" } ?? "")
+            } else if let header {
                 Text(header)
                     .font(GianTheme.Typography.caption)
                     .foregroundStyle(GianTheme.Colors.secondaryLabel)

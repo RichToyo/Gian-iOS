@@ -49,11 +49,21 @@ struct ComposerMoreMenu: View {
         .buttonStyle(.plain)
         .accessibilityLabel("More options")
         .popover(isPresented: $showsMenu) {
-            if let setting = openSetting, let settings {
-                choices(setting, settings)
-            } else {
-                options
+            // A step in, like a navigation push: the options slide out to the
+            // leading edge as the choices come in from the trailing edge, and
+            // the popover resizes with them.
+            ZStack {
+                if let setting = openSetting, let settings {
+                    choices(setting, settings)
+                        .transition(.asymmetric(insertion: .move(edge: .trailing), removal: .move(edge: .trailing))
+                            .combined(with: .opacity))
+                } else {
+                    options
+                        .transition(.asymmetric(insertion: .move(edge: .leading), removal: .move(edge: .leading))
+                            .combined(with: .opacity))
+                }
             }
+            .clipped()
         }
         .onChange(of: showsMenu) { _, shown in if !shown { openSetting = nil } }
     }
@@ -76,7 +86,7 @@ struct ComposerMoreMenu: View {
     private func conversationSection(_ settings: ConversationSettingsPresentation) -> some View {
         Group {
             if !settings.models.isEmpty {
-                optionButton(action: { openSetting = .model }) {
+                optionButton(action: { open(.model) }) {
                     Label {
                         Text(label(of: settings.model, in: settings.models) ?? "Model")
                     } icon: {
@@ -87,7 +97,7 @@ struct ComposerMoreMenu: View {
                 }
             }
             if !settings.thinking.isEmpty {
-                optionButton(action: { openSetting = .thinking }) {
+                optionButton(action: { open(.thinking) }) {
                     Label(label(of: settings.currentThinking, in: settings.thinking) ?? "Default", systemImage: "brain")
                 }
             }
@@ -104,7 +114,7 @@ struct ComposerMoreMenu: View {
                 if !settings.models.isEmpty || !settings.thinking.isEmpty || settings.showsFast {
                     Divider().padding(.vertical, 4)
                 }
-                optionButton(action: { openSetting = .approval }) {
+                optionButton(action: { open(.approval) }) {
                     Label(label(of: settings.currentApproval, in: settings.approval) ?? "Approval", systemImage: "checkmark.shield")
                 }
             }
@@ -139,6 +149,10 @@ struct ComposerMoreMenu: View {
         .buttonStyle(.plain)
     }
 
+    private func open(_ setting: Setting?) {
+        withAnimation(.snappy(duration: 0.3)) { openSetting = setting }
+    }
+
     private func label(of value: String?, in choices: [AgentOptionChoice]) -> String? {
         choices.first { $0.value == value }?.label
     }
@@ -152,13 +166,16 @@ struct ComposerMoreMenu: View {
         switch setting {
         case .model:
             return ChoiceList(header: "Model", rows: rows(settings.models.map { ($0.value, $0.label) },
-                                                          selected: settings.model, onSelect: onSelectModel))
+                                                          selected: settings.model, onSelect: onSelectModel),
+                              onBack: { open(nil) })
         case .thinking:
             return ChoiceList(header: "Thinking", rows: rows([(nil, "Default")] + settings.thinking.map { ($0.value, $0.label) },
-                                                             selected: settings.currentThinking, onSelect: onSelectThinking))
+                                                             selected: settings.currentThinking, onSelect: onSelectThinking),
+                              onBack: { open(nil) })
         case .approval:
             return ChoiceList(header: "Approval", rows: rows(settings.approval.map { ($0.value, $0.label) },
-                                                             selected: settings.currentApproval, onSelect: onSelectApproval))
+                                                             selected: settings.currentApproval, onSelect: onSelectApproval),
+                              onBack: { open(nil) })
         }
     }
 }
