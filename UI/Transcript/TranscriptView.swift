@@ -32,6 +32,7 @@ struct TranscriptView: View {
     var body: some View {
         LazyVStack(spacing: GianTheme.Metrics.paddingMedium) {
             ForEach(rows) { row in
+                Group {
                 switch row {
                 case .timeMarker(_, let label):
                     Text(label)
@@ -102,6 +103,8 @@ struct TranscriptView: View {
                 case .notice(_, let severity, let code):
                     noticeRow(severity: severity, code: code)
                 }
+                }
+                .transition(Self.arrival)
             }
             if let pendingSend {
                 PendingSendView(
@@ -112,11 +115,27 @@ struct TranscriptView: View {
                     onTakeTextBack: onTakeTextBack
                 )
                 .id("pending-send")
+                .transition(Self.arrival)
             }
         }
+        // New messages, cards and the pending message settle in instead of
+        // popping; only the tail animates, so streaming text and older pages
+        // loaded above stay put.
+        .animation(.easeOut(duration: 0.25), value: tail)
         .scrollTargetLayout()
         .padding(.horizontal, GianTheme.Metrics.paddingMedium)
         .padding(.vertical, GianTheme.Metrics.paddingSmall)
+    }
+
+    /// Rises a little as it fades in; fades out.
+    private static let arrival = AnyTransition.asymmetric(
+        insertion: .opacity.combined(with: .offset(y: 10)),
+        removal: .opacity
+    )
+
+    /// The end of the transcript: what arriving or leaving rows change.
+    private var tail: TranscriptTail {
+        TranscriptTail(ids: rows.suffix(3).map(\.id), pending: pendingSend)
     }
 
     private func noticeRow(severity: NoticeSeverity, code: String) -> some View {
@@ -133,5 +152,24 @@ struct TranscriptView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
+    }
+}
+
+private struct TranscriptTail: Equatable {
+    let ids: [String]
+    let pending: PendingSendRow?
+}
+
+extension TranscriptView: Equatable {
+    /// The closures dispatch actions or read the store when called; the rows
+    /// and flags (which also gate those closures) decide what renders.
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.rows == rhs.rows
+            && lhs.translationEnabled == rhs.translationEnabled
+            && lhs.translationAvailable == rhs.translationAvailable
+            && lhs.translationRecoveryEnabled == rhs.translationRecoveryEnabled
+            && lhs.autoLoadImages == rhs.autoLoadImages
+            && lhs.pendingSend == rhs.pendingSend
+            && lhs.pendingActionsEnabled == rhs.pendingActionsEnabled
     }
 }

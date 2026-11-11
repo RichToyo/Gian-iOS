@@ -63,8 +63,170 @@ struct ChatScreen: View {
 
     @Environment(\.globalActionsAtBottom) private var globalActionsAtBottom
     @State private var previewedAttachment: (id: AttachmentID, name: String, data: Data)?
-    @State private var followsLatest = true
+    /// Bumped by Send and composer focus; the transcript jumps to its latest line.
     @State private var latestScrollRequest = 0
+
+    var body: some View {
+        TranscriptScroller(chat: self, latestScrollRequest: latestScrollRequest)
+        .overlay(alignment: .top) {
+            TopStatusStack(
+                banner: conversation.banner,
+                onBannerTap: {
+                    if let banner = conversation.banner { onBannerTap(banner.id) }
+                },
+                onBannerDismiss: {
+                    if let banner = conversation.banner { onBannerDismiss(banner.id) }
+                }
+            )
+            .frame(maxWidth: GianTheme.Metrics.readableWidth)
+            .padding(.top, GianTheme.Metrics.paddingSmall)
+        }
+        .safeAreaBar(edge: .bottom) {
+            PresentationSurface { composerArea }
+        }
+        .background(GianTheme.Colors.background)
+        .navigationTitle(conversation.title)
+        .navigationBarTitleDisplayMode(.inline)
+        .task(id: conversation.id) { onLoadOptions() }
+        .toolbar {
+            // Centered on every layout, including the Duo's vertical-bar one,
+            // where the system title sits on the leading edge.
+            ToolbarItem(placement: .principal) {
+                let status = ConversationStatusPresentation.make(
+                    connectivity: conversation.connectivity,
+                    diagnostic: diagnostic,
+                    transcriptSync: conversation.transcriptSync
+                )
+                HStack(spacing: 6) {
+                    HostScopedTitle(title: conversation.title, host: nil)
+                        .accessibilityIdentifier("conversation-title")
+                        .layoutPriority(1)
+                    if let status {
+                        ConversationStatusView(status: status, onRetryConnection: onRetrySynchronization,
+                                               onRetryMessages: onRetryTranscriptSync)
+                            .transition(.opacity)
+                    }
+                }
+                .animation(.easeInOut(duration: 0.2), value: status)
+            }
+            GlobalToolbarActions(atBottom: globalActionsAtBottom, onNewChat: onOpenNewChat, onSettings: onOpenSettings)
+        }
+        .toolbarVisibility(.visible, for: .navigationBar)
+        .modifier(PersistentChatToolbar())
+        .sheet(item: previewBinding) { preview in
+            AttachmentPreviewSheet(
+                name: preview.name,
+                data: preview.data,
+                onClose: { previewedAttachment = nil }
+            )
+        }
+    }
+
+    /// Opens the preview sheet only when Core returns verified cached bytes.
+    fileprivate func previewAttachment(_ id: AttachmentID) {
+        guard let data = attachmentData(id) else { return }
+        previewedAttachment = (id, attachmentDescriptorName(id), data)
+    }
+
+    private struct PreviewItem: Identifiable {
+        let id: AttachmentID
+        let name: String
+        let data: Data
+    }
+
+    private var previewBinding: Binding<PreviewItem?> {
+        Binding(
+            get: {
+                previewedAttachment.map { PreviewItem(id: $0.id, name: $0.name, data: $0.data) }
+            },
+            set: { newValue in
+                if newValue == nil { previewedAttachment = nil }
+            }
+        )
+    }
+
+    /// The queue panel stays while there is a queue or a command in flight; a
+    /// failure that left the queue empty has nothing to act on.
+    private var showsQueue: Bool {
+        if conversation.queue?.entries.isEmpty == false { return true }
+        switch conversation.queueCommand {
+        case .pending, .uncertain: return true
+        case .failed, nil: return false
+        }
+    }
+
+    // MARK: - Composer
+
+    private var composerArea: some View {
+        let composer = composer()
+        return VStack(spacing: GianTheme.Metrics.paddingSmall) {
+            if showsQueue {
+                let queue = conversation.queue ?? SessionQueue(revision: "", entries: [])
+                QueueList(queue: queue, command: conversation.queueCommand,
+                          enabled: mutationsReady, canUpdate: conversation.canUpdateQueue,
+                          canRemove: conversation.canRemoveQueue, canClear: conversation.canClearQueue,
+                          canSendNow: conversation.canSendQueueNow,
+                          onMutation: onMutateQueue, onRecover: onRecoverQueue)
+                    .id(conversation.id)
+            }
+            // While the draft is on its way it shows as the pending message
+            // in the transcript, and the composer stays empty, as on the desktop.
+            let held = conversation.holdsDraft
+            ComposerView(
+            draft: Binding(
+                get: { held ? "" : composer.draft.text },
+                set: onEditDraft
+            ),
+            attachments: held ? [] : composer.draft.attachments,
+            sendPhase: held ? .held : SendPhasePresentation(composer.send),
+            // The pending message carries its own status and choices.
+            notice: held ? .none : ComposerNoticePresentation(composer.notice),
+            isTurnActive: conversation.isTurnActive,
+            remoteReady: mutationsReady,
+            thumbnail: thumbnail,
+            moreMenu: ComposerMoreMenu(
+                settings: settings,
+                translation: conversation.translation,
+                translationEnabled: mutationsReady,
+                onSelectModel: onSelectModel,
+                onSelectThinking: onSelectThinking,
+                onSetFast: onSetFast,
+                onSelectApproval: onSelectApproval,
+                onToggleAutomaticTranslation: onToggleAutomaticTranslation
+            ),
+            onSend: {
+                latestScrollRequest += 1
+                onSend()
+            },
+            onStop: onStop,
+            onRetryTranslationSend: onRetryTranslationSend,
+            onSendOriginal: onSendOriginal,
+            onCancelTranslation: onCancelTranslationSend,
+            onRecoverUncertain: onRecoverUncertain,
+            onRemoveAttachment: onRemoveAttachment,
+            onRetryAttachmentUpload: onRetryAttachmentUpload,
+            onFocusChange: { focused in
+                if focused { latestScrollRequest += 1 }
+            },
+            attachmentPicker: attachmentPicker
+            )
+        }
+        .frame(maxWidth: GianTheme.Metrics.readableWidth)
+        .padding(.horizontal, GianTheme.Metrics.paddingMedium)
+        .padding(.bottom, GianTheme.Metrics.paddingSmall)
+        .frame(maxWidth: .infinity)
+    }
+}
+
+/// The scrolling transcript, apart from the rest of the chat: its scroll
+/// state (top row, following, older pages) changes many times while dragging,
+/// and only this view re-renders for it, not the bar, title and composer.
+private struct TranscriptScroller: View {
+    let chat: ChatScreen
+    /// Bumped by Send and composer focus.
+    let latestScrollRequest: Int
+
+    @State private var followsLatest = true
     /// Per-frame scroll bookkeeping; a plain reference, so dragging does not
     /// re-render the transcript.
     @State private var scroll = TranscriptScrollTracker()
@@ -73,6 +235,9 @@ struct ChatScreen: View {
     @State private var visibleRowID: String?
     @State private var olderPageAnchor: String?
     @State private var awaitingOlderPage = false
+
+    private var conversation: ActiveConversationPresentation { chat.conversation }
+    private var mutationsReady: Bool { chat.mutationsReady }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -83,7 +248,7 @@ struct ChatScreen: View {
                             followsLatest = false
                             awaitingOlderPage = true
                             olderPageAnchor = stableAnchor(for: visibleRowID)
-                            onPageOlder()
+                            chat.onPageOlder()
                         }
                         .font(GianTheme.Typography.caption)
                         .foregroundStyle(GianTheme.Colors.tint)
@@ -96,24 +261,26 @@ struct ChatScreen: View {
                             && conversation.translation?.capability == .configured,
                         translationAvailable: conversation.translation?.capability == .configured,
                         translationRecoveryEnabled: mutationsReady,
-                        onRespondToInteraction: mutationsReady ? onRespondToInteraction : { _, _, _ in },
-                        onRequestTranslation: onRequestTranslation,
-                        onCancelTranslation: { onCancelReadingTranslation($0) },
-                        onRetryTranslation: onRequestTranslation,
-                        onRecoverTranslation: onRecoverReadingTranslation,
-                        onPageTranslation: onPageTranslation,
-                        attachmentPresentation: attachmentPresentation,
-                        attachmentIsImage: attachmentIsImage,
-                        attachmentData: attachmentData,
+                        onRespondToInteraction: mutationsReady ? chat.onRespondToInteraction : { _, _, _ in },
+                        onRequestTranslation: chat.onRequestTranslation,
+                        onCancelTranslation: { chat.onCancelReadingTranslation($0) },
+                        onRetryTranslation: chat.onRequestTranslation,
+                        onRecoverTranslation: chat.onRecoverReadingTranslation,
+                        onPageTranslation: chat.onPageTranslation,
+                        attachmentPresentation: chat.attachmentPresentation,
+                        attachmentIsImage: chat.attachmentIsImage,
+                        attachmentData: chat.attachmentData,
                         autoLoadImages: mutationsReady,
-                        onDownloadAttachment: mutationsReady ? onDownloadAttachment : { _ in },
-                        onPreviewAttachment: previewAttachment,
+                        onDownloadAttachment: mutationsReady ? chat.onDownloadAttachment : { _ in },
+                        onPreviewAttachment: chat.previewAttachment,
                         pendingSend: conversation.pendingSend,
                         pendingActionsEnabled: mutationsReady,
-                        onSendOriginal: onSendOriginal,
-                        onRetryTranslationSend: onRetryTranslationSend,
-                        onTakeTextBack: onCancelTranslationSend
+                        onSendOriginal: chat.onSendOriginal,
+                        onRetryTranslationSend: chat.onRetryTranslationSend,
+                        onTakeTextBack: chat.onCancelTranslationSend
                     )
+                    // Unchanged rows aren't re-rendered while scrolling moves the top row.
+                    .equatable()
                     Color.clear.frame(height: 1).id("transcript-latest")
                 }
                 .padding(.top, 144)
@@ -175,6 +342,7 @@ struct ChatScreen: View {
                 if awaitingOlderPage && scroll.userScrolling { olderPageAnchor = stableAnchor(for: value) }
             }
             .onChange(of: latestScrollRequest) { _, _ in
+                followsLatest = true
                 awaitingOlderPage = false
                 olderPageAnchor = nil
                 followLatest(proxy, animated: false, force: true)
@@ -197,81 +365,6 @@ struct ChatScreen: View {
                 }
             }
         }
-        .overlay(alignment: .top) {
-            TopStatusStack(
-                banner: conversation.banner,
-                onBannerTap: {
-                    if let banner = conversation.banner { onBannerTap(banner.id) }
-                },
-                onBannerDismiss: {
-                    if let banner = conversation.banner { onBannerDismiss(banner.id) }
-                }
-            )
-            .frame(maxWidth: GianTheme.Metrics.readableWidth)
-            .padding(.top, GianTheme.Metrics.paddingSmall)
-        }
-        .safeAreaBar(edge: .bottom) {
-            PresentationSurface { composerArea }
-        }
-        .background(GianTheme.Colors.background)
-        .navigationTitle(conversation.title)
-        .navigationBarTitleDisplayMode(.inline)
-        .task(id: conversation.id) { onLoadOptions() }
-        .toolbar {
-            // Centered on every layout, including the Duo's vertical-bar one,
-            // where the system title sits on the leading edge.
-            ToolbarItem(placement: .principal) {
-                let status = ConversationStatusPresentation.make(
-                    connectivity: conversation.connectivity,
-                    diagnostic: diagnostic,
-                    transcriptSync: conversation.transcriptSync
-                )
-                HStack(spacing: 6) {
-                    HostScopedTitle(title: conversation.title, host: nil)
-                        .accessibilityIdentifier("conversation-title")
-                        .layoutPriority(1)
-                    if let status {
-                        ConversationStatusView(status: status, onRetryConnection: onRetrySynchronization,
-                                               onRetryMessages: onRetryTranscriptSync)
-                            .transition(.opacity)
-                    }
-                }
-                .animation(.easeInOut(duration: 0.2), value: status)
-            }
-            GlobalToolbarActions(atBottom: globalActionsAtBottom, onNewChat: onOpenNewChat, onSettings: onOpenSettings)
-        }
-        .toolbarVisibility(.visible, for: .navigationBar)
-        .modifier(PersistentChatToolbar())
-        .sheet(item: previewBinding) { preview in
-            AttachmentPreviewSheet(
-                name: preview.name,
-                data: preview.data,
-                onClose: { previewedAttachment = nil }
-            )
-        }
-    }
-
-    /// Opens the preview sheet only when Core returns verified cached bytes.
-    private func previewAttachment(_ id: AttachmentID) {
-        guard let data = attachmentData(id) else { return }
-        previewedAttachment = (id, attachmentDescriptorName(id), data)
-    }
-
-    private struct PreviewItem: Identifiable {
-        let id: AttachmentID
-        let name: String
-        let data: Data
-    }
-
-    private var previewBinding: Binding<PreviewItem?> {
-        Binding(
-            get: {
-                previewedAttachment.map { PreviewItem(id: $0.id, name: $0.name, data: $0.data) }
-            },
-            set: { newValue in
-                if newValue == nil { previewedAttachment = nil }
-            }
-        )
     }
 
     /// Keeps the latest line in view while following, deferred a turn so the
@@ -306,16 +399,6 @@ struct ChatScreen: View {
         }
     }
 
-    /// The queue panel stays while there is a queue or a command in flight; a
-    /// failure that left the queue empty has nothing to act on.
-    private var showsQueue: Bool {
-        if conversation.queue?.entries.isEmpty == false { return true }
-        switch conversation.queueCommand {
-        case .pending, .uncertain: return true
-        case .failed, nil: return false
-        }
-    }
-
     private func stableAnchor(for visible: String?) -> String? {
         guard let visible, let index = conversation.rows.firstIndex(where: { $0.id == visible }) else { return visible }
         if case .timeMarker = conversation.rows[index] {
@@ -324,71 +407,6 @@ struct ChatScreen: View {
         return visible
     }
 
-    // MARK: - Composer
-
-    private var composerArea: some View {
-        let composer = composer()
-        return VStack(spacing: GianTheme.Metrics.paddingSmall) {
-            if showsQueue {
-                let queue = conversation.queue ?? SessionQueue(revision: "", entries: [])
-                QueueList(queue: queue, command: conversation.queueCommand,
-                          enabled: mutationsReady, canUpdate: conversation.canUpdateQueue,
-                          canRemove: conversation.canRemoveQueue, canClear: conversation.canClearQueue,
-                          canSendNow: conversation.canSendQueueNow,
-                          onMutation: onMutateQueue, onRecover: onRecoverQueue)
-                    .id(conversation.id)
-            }
-            // While the draft is on its way it shows as the pending message
-            // in the transcript, and the composer stays empty, as on the desktop.
-            let held = conversation.holdsDraft
-            ComposerView(
-            draft: Binding(
-                get: { held ? "" : composer.draft.text },
-                set: onEditDraft
-            ),
-            attachments: held ? [] : composer.draft.attachments,
-            sendPhase: held ? .held : SendPhasePresentation(composer.send),
-            // The pending message carries its own status and choices.
-            notice: held ? .none : ComposerNoticePresentation(composer.notice),
-            isTurnActive: conversation.isTurnActive,
-            remoteReady: mutationsReady,
-            thumbnail: thumbnail,
-            moreMenu: ComposerMoreMenu(
-                settings: settings,
-                translation: conversation.translation,
-                translationEnabled: mutationsReady,
-                onSelectModel: onSelectModel,
-                onSelectThinking: onSelectThinking,
-                onSetFast: onSetFast,
-                onSelectApproval: onSelectApproval,
-                onToggleAutomaticTranslation: onToggleAutomaticTranslation
-            ),
-            onSend: {
-                followsLatest = true
-                latestScrollRequest += 1
-                onSend()
-            },
-            onStop: onStop,
-            onRetryTranslationSend: onRetryTranslationSend,
-            onSendOriginal: onSendOriginal,
-            onCancelTranslation: onCancelTranslationSend,
-            onRecoverUncertain: onRecoverUncertain,
-            onRemoveAttachment: onRemoveAttachment,
-            onRetryAttachmentUpload: onRetryAttachmentUpload,
-            onFocusChange: { focused in
-                if focused {
-                    followsLatest = true
-                    latestScrollRequest += 1
-                }
-            },
-            attachmentPicker: attachmentPicker
-            )
-        }
-        .frame(maxWidth: GianTheme.Metrics.readableWidth)
-        .padding(.horizontal, GianTheme.Metrics.paddingMedium)
-        .padding(.bottom, GianTheme.Metrics.paddingSmall)
-        .frame(maxWidth: .infinity)
-    }
 }
 
 private struct QueueList: View {

@@ -102,6 +102,8 @@ struct WorkCardView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        // Working → Worked/Failed cross-fades instead of snapping.
+        .animation(.easeInOut(duration: 0.2), value: card.phase)
         .accessibilityHint(isExpanded ? "Collapse details" : "Expand details")
     }
 
