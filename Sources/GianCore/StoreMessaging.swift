@@ -765,13 +765,14 @@ extension GianClientStore {
             }
             bind(session, intent: &intent)
             draft = state.composer.draft
-            if pendingSessionAccess[session.id] != nil {
+            if accessCheckHolds(session.id, intent: intent) {
                 state.composer.send = .failed(intent, message: "Conversation access is being verified. The draft was kept.")
                 persist()
                 return reject(.mutationsDisabled)
             }
             await applyNewChatApproval(approvalMode, to: session, scope: scope)
             guard responseIsCurrent(token), navigation == navigationEpoch else { return reject(.staleOperation) }
+            guard await settleForFirstSend(intent) else { return reject(.staleOperation) }
             guard mutationsAllowed() else {
                 state.composer.send = .failed(intent, message: "Conversation access is being verified. The draft was kept.")
                 persist()
@@ -798,7 +799,8 @@ extension GianClientStore {
         draft: DraftDocument
     ) async -> GianDispatchResult? {
         guard let sessionID = intent.sessionID else { return reject(.notFound) }
-        guard mutationsAllowed(), pendingSessionAccess[sessionID] == nil, !deniedSessionAccess.contains(sessionID) else {
+        guard await settleForFirstSend(intent) else { return reject(.staleOperation) }
+        guard mutationsAllowed(), !accessCheckHolds(sessionID, intent: intent), !deniedSessionAccess.contains(sessionID) else {
             state.composer.send = .failed(intent, message: "Conversation access is being verified. The draft was kept.")
             persist()
             return reject(.mutationsDisabled)
@@ -903,6 +905,33 @@ extension GianClientStore {
         }
     }
 
+    /// A chat this device just created can be put to an access check a moment
+    /// later (a Host patch removes the new session while its directory entry
+    /// settles), and the check may only run once the directory is ready. The
+    /// Host has just accepted the creation, so its first message doesn't wait
+    /// for that check (the Host still refuses a send it doesn't allow); any
+    /// other send to a chat being checked is held as before.
+    /// The first message of a chat this device just created waits, up to
+    /// about ten seconds, for sending to be allowed: a fresh pairing or a
+    /// directory catch-up can briefly disallow it, and the chat already exists,
+    /// so failing would leave it empty behind an error. Other sends don't wait.
+    /// False when the user moved on meanwhile (the caller drops the operation).
+    private func settleForFirstSend(_ intent: DurableSendIntent) async -> Bool {
+        guard intent.creationID != nil, !mutationsAllowed() else { return true }
+        let navigation = navigationEpoch
+        let token = epoch
+        for _ in 0..<50 {
+            try? await firstSendSettleWait()
+            guard navigation == navigationEpoch, responseIsCurrent(token) else { return false }
+            if mutationsAllowed() { break }
+        }
+        return true
+    }
+
+    private func accessCheckHolds(_ sessionID: SessionID, intent: DurableSendIntent) -> Bool {
+        pendingSessionAccess[sessionID] != nil && intent.creationID == nil
+    }
+
     private func deliver(scope: ClientScope, intent: inout DurableSendIntent, draft: DraftDocument) async -> GianDispatchResult {
         guard let sessionID = intent.sessionID else { return reject(.notFound) }
         if intent.sendDispatched {
@@ -910,7 +939,8 @@ extension GianClientStore {
             persist()
             return .applied
         }
-        guard mutationsAllowed(), pendingSessionAccess[sessionID] == nil, !deniedSessionAccess.contains(sessionID) else {
+        guard await settleForFirstSend(intent) else { return reject(.staleOperation) }
+        guard mutationsAllowed(), !accessCheckHolds(sessionID, intent: intent), !deniedSessionAccess.contains(sessionID) else {
             state.composer.send = .failed(intent, message: "Conversation access is being verified. The draft was kept.")
             persist()
             return reject(.mutationsDisabled)

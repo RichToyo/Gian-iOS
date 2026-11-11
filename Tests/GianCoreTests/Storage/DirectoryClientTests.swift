@@ -15,9 +15,13 @@ final class DirectoryFixtureService: ControlledService {
     var retireNextDirectoryRead = false
     var createWithoutActivity = false
 
+    /// Runs once a create succeeds, with the new session's id (e.g. to mimic a
+    /// Host patch that puts it to an access check).
+    var onCreated: ((SessionID) -> Void)?
     override func createSession(scope: ClientScope, request: SessionCreateRequest) async -> CommandDispatchResponse {
         createRequests.append(request)
         let response = await super.createSession(scope: scope, request: request)
+        if case .succeeded(let success) = response, let id = success.session?.id { onCreated?(id) }
         if createWithoutActivity, case .succeeded(var success) = response {
             success.session?.lastActivityAt = nil
             success.session?.activityIsMessageOrExecution = false

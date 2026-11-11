@@ -57,6 +57,8 @@ public final class GianClientStore {
         try await Task.sleep(nanoseconds: seconds * 1_000_000_000)
     }
     @ObservationIgnored var retentionRecoveryYield: () async -> Void = { await Task.yield() }
+    /// One step of a new chat's first send waiting for sending to be allowed.
+    @ObservationIgnored var firstSendSettleWait: () async throws -> Void = { try await Task.sleep(for: .milliseconds(200)) }
     @ObservationIgnored var translationPageRequests: Set<TranslationRecordID> = []
     @ObservationIgnored var translationStatusRequests: Set<TranslationRequestID> = []
     @ObservationIgnored var directoryRefreshPending = false
@@ -396,15 +398,31 @@ public final class GianClientStore {
         }
     }
 
+    /// An access check holds a chat, except the one this device is creating
+    /// while its first message is on the way: the Host has just accepted the
+    /// creation, and a patch can put the new session to a check before its
+    /// directory entry settles (the Host still refuses a send it doesn't allow).
+    func accessCheckPending(_ session: SessionID) -> Bool {
+        guard pendingSessionAccess[session] != nil else { return false }
+        // The in-flight intent learns the session only when it is sent; the
+        // draft is bound to it (and to the creation) as soon as it exists.
+        let draft = state.composer.draft
+        if let intent = state.composer.send.intent, state.composer.send.isInFlight, let creation = intent.creationID,
+           intent.sessionID == session || (draft.boundSessionID == session && draft.boundCreationID == creation) {
+            return false
+        }
+        return true
+    }
+
     func mutationsAllowed() -> Bool {
         guard directoryReadyForRecovery(), !sessionAccessOverflow, let scope = readyScope() else { return false }
         if let bound = state.composer.draft.boundSessionID,
-           pendingSessionAccess[bound] != nil || deniedSessionAccess.contains(bound) { return false }
+           accessCheckPending(bound) || deniedSessionAccess.contains(bound) { return false }
         if case .conversation(let draftSession) = state.composer.draft.target,
-           pendingSessionAccess[draftSession] != nil || deniedSessionAccess.contains(draftSession) { return false }
+           accessCheckPending(draftSession) || deniedSessionAccess.contains(draftSession) { return false }
         if let session = currentSessionID {
             return state.conversation?.session.id == session
-                && pendingSessionAccess[session] == nil && !deniedSessionAccess.contains(session)
+                && !accessCheckPending(session) && !deniedSessionAccess.contains(session)
                 && state.conversation?.hydratedFromCache == false
                 && state.conversation?.transcriptSync == .idle
                 && memory.bundle(for: scope).transcriptCursors[session]?.catchUp == nil

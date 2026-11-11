@@ -61,8 +61,13 @@ final class LiveHostUITests: XCTestCase {
         while newChatTitle.exists, Date() < deadline { sleep(1) }
         XCTAssertFalse(newChatTitle.exists, "The first message did not create a conversation")
 
-        // The created conversation opens; change approval mid-conversation.
+        // The created conversation opens with the first message delivered (not
+        // held back by the new chat's access check).
         XCTAssertTrue(app.buttons["More options"].waitForExistence(timeout: 30))
+        XCTAssertTrue(app.staticTexts["ping"].waitForExistence(timeout: 30), "The first message was not delivered")
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'being verified'")).firstMatch.exists,
+                       "The first message was held back by the access check")
+        // Change approval mid-conversation.
         sleep(3)
         snap("live-04-conversation")
         app.buttons["More options"].tap(); sleep(1)

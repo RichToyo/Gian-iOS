@@ -36,6 +36,60 @@ struct TasklessFirstSendTests {
         #expect(!store.state.directory.tasks.flatMap(\.conversations).contains { $0.id == id })
     }
 
+    /// On a live Host the new session can be put to an access check right
+    /// after it is created; its first message is sent anyway.
+    @Test func firstMessageIsSentDespiteTheNewChatsAccessCheck() async throws {
+        let service = DirectoryFixtureService()
+        service.pages[.tasks] = [directoryPage(.tasks)]
+        service.pages[.repos] = [directoryPage(.repos)]
+        let clock = ManualGianClock(instant: PreviewFixtures.instant)
+        let store = GianClientStore(service: service, clock: clock)
+        _ = try await signIn(store, clock: clock)
+        service.onCreated = { id in store.pendingSessionAccess[id] = 1 }
+        await prepareComposer(store, text: "First message", task: false)
+        #expect((await store.dispatch(.send)).isApplied)
+        #expect(service.sendRequests.map(\.text) == ["First message"])
+    }
+
+    /// Right after a pairing or during a directory catch-up sending can be
+    /// briefly disallowed; the new chat's first message waits it out.
+    @Test func firstMessageWaitsWhileSendingIsBrieflyDisallowed() async throws {
+        let service = DirectoryFixtureService()
+        service.pages[.tasks] = [directoryPage(.tasks)]
+        service.pages[.repos] = [directoryPage(.repos)]
+        let clock = ManualGianClock(instant: PreviewFixtures.instant)
+        let store = GianClientStore(service: service, clock: clock)
+        _ = try await signIn(store, clock: clock)
+        service.onCreated = { _ in store.state.connection = .resyncing }
+        var waits = 0
+        store.firstSendSettleWait = {
+            waits += 1
+            if waits == 3 { store.state.connection = .online }
+        }
+        await prepareComposer(store, text: "First message", task: false)
+        #expect((await store.dispatch(.send)).isApplied)
+        #expect(service.sendRequests.map(\.text) == ["First message"])
+        #expect(waits == 3)
+    }
+
+    /// A later message to a chat being checked is still held.
+    @Test func laterMessageWaitsForTheAccessCheck() async throws {
+        let service = DirectoryFixtureService()
+        service.pages[.tasks] = [directoryPage(.tasks)]
+        service.pages[.repos] = [directoryPage(.repos)]
+        let clock = ManualGianClock(instant: PreviewFixtures.instant)
+        let store = GianClientStore(service: service, clock: clock)
+        _ = try await signIn(store, clock: clock)
+        service.onCreated = { id in store.pendingSessionAccess[id] = 1 }
+        await prepareComposer(store, text: "First message", task: false)
+        _ = await store.dispatch(.send)
+        _ = await store.dispatch(.editDraftText("Second message"))
+        #expect(!store.mutationsReady, "Send stays disabled until the check clears")
+        #expect(await store.dispatch(.send) == .rejected(.mutationsDisabled))
+        #expect(service.sendRequests.map(\.text) == ["First message"])
+        #expect(store.state.composer.draft.text == "Second message")
+    }
+
     @Test func unknownFirstSendDoesNotPromoteEmptyCreatedSession() async throws {
         let service = DirectoryFixtureService()
         service.createWithoutActivity = true
