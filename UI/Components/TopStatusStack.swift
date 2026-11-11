@@ -133,6 +133,48 @@ struct ConversationStatusView: View {
     }
 }
 
+/// The chat title's status: the current state, or for a moment after a sync
+/// finishes, a "Synced" mark that fades away. Nothing otherwise.
+struct ConversationTitleStatus: View {
+    let status: ConversationStatusPresentation?
+    var onRetryConnection: () -> Void
+    var onRetryMessages: () -> Void
+    @State private var showsSynced = false
+
+    var body: some View {
+        // A ZStack, not a Group: it stays in place (so the change handlers run)
+        // even while it shows nothing.
+        ZStack {
+            if let status {
+                ConversationStatusView(status: status, onRetryConnection: onRetryConnection,
+                                       onRetryMessages: onRetryMessages)
+                    .padding(.leading, 6)
+                    .transition(.opacity)
+            } else if showsSynced {
+                Label("Synced", systemImage: "checkmark.circle")
+                    .font(GianTheme.Typography.caption)
+                    .foregroundStyle(GianTheme.Colors.secondaryLabel)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.leading, 6)
+                    .transition(.opacity)
+                    .accessibilityLabel("Messages are up to date")
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: status)
+        .animation(.easeInOut(duration: 0.3), value: showsSynced)
+        .onChange(of: status) { old, new in
+            // Only a sync that just finished earns the mark.
+            showsSynced = new == nil && old?.isActivity == true
+        }
+        .task(id: showsSynced) {
+            guard showsSynced else { return }
+            try? await Task.sleep(for: .seconds(1.5))
+            showsSynced = false
+        }
+    }
+}
+
 /// Sanitized transient diagnostic from the service (closed connection,
 /// resync). Never raw error text, URLs or payloads.
 struct DiagnosticBar: View {

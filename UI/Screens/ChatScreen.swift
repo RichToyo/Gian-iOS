@@ -97,17 +97,15 @@ struct ChatScreen: View {
                     diagnostic: diagnostic,
                     transcriptSync: conversation.transcriptSync
                 )
-                HStack(spacing: 6) {
+                HStack(spacing: 0) {
                     HostScopedTitle(title: conversation.title, host: nil)
                         .accessibilityIdentifier("conversation-title")
                         .layoutPriority(1)
-                    if let status {
-                        ConversationStatusView(status: status, onRetryConnection: onRetrySynchronization,
-                                               onRetryMessages: onRetryTranscriptSync)
-                            .transition(.opacity)
-                    }
+                    ConversationTitleStatus(status: status, onRetryConnection: onRetrySynchronization,
+                                            onRetryMessages: onRetryTranscriptSync)
+                        // A different conversation starts without the last one's mark.
+                        .id(conversation.id)
                 }
-                .animation(.easeInOut(duration: 0.2), value: status)
             }
             GlobalToolbarActions(atBottom: globalActionsAtBottom, onNewChat: onOpenNewChat, onSettings: onOpenSettings)
         }
