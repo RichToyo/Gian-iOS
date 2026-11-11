@@ -62,6 +62,39 @@ enum AgentLogoArt {
         return image
     }
 
+    private static let avatars = NSCache<NSString, UIImage>()
+
+    /// The logo drawn once at its display size with its rounded corners: a
+    /// list of rows then neither scales a large image nor clips it each frame.
+    static func avatar(for logo: AgentLogo, in hostLogos: [String: AgentLogoImages], scheme: ColorScheme,
+                       side: CGFloat, scale: CGFloat) -> UIImage? {
+        let source: String
+        if let fetched = hostLogos[logo.pluginID],
+           let data = scheme == .dark ? fetched.dark ?? fetched.light : fetched.light ?? fetched.dark {
+            source = "host|\(logo.pluginID)|\(data.count)|\(data.hashValue)"
+        } else if let asset = logo.assetName {
+            source = "asset|\(asset)"
+        } else {
+            return nil
+        }
+        let key = "\(source)|\(scheme == .dark ? "dark" : "light")|\(side)|\(scale)" as NSString
+        if let cached = avatars.object(forKey: key) { return cached }
+        guard let image = image(for: logo, in: hostLogos, scheme: scheme),
+              image.size.width > 0, image.size.height > 0 else { return nil }
+        let bounds = CGRect(x: 0, y: 0, width: side, height: side)
+        let format = UIGraphicsImageRendererFormat(for: traits(scheme))
+        format.scale = scale
+        let rendered = UIGraphicsImageRenderer(bounds: bounds, format: format).image { _ in
+            UIBezierPath(roundedRect: bounds, cornerRadius: side * 0.24).addClip()
+            let fit = min(side / image.size.width, side / image.size.height)
+            let size = CGSize(width: image.size.width * fit, height: image.size.height * fit)
+            image.draw(in: CGRect(x: (side - size.width) / 2, y: (side - size.height) / 2,
+                                  width: size.width, height: size.height))
+        }
+        avatars.setObject(rendered, forKey: key)
+        return rendered
+    }
+
     private static func traits(_ scheme: ColorScheme) -> UITraitCollection {
         UITraitCollection(userInterfaceStyle: scheme == .dark ? .dark : .light)
     }
@@ -72,18 +105,18 @@ enum AgentLogoArt {
 struct AgentAvatar: View {
     @Environment(\.agentLogoImages) private var hostLogos
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.displayScale) private var displayScale
     let logo: AgentLogo
     var name: String = "Agent"
     var size: CGFloat = GianTheme.Metrics.avatarMedium
 
     var body: some View {
         Group {
-            if let image = AgentLogoArt.image(for: logo, in: hostLogos, scheme: colorScheme) {
+            if let image = AgentLogoArt.avatar(for: logo, in: hostLogos, scheme: colorScheme,
+                                               side: size, scale: displayScale) {
                 Image(uiImage: image)
                     .resizable()
-                    .scaledToFit()
                     .frame(width: size, height: size)
-                    .clipShape(RoundedRectangle(cornerRadius: size * 0.24, style: .continuous))
             } else {
                 Text(AgentLogoArt.initial(of: name))
                     .font(.system(size: size * 0.5, weight: .bold))
