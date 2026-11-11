@@ -129,7 +129,7 @@ struct DirectoryListMenu: View {
                 header: "Group by",
                 rows: [
                     ChoiceListRow(id: "tasks", title: "Tasks", systemImage: "checklist", isSelected: selection == .tasks) { selection = .tasks },
-                    ChoiceListRow(id: "repos", title: "Repositories", systemImage: "folder", isSelected: selection == .repos) { selection = .repos },
+                    ChoiceListRow(id: "repos", title: "Repos", systemImage: "folder", isSelected: selection == .repos) { selection = .repos },
                 ],
                 additionalHeader: "Time filter",
                 additionalRows: [
