@@ -45,6 +45,9 @@ final class AppPresentation {
 
     @ObservationIgnored private var rowsInput: StoreProjection.TranscriptRowsInput?
     @ObservationIgnored private var rows: [TranscriptRow] = []
+    /// New transcript content is revealed a step at a time (see TranscriptPacing).
+    @ObservationIgnored private var pacing = TranscriptPacing()
+    @ObservationIgnored private var pacingStep: Task<Void, Never>?
     @ObservationIgnored private var directoryInput: DirectoryInput?
     /// The chat title's status inputs as shown, and newer ones while they settle.
     @ObservationIgnored private var shownStatus = ConversationStatusInputs.quiet
@@ -101,13 +104,21 @@ final class AppPresentation {
         assign(\.hosts, StoreProjection.hosts(state))
         assign(\.directory, projectedDirectory(state))
         assign(\.navigation, state.navigation)
+        var transcriptWaits = false
         var conversation = StoreProjection.activeConversation(state) { input in
-            if input != rowsInput {
-                rows = StoreProjection.transcriptRows(input)
-                rowsInput = input
+            var shown = input
+            if let session = state.conversation?.session.id {
+                let visible = pacing.visible(input.items, session: session, interactions: input.interactions)
+                transcriptWaits = visible.waiting
+                shown = input.showing(visible.items)
+            }
+            if shown != rowsInput {
+                rows = StoreProjection.transcriptRows(shown)
+                rowsInput = shown
             }
             return rows
         }
+        if transcriptWaits { scheduleRevealStep(store) } else { pacingStep?.cancel(); pacingStep = nil }
         let status = ConversationStatusInputs(session: conversation?.id, connectivity: ConnectivityPresentation(state.connection),
             diagnostic: StoreProjection.diagnostic(store.serviceDiagnostic), transcriptSync: conversation?.transcriptSync ?? .idle)
         if state.foreground == .foreground { settleStatus(status) } else {
@@ -146,6 +157,19 @@ final class AppPresentation {
         assign(\.logoTrigger, AgentLogoTrigger(store))
         assign(\.optionsTrigger, AgentOptionsTrigger(store))
         assign(\.restorationHint, RestorationHintSelection(state))
+    }
+
+    /// Reveals the next step of the transcript after the pacing interval. Steps
+    /// keep coming while anything is waiting.
+    private func scheduleRevealStep(_ store: GianClientStore) {
+        guard pacingStep == nil else { return }
+        pacingStep = Task { [weak self, weak store] in
+            try? await Task.sleep(for: TranscriptPacing.interval)
+            guard let self, let store, !Task.isCancelled else { return }
+            self.pacingStep = nil
+            if let items = store.state.conversation?.items { self.pacing.advance(items) }
+            self.sync(store)
+        }
     }
 
     /// The chat title shows a status change once it has lasted

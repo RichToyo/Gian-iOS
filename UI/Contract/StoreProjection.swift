@@ -662,6 +662,12 @@ enum StoreProjection {
         let agentName: String
         let isTurnActive: Bool
         let day: Date
+
+        /// The same input showing `items` instead (what pacing has revealed).
+        func showing(_ items: [TranscriptItem]) -> TranscriptRowsInput {
+            TranscriptRowsInput(items: items, interactions: interactions, translation: translation, agent: agent,
+                                agentName: agentName, isTurnActive: isTurnActive, day: day)
+        }
     }
 
     static func transcriptRows(_ input: TranscriptRowsInput, now: Date = Date()) -> [TranscriptRow] {
