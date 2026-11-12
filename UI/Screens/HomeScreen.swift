@@ -36,7 +36,7 @@ struct HomeScreen: View {
     var canLoad: Bool = true
 
     @Environment(\.globalActionsAtBottom) private var globalActionsAtBottom
-    @Environment(\.directoryActionsLeading) private var directoryActionsLeading
+    @Environment(\.titlesLeading) private var titlesLeading
 
     private var currentHost: HostItem? {
         hosts.first(where: \.isCurrent)
@@ -68,23 +68,19 @@ struct HomeScreen: View {
                     CurrentHostMenu(hosts: hosts, onSelect: onSelectHost, onAddHost: onAddHost, onManage: onOpenSettings)
                 }
             } else {
-                ToolbarItem(placement: .principal) {
+                ScreenTitleItem(leading: titlesLeading) {
                     CurrentHostMenu(hosts: hosts, onSelect: onSelectHost, onAddHost: onAddHost, onManage: onOpenSettings)
                 }
             }
             if !isSidebar {
                 GlobalToolbarActions(atBottom: globalActionsAtBottom, onNewChat: onOpenNewChat, onSettings: onOpenSettings)
-                if !globalActionsAtBottom && !directoryActionsLeading {
+                if !globalActionsAtBottom {
                     // Keeps the global pair and the list actions as separate groups.
                     ToolbarSpacer(.fixed, placement: .topBarTrailing)
                 }
             }
             // List actions: they operate on this conversation list.
-            if directoryActionsLeading {
-                ToolbarItemGroup(placement: .topBarLeading) { directoryActions }
-            } else {
-                ToolbarItemGroup(placement: .topBarTrailing) { directoryActions }
-            }
+            ToolbarItemGroup(placement: .topBarTrailing) { directoryActions }
         }
     }
 

@@ -62,6 +62,7 @@ struct ChatScreen: View {
     var host: HostItem? = nil
 
     @Environment(\.globalActionsAtBottom) private var globalActionsAtBottom
+    @Environment(\.titlesLeading) private var titlesLeading
     @State private var previewedAttachment: (id: AttachmentID, name: String, data: Data)?
     /// Bumped by Send and composer focus; the transcript jumps to its latest line.
     @State private var latestScrollRequest = 0
@@ -89,9 +90,9 @@ struct ChatScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         .task(id: conversation.id) { onLoadOptions() }
         .toolbar {
-            // Centered on every layout, including the Duo's vertical-bar one,
-            // where the system title sits on the leading edge.
-            ToolbarItem(placement: .principal) {
+            // Centered (also in the Duo's vertical-bar layout, where the
+            // system title would sit on the leading edge); leading when expanded.
+            ScreenTitleItem(leading: titlesLeading) {
                 let status = ConversationStatusPresentation.make(
                     connectivity: conversation.connectivity,
                     diagnostic: diagnostic,

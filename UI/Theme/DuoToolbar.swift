@@ -34,8 +34,34 @@ extension EnvironmentValues {
     /// everywhere except the expanded portrait layout, whose bars stay
     /// horizontal (set by `AdaptiveRoot`).
     @Entry var globalActionsAtBottom = true
-    /// The full-page expanded portrait directory puts list controls on the left.
-    @Entry var directoryActionsLeading = false
+    /// The expanded layouts (landscape split and portrait) put screen titles on
+    /// the leading edge; elsewhere they are centered.
+    @Entry var titlesLeading = false
+}
+
+/// A screen's title: centered, or on the leading edge in the expanded layouts
+/// (`titlesLeading`), where it reads as a title rather than a button.
+struct ScreenTitleItem<Content: View>: ToolbarContent {
+    var leading: Bool
+    @ViewBuilder var content: () -> Content
+
+    var body: some ToolbarContent {
+        if leading {
+            ToolbarItem(placement: .topBarLeading) {
+                // The bar proposes leading items little width: take the
+                // title's own, up to a cap past which it truncates.
+                content()
+                    .frame(maxWidth: 280, alignment: .leading)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+            .sharedBackgroundVisibility(.hidden)
+            // Otherwise the system title takes the center, and the space this
+            // one needs.
+            ToolbarItem(placement: .principal) { Color.clear.frame(width: 0, height: 0) }
+        } else {
+            ToolbarItem(placement: .principal) { content() }
+        }
+    }
 }
 
 /// New chat and Settings are global, so every screen's bar carries them as one

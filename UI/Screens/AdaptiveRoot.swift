@@ -257,7 +257,7 @@ struct AdaptiveRoot: View {
                 }
         }
         .environment(\.globalActionsAtBottom, !isExpandedPortrait)
-        .environment(\.directoryActionsLeading, isExpandedPortrait)
+        .environment(\.titlesLeading, isExpandedPortrait)
     }
 
     /// Expanded landscape keeps the list beside the conversation.
@@ -273,6 +273,7 @@ struct AdaptiveRoot: View {
         }
         .navigationSplitViewStyle(.balanced)
         .environment(\.globalActionsAtBottom, true)
+        .environment(\.titlesLeading, true)
     }
 
     private func home(selectedConversationID: SessionID?, isSidebar: Bool, onToggleSidebar: (() -> Void)?) -> some View {

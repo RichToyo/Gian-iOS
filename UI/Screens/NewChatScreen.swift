@@ -17,6 +17,7 @@ import GianCore
 /// call sites (AdaptiveRoot) must match it exactly.
 struct NewChatScreen: View {
     @Environment(\.globalActionsAtBottom) private var globalActionsAtBottom
+    @Environment(\.titlesLeading) private var titlesLeading
 
     let workspaces: [WorkspaceRecord]
     let agents: [AgentRecord]
@@ -79,7 +80,7 @@ struct NewChatScreen: View {
                     Button("Close", systemImage: "xmark", action: onClose)
                         .accessibilityLabel("Close")
                 }
-                ToolbarItem(placement: .principal) {
+                ScreenTitleItem(leading: titlesLeading) {
                     HostScopedTitle(title: "New chat", host: host, keepsWholeTitle: true)
                 }
                 GlobalToolbarActions(showsNewChat: false, atBottom: globalActionsAtBottom, onNewChat: {}, onSettings: onOpenSettings)

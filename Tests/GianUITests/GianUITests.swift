@@ -63,8 +63,11 @@ final class GianUITests: XCTestCase {
         let newChat = app.buttons["Start a new chat"]
         let settings = app.buttons["Settings"]
         XCTAssertTrue(search.exists && options.exists && newChat.exists && settings.exists)
-        XCTAssertLessThan(search.frame.maxX, host.frame.minX)
-        XCTAssertLessThan(options.frame.maxX, host.frame.minX)
+        // The Host title on the leading edge; list and global actions after it.
+        let width = app.windows.firstMatch.frame.width
+        XCTAssertLessThan(host.frame.minX, width / 4)
+        XCTAssertGreaterThan(search.frame.minX, host.frame.maxX)
+        XCTAssertGreaterThan(options.frame.minX, host.frame.maxX)
         XCTAssertGreaterThan(newChat.frame.minX, host.frame.maxX)
         XCTAssertGreaterThan(settings.frame.minX, host.frame.maxX)
         XCTAssertFalse(app.textFields["Message"].exists, "The directory should use the whole page")
@@ -75,6 +78,7 @@ final class GianUITests: XCTestCase {
         XCTAssertFalse(app.buttons["Show sidebar"].exists)
         let title = app.descendants(matching: .any)["conversation-title"]
         XCTAssertTrue(title.waitForExistence(timeout: 5))
+        XCTAssertLessThan(title.frame.minX, width / 4, "the title sits on the leading edge, after Back")
         XCTAssertGreaterThan(app.buttons["Start a new chat"].frame.minX, title.frame.maxX)
         XCTAssertGreaterThan(app.buttons["Settings"].frame.minX, title.frame.maxX)
         app.buttons["Back"].firstMatch.tap()
