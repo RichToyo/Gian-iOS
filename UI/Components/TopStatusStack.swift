@@ -151,9 +151,12 @@ struct ConversationTitleStatus: View {
                     .padding(.leading, 6)
                     .transition(.opacity)
             } else if showsSynced {
-                Label("Synced", systemImage: "checkmark.circle")
+                Label {
+                    Text("Synced").foregroundStyle(GianTheme.Colors.secondaryLabel)
+                } icon: {
+                    Image(systemName: "checkmark.circle").foregroundStyle(GianTheme.Colors.success)
+                }
                     .font(GianTheme.Typography.caption)
-                    .foregroundStyle(GianTheme.Colors.secondaryLabel)
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
                     .padding(.leading, 6)
