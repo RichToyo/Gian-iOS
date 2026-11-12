@@ -12,6 +12,8 @@ struct ConversationRow: View {
     var showsRepo: Bool = true
     var onSelect: () -> Void
 
+    @Environment(\.gianAccent) private var accent
+
     private var detail: String? {
         if showsRepo { return item.repoName }
         return item.lastActivity.map { RowTimestamp.text(for: $0) }
@@ -45,7 +47,8 @@ struct ConversationRow: View {
             .padding(.vertical, 10)
             .frame(minHeight: GianTheme.Metrics.minHitTarget)
             .background(
-                isSelected ? GianTheme.Colors.tint.opacity(0.14) : Color.clear,
+                // The accent's soft tint, as the user's bubbles.
+                isSelected ? accent.soft : Color.clear,
                 in: RoundedRectangle(cornerRadius: GianTheme.Metrics.cornerRadiusMedium, style: .continuous)
             )
             .contentShape(Rectangle())

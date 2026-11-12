@@ -43,6 +43,7 @@ struct ComposerView: View {
     var attachmentPicker: AttachmentPickerButton = AttachmentPickerButton(onPicked: { _, _ in })
 
     @FocusState private var isFocused: Bool
+    @Environment(\.gianAccent) private var accent
     /// What the field shows while edits travel to the store. Dispatch is
     /// async, so reading the store back mid-typing would drop keystrokes (and
     /// break an input method's marked text). Nil shows the store's draft.
@@ -182,7 +183,7 @@ struct ComposerView: View {
                 Image(systemName: "arrow.up")
                     .font(.body.weight(.bold))
             }
-            .buttonStyle(GianCircularButtonStyle())
+            .buttonStyle(GianCircularButtonStyle(tint: accent.color))
             .disabled(!sendEnabled)
             .keyboardShortcut(.return, modifiers: .command)
             .accessibilityLabel("Send")
