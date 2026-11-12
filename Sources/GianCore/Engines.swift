@@ -198,10 +198,17 @@ enum TranscriptLog {
     }
 }
 
+/// In-app notifications, queued in the order they arrive: one per
+/// conversation (its latest event replaces an earlier one), at most a few, and
+/// never for the conversation on screen or while the app is in the background.
 enum BannerReducer {
+    static let limit = 3
+    static let staleAfter: TimeInterval = 30
+
     struct Signal: Equatable {
         var sessionID: SessionID
         var title: String
+        var kind: BannerEvent
         var summary: String
     }
 
@@ -214,23 +221,54 @@ enum BannerReducer {
         mint: () -> BannerID
     ) -> [BannerItem] {
         guard foreground, signal.sessionID != currentSessionID else { return existing }
-        if let index = existing.firstIndex(where: { $0.sessionID == signal.sessionID }) {
-            var copy = existing
-            copy[index].summary = signal.summary
-            copy[index].eventCount += 1
-            copy[index].latestAt = now
-            return copy
+        let banner = BannerItem(id: mint(), sessionID: signal.sessionID, title: signal.title,
+                                kind: signal.kind, summary: signal.summary, latestAt: now)
+        // Ones still queued after a while are no longer news.
+        let current = existing.filter { $0.sessionID != signal.sessionID && now.timeIntervalSince($0.latestAt) < staleAfter }
+        return Array((current + [banner]).suffix(limit))
+    }
+}
+
+/// When a conversation's state is worth a notification. Like Gian's attention
+/// events, only changes count — a turn completing after work, the Agent
+/// starting to wait on the user, a turn failing — never a state that was
+/// already so when it was first seen, and never transcript activity.
+enum ConversationAlerts {
+    enum State: Equatable {
+        case idle, working, waiting, failed, completed
+    }
+
+    static func state(of session: SessionRecord, waitingOn pending: [InteractionRecord]) -> State {
+        if !pending.isEmpty || session.attention == .interaction || session.status == .pending { return .waiting }
+        if session.attention == .failed || session.status == .error { return .failed }
+        if session.attention == .running || session.status == .running { return .working }
+        if session.attention == .completed || session.status == .done { return .completed }
+        return .idle
+    }
+
+    /// What a change from `old` to `new` announces, if anything.
+    static func announcement(from old: State?, to new: State) -> BannerEvent? {
+        guard let old, old != new else { return nil }
+        switch new {
+        case .waiting: return .waiting
+        case .failed: return .failed
+        case .completed: return old == .working || old == .waiting ? .completed : nil
+        case .idle, .working: return nil
         }
-        return existing + [
-            BannerItem(
-                id: mint(),
-                sessionID: signal.sessionID,
-                title: signal.title,
-                summary: signal.summary,
-                eventCount: 1,
-                latestAt: now
-            ),
-        ]
+    }
+
+    /// Gian's labels for the events.
+    static func summary(_ kind: BannerEvent, waitingOn pending: [InteractionRecord]) -> String {
+        switch kind {
+        case .completed: return "Turn complete"
+        case .failed: return "Turn failed"
+        case .waiting:
+            switch pending.last?.kind {
+            case .approval: return "Approval needed"
+            case .exitPlanMode: return "Plan review needed"
+            case .question, .nativeChoice, nil: return "Answer needed"
+            }
+        }
     }
 }
 

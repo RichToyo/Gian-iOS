@@ -138,6 +138,13 @@ struct AdaptiveRoot: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // In-app notifications show over every screen, in its own surface so
+        // they re-render nothing else.
+        .overlay(alignment: .top) {
+            PresentationSurface {
+                BannerHost(banner: presentation.banner, onTap: onBannerTap, onDismiss: onBannerDismiss)
+            }
+        }
         // Not a GeometryReader: its content re-runs on every size or safe-area
         // change, so the keyboard (each frame of an interactive dismissal)
         // re-ran this whole body, every screen with it. This keeps a size only
@@ -377,8 +384,6 @@ struct AdaptiveRoot: View {
                 mutationsReady: mutationsReady,
                 diagnostic: diagnostic,
                 thumbnail: thumbnail,
-                onBannerTap: onBannerTap,
-                onBannerDismiss: onBannerDismiss,
                 onRetrySynchronization: onRetrySynchronization,
                 onRetryTranscriptSync: onRetryTranscriptSync,
                 onToggleAutomaticTranslation: onToggleAutomaticTranslation,

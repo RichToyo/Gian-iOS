@@ -461,16 +461,16 @@ struct ContractTests {
     @Test func openingBannerNavigatesToItsOwnConversation() async throws {
         let (store, _, clock) = makeHarness()
         _ = try await signIn(store, clock: clock)
-        let scope = try clientScope(store)
-        let first = makeSession(id: "banner-first", title: "First conversation", taskID: nil)
-        let second = makeSession(id: "banner-second", title: "Second conversation", taskID: nil)
+        let first = makeSession(id: "banner-first", title: "First conversation", taskID: nil, status: .running)
+        let second = makeSession(id: "banner-second", title: "Second conversation", taskID: nil, status: .running)
         store.sessions.append(contentsOf: [first, second])
+        store.reproject()
         _ = await store.dispatch(.selectConversation(PreviewFixtures.sessionID))
         _ = await store.dispatch(.editDraftText("Unsent fictional draft"))
 
         for session in [first, second] {
-            let item = transcriptItem(id: "message-\(session.id.rawValue)", turn: 1, text: session.title)
-            #expect(store.ingest(InboundEnvelope(scope: scope, event: .transcript(sessionID: session.id, item: item))).isApplied)
+            var done = session; done.status = .done
+            try applyEvent(store, .session(done))
         }
         let firstBanner = try #require(store.state.banners.first { $0.sessionID == first.id })
         #expect((await store.dispatch(.openBanner(firstBanner.id))).isApplied)
@@ -482,56 +482,75 @@ struct ContractTests {
         #expect(store.state.composer.draft.text == "Unsent fictional draft")
     }
 
-    @Test func bannersAreForegroundCrossChatAndCoalesced() async throws {
+    @Test func conversationsNotifyWhenTheyCompleteWaitOrFail() async throws {
         let (store, _, clock) = makeHarness()
         _ = try await signIn(store, clock: clock)
+        let running = makeSession(id: "notify-running", title: "Running chat", taskID: nil, status: .running)
+        let other = makeSession(id: "notify-other", title: "Other chat", taskID: nil, status: .running)
+        store.sessions.append(contentsOf: [running, other])
+        store.reproject()
+        #expect((await store.dispatch(.openNewChat)).isApplied)
+        #expect(store.state.banners.isEmpty, "states already so when first seen are not news")
+
+        // Transcript activity never notifies.
         let scope = try clientScope(store)
-        let missing = PreviewFixtures.id("session-missing", SessionID.self)
-        let unknown = store.ingest(InboundEnvelope(
-            scope: scope,
-            event: .transcript(sessionID: missing, item: transcriptItem(id: "item-missing", turn: 4, text: "Missing"))
-        ))
-        #expect(unknown == .rejected(.notFound))
+        #expect(store.ingest(InboundEnvelope(scope: scope, event: .transcript(
+            sessionID: running.id, item: transcriptItem(id: "activity", turn: 3, text: "Working on it"))) ).isApplied)
         #expect(store.state.banners.isEmpty)
 
-        #expect((await store.dispatch(.openNewChat)).isApplied)
-        let first = transcriptItem(id: "item-banner-1", turn: 8, text: "Line check")
-        let firstEvent = InboundEvent.transcript(sessionID: PreviewFixtures.sessionID, item: first)
-        #expect(store.ingest(InboundEnvelope(scope: scope, event: firstEvent)).isApplied)
-        #expect(store.state.banners.count == 1)
-        #expect(store.state.banners[0].eventCount == 1)
-        let bannerID = store.state.banners[0].id
-        #expect(store.ingest(InboundEnvelope(scope: scope, event: firstEvent)).isApplied)
-        #expect(store.state.banners[0].eventCount == 1)
-        let second = transcriptItem(id: "item-banner-2", turn: 9, text: "Second line")
-        #expect(store.ingest(InboundEnvelope(
-            scope: scope,
-            event: .transcript(sessionID: PreviewFixtures.sessionID, item: second)
-        )).isApplied)
-        #expect(store.state.banners.count == 1)
-        #expect(store.state.banners[0].id == bannerID)
-        #expect(store.state.banners[0].eventCount == 2)
+        // The Agent waits on the user: an approval.
+        let approval = InteractionRecord(
+            id: PreviewFixtures.id("approval-1", InteractionID.self), revision: "1", sessionID: running.id,
+            turnID: PreviewFixtures.id("turn-3", TurnID.self), kind: .approval, title: "Run tests?", detail: "",
+            risk: .low, actions: [], phase: .pending)
+        try applyEvent(store, .interaction(approval))
+        #expect(store.state.banners.map(\.kind) == [.waiting])
+        #expect(store.state.banners.first?.summary == "Approval needed")
+        #expect(store.state.banners.first?.title == "Running chat")
 
-        #expect((await store.dispatch(.selectConversation(PreviewFixtures.sessionID))).isApplied)
-        let current = transcriptItem(id: "item-banner-3", turn: 10, text: "Already here")
-        #expect(store.ingest(InboundEnvelope(
-            scope: scope,
-            event: .transcript(sessionID: PreviewFixtures.sessionID, item: current)
-        )).isApplied)
-        #expect(store.state.banners.count == 1)
-        #expect(store.state.banners[0].eventCount == 2)
+        // Answered elsewhere: the waiting notification is withdrawn.
+        var answered = approval; answered.phase = .resolvedElsewhere
+        try applyEvent(store, .interaction(answered))
+        #expect(store.state.banners.isEmpty)
 
+        // The turn completes; the conversation's newest event replaces its earlier one.
+        var done = running; done.status = .done
+        try applyEvent(store, .session(done))
+        #expect(store.state.banners.map(\.kind) == [.completed])
+        #expect(store.state.banners.first?.summary == "Turn complete")
+        try applyEvent(store, .attention(sessionID: running.id, kind: .failed))
+        #expect(store.state.banners.map(\.kind) == [.failed])
+        #expect(store.state.banners.first?.summary == "Turn failed")
+
+        // Another conversation queues after it.
+        try applyEvent(store, .attention(sessionID: other.id, kind: .interaction))
+        #expect(store.state.banners.map(\.sessionID) == [running.id, other.id])
+
+        // Never for the conversation on screen, nor in the background.
+        _ = await store.dispatch(.selectConversation(other.id))
+        #expect(!store.state.banners.contains { $0.sessionID == other.id }, "opening a conversation clears its own")
+        try applyEvent(store, .attention(sessionID: other.id, kind: .failed))
+        #expect(!store.state.banners.contains { $0.sessionID == other.id })
         #expect((await store.dispatch(.openNewChat)).isApplied)
         #expect((await store.dispatch(.setForeground(.background))).isApplied)
-        let background = transcriptItem(id: "item-banner-4", turn: 11, text: "Background")
-        #expect(store.ingest(InboundEnvelope(
-            scope: scope,
-            event: .transcript(sessionID: PreviewFixtures.sessionID, item: background)
-        )).isApplied)
-        #expect(store.state.banners.count == 1)
-        #expect(store.state.banners[0].eventCount == 2)
-        let stored = store.memory.bundle(for: try dataScope(store)).transcripts[PreviewFixtures.sessionID] ?? []
-        #expect(stored.contains { $0.id == background.id })
+        try applyEvent(store, .attention(sessionID: other.id, kind: .running))
+        try applyEvent(store, .attention(sessionID: other.id, kind: .completed))
+        #expect(!store.state.banners.contains { $0.sessionID == other.id })
+    }
+
+    @Test func completingWithoutHavingWorkedIsNotNews() {
+        #expect(ConversationAlerts.announcement(from: .working, to: .completed) == .completed)
+        #expect(ConversationAlerts.announcement(from: .waiting, to: .completed) == .completed)
+        #expect(ConversationAlerts.announcement(from: .idle, to: .completed) == nil)
+        #expect(ConversationAlerts.announcement(from: nil, to: .waiting) == nil)
+        #expect(ConversationAlerts.announcement(from: .completed, to: .working) == nil)
+        #expect(ConversationAlerts.announcement(from: .working, to: .failed) == .failed)
+    }
+
+    private func applyEvent(_ store: GianClientStore, _ body: CanonicalBody) throws {
+        let cursor = try #require(store.state.sync.cursor)
+        #expect(store.ingest(InboundEnvelope(scope: try clientScope(store), event: .canonical(
+            sequence: cursor.eventSequence + 1, generation: cursor.hostGeneration, body: body))).isApplied)
     }
 
     @Test func attachmentsKeepIntegrityAndDraftBytes() async throws {

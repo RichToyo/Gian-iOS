@@ -22,6 +22,8 @@ public final class GianClientStore {
     @ObservationIgnored let ids: any GianIDGenerating
     @ObservationIgnored let memory: ScopedMemory
     @ObservationIgnored var storageLoadFailed = false
+    /// Each conversation's state as last seen, so only live changes are announced.
+    @ObservationIgnored var alertStates: [SessionID: ConversationAlerts.State] = [:]
     @ObservationIgnored var storageWritesBlocked = false
     @ObservationIgnored var navigationEpoch = 0
     @ObservationIgnored var refreshSequence = 0
@@ -497,7 +499,42 @@ public final class GianClientStore {
         else { state.composer.notice = .none }
     }
 
+    /// Announces what live updates changed (see `ConversationAlerts`), and
+    /// withdraws a waiting notification once its conversation stops waiting.
+    /// Called by canonical events and state patches before they reproject;
+    /// everything else (snapshots, pages, restores) only moves the baseline.
+    func announceStateChanges() {
+        let pending = Dictionary(grouping: state.interactions.filter { $0.phase == .pending }, by: \.sessionID)
+        let current = alertStatesNow(pending: pending)
+        for session in sessions where session.authorized && !session.archived {
+            guard let next = current[session.id],
+                  let kind = ConversationAlerts.announcement(from: alertStates[session.id], to: next) else { continue }
+            let waitingOn = pending[session.id] ?? []
+            state.banners = BannerReducer.reduce(
+                existing: state.banners,
+                signal: BannerReducer.Signal(sessionID: session.id, title: session.title, kind: kind,
+                                             summary: ConversationAlerts.summary(kind, waitingOn: waitingOn)),
+                currentSessionID: currentSessionID,
+                foreground: state.foreground == .foreground,
+                now: clock.now(),
+                mint: { self.mint() }
+            )
+        }
+        state.banners.removeAll { $0.kind == .waiting && current[$0.sessionID] != .waiting }
+        alertStates = current
+    }
+
+    private func alertStatesNow(pending: [SessionID: [InteractionRecord]]? = nil) -> [SessionID: ConversationAlerts.State] {
+        let pending = pending ?? Dictionary(grouping: state.interactions.filter { $0.phase == .pending }, by: \.sessionID)
+        var states: [SessionID: ConversationAlerts.State] = [:]
+        for session in sessions where session.authorized && !session.archived {
+            states[session.id] = ConversationAlerts.state(of: session, waitingOn: pending[session.id] ?? [])
+        }
+        return states
+    }
+
     func reproject() {
+        alertStates = alertStatesNow()
         let query = state.directory.searchQuery
         conversationOrder.note(sessions)
         let projection = DirectoryFilter.project(
@@ -1086,6 +1123,8 @@ public final class GianClientStore {
         if temporarySearchResultID != id { temporarySearchResultID = nil }
         navigationEpoch += 1
         state.navigation.destination = .conversation(id)
+        // Its notifications are about what is now on screen.
+        state.banners.removeAll { $0.sessionID == id }
         reproject()
         state.navigation.settingsOpen = false
         loadDraft(for: .conversation(id))

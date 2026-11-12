@@ -346,8 +346,8 @@ struct BannerPresentation: Equatable, Identifiable, Sendable {
     var sessionID: SessionID
     var agent: AgentLogo
     var title: String
+    var kind: BannerEvent
     var summary: String
-    var eventCount: Int
 }
 
 // MARK: - Diagnostics (sanitized, never raw error text)
@@ -484,7 +484,6 @@ struct ActiveConversationPresentation: Equatable, Sendable {
     var rows: [TranscriptRow]
     var hasOlderPages: Bool
     var connectivity: ConnectivityPresentation
-    var banner: BannerPresentation?
     var translation: SessionTranslationPresentation?
     var isTurnActive: Bool
     var transcriptSync: TranscriptSyncState = .idle

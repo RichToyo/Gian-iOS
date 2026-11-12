@@ -1,89 +1,114 @@
 import SwiftUI
 import GianCore
 
-/// Transient cross-conversation banner. Tap dispatches `.openBanner` (the
-/// store navigates and preserves drafts/scroll); dismiss dispatches
-/// `.dismissBanner` and keeps the user in place.
+/// An in-app notification about another conversation, as Gian's attention
+/// events: a turn completed, the Agent waits on the user, a turn failed. Tap
+/// opens the conversation (`.openBanner`, which keeps drafts and scroll); a
+/// swipe up dismisses it (`.dismissBanner`, staying in place); untouched, it
+/// leaves on its own after a few seconds.
 struct TransientBanner: View {
     let banner: BannerPresentation
     var onTap: () -> Void
     var onDismiss: () -> Void
 
+    /// How long an untouched banner stays.
+    static let lifetime: Duration = .seconds(5)
+
+    @State private var drag: CGFloat = 0
+    @State private var isHeld = false
+
     var body: some View {
-        Button(action: onTap) {
-            HStack(spacing: GianTheme.Metrics.paddingMedium) {
-                AgentAvatar(logo: banner.agent, name: banner.title, size: GianTheme.Metrics.avatarMedium)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(banner.title)
-                        .font(GianTheme.Typography.title)
-                        .foregroundStyle(GianTheme.Colors.label)
-                        .lineLimit(1)
-                    Text(banner.summary)
-                        .font(GianTheme.Typography.caption)
-                        .foregroundStyle(GianTheme.Colors.secondaryLabel)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.body.weight(.semibold))
+        HStack(spacing: GianTheme.Metrics.paddingMedium) {
+            AgentAvatar(logo: banner.agent, name: banner.title, size: GianTheme.Metrics.avatarMedium)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(banner.title)
+                    .font(GianTheme.Typography.title)
+                    .foregroundStyle(GianTheme.Colors.label)
+                    .lineLimit(1)
+                Text(banner.summary)
+                    .font(GianTheme.Typography.caption)
                     .foregroundStyle(GianTheme.Colors.secondaryLabel)
+                    .lineLimit(1)
             }
-            .padding(.leading, GianTheme.Metrics.paddingMedium)
-            .padding(.trailing, 44)
-            .padding(.vertical, GianTheme.Metrics.paddingSmall)
-            .contentShape(Rectangle())
+            Spacer(minLength: 0)
+            // The list's status glyph for the same state.
+            if let status = statusIcon { status }
         }
-        .buttonStyle(.plain)
-        .overlay(alignment: .topTrailing) {
-            Button(action: onDismiss) {
-                Image(systemName: "xmark")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(GianTheme.Colors.secondaryLabel)
-                    .gianHitTarget()
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Dismiss notification")
-        }
+        .padding(.horizontal, GianTheme.Metrics.paddingMedium)
+        .padding(.vertical, GianTheme.Metrics.paddingSmall + 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            GianTheme.Colors.card,
-            in: RoundedRectangle(
-                cornerRadius: GianTheme.Metrics.cornerRadiusLarge,
-                style: .continuous
-            )
+            RoundedRectangle(cornerRadius: GianTheme.Metrics.cornerRadiusLarge, style: .continuous)
+                .fill(GianTheme.Colors.card)
+                .shadow(color: .black.opacity(0.14), radius: 14, y: 5)
         )
         .overlay(
-            RoundedRectangle(
-                cornerRadius: GianTheme.Metrics.cornerRadiusLarge,
-                style: .continuous
-            )
-            .stroke(GianTheme.Colors.separator, lineWidth: 0.5)
+            RoundedRectangle(cornerRadius: GianTheme.Metrics.cornerRadiusLarge, style: .continuous)
+                .stroke(GianTheme.Colors.separator, lineWidth: 0.5)
         )
-        .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
+        .contentShape(RoundedRectangle(cornerRadius: GianTheme.Metrics.cornerRadiusLarge, style: .continuous))
+        // Follows a finger up; resists one pulling down.
+        .offset(y: drag < 0 ? drag : drag / 4)
+        .gesture(
+            DragGesture(minimumDistance: 6)
+                .onChanged { value in
+                    isHeld = true
+                    drag = value.translation.height
+                }
+                .onEnded { value in
+                    isHeld = false
+                    if value.translation.height < -24 || value.predictedEndTranslation.height < -80 {
+                        onDismiss()
+                    } else {
+                        withAnimation(.spring(duration: 0.3)) { drag = 0 }
+                    }
+                }
+        )
+        .onTapGesture(perform: onTap)
+        .task(id: banner.id) {
+            do { try await Task.sleep(for: Self.lifetime) } catch { return }
+            // Not while a finger holds it.
+            while isHeld {
+                do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
+            }
+            onDismiss()
+        }
         .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
         .accessibilityIdentifier("transient-banner")
         .accessibilityHint("Opens the conversation")
+        .accessibilityAction(named: "Dismiss", onDismiss)
+    }
+
+    private var statusIcon: SessionStatusIcon? {
+        switch banner.kind {
+        case .completed: SessionStatusIcon(badge: .idle, unread: true)
+        case .waiting: SessionStatusIcon(badge: .waiting, unread: true)
+        case .failed: SessionStatusIcon(badge: .failed, unread: true)
+        }
     }
 }
 
-/// Cross-conversation events remain transient; connection state lives in the title.
-struct TopStatusStack: View {
+/// The in-app notification, shown over every screen (one at a time; the
+/// next queued one follows when it leaves).
+struct BannerHost: View {
     var banner: BannerPresentation?
-    var onBannerTap: () -> Void = {}
-    var onBannerDismiss: () -> Void = {}
+    var onTap: (BannerID) -> Void
+    var onDismiss: (BannerID) -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        VStack(spacing: GianTheme.Metrics.paddingSmall) {
+        VStack(spacing: 0) {
             if let banner {
-                TransientBanner(
-                    banner: banner,
-                    onTap: onBannerTap,
-                    onDismiss: onBannerDismiss
-                )
-                .transition(.move(edge: .top).combined(with: .opacity))
+                TransientBanner(banner: banner, onTap: { onTap(banner.id) }, onDismiss: { onDismiss(banner.id) })
+                    .id(banner.id)
+                    .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
             }
         }
-        .animation(.spring(duration: 0.3), value: banner)
+        .frame(maxWidth: GianTheme.Metrics.readableWidth)
         .padding(.horizontal, GianTheme.Metrics.paddingMedium)
+        .padding(.top, GianTheme.Metrics.paddingSmall)
+        .animation(.spring(duration: 0.35), value: banner?.id)
     }
 }
 
@@ -218,17 +243,18 @@ struct DiagnosticBar: View {
     }
 }
 
-#Preview("Top status stack") {
+#Preview("Banner") {
     VStack(spacing: 24) {
-        TopStatusStack(
+        BannerHost(
             banner: BannerPresentation(
                 id: BannerID(rawValue: "b1")!,
                 sessionID: SessionID(rawValue: "c9")!,
                 agent: .kimi,
                 title: "iOS client design board",
-                summary: "Task completed",
-                eventCount: 2
-            )
+                kind: .completed,
+                summary: "Turn complete"
+            ),
+            onTap: { _ in }, onDismiss: { _ in }
         )
         ConversationStatusView(status: .make(connectivity: .offlineHistory, diagnostic: .none, transcriptSync: .idle)!,
                                onRetryConnection: {}, onRetryMessages: {})

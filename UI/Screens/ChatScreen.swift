@@ -1,11 +1,11 @@
 import SwiftUI
 import GianCore
 
-/// Main chat screen. The bar centers the conversation title over the current
-/// conversation, with Back on compact screens. Translation lives
-/// in the composer's ⋯ menu. Banner and connectivity share the non-colliding
-/// TopStatusStack. All edits and operations dispatch typed `GianClientAction`s
-/// via closures.
+/// Main chat screen. The bar shows the conversation title (centered, or on the
+/// leading edge when expanded) with its connection status, and Back on compact
+/// screens. Translation lives in the composer's ⋯ menu; in-app notifications
+/// show over every screen (`BannerHost`). All edits and operations dispatch
+/// typed `GianClientAction`s via closures.
 struct ChatScreen: View {
     let conversation: ActiveConversationPresentation
     /// Read inside the composer's own surface, so typing doesn't re-render
@@ -19,8 +19,6 @@ struct ChatScreen: View {
     /// UI-local thumbnails captured at attachment pick time.
     var thumbnail: (AttachmentID) -> Image? = { _ in nil }
 
-    var onBannerTap: (BannerID) -> Void = { _ in }
-    var onBannerDismiss: (BannerID) -> Void = { _ in }
     var onRetrySynchronization: () -> Void = {}
     var onRetryTranscriptSync: () -> Void = {}
     var onToggleAutomaticTranslation: (Bool) -> Void = { _ in }
@@ -69,19 +67,6 @@ struct ChatScreen: View {
 
     var body: some View {
         TranscriptScroller(chat: self, latestScrollRequest: latestScrollRequest)
-        .overlay(alignment: .top) {
-            TopStatusStack(
-                banner: conversation.banner,
-                onBannerTap: {
-                    if let banner = conversation.banner { onBannerTap(banner.id) }
-                },
-                onBannerDismiss: {
-                    if let banner = conversation.banner { onBannerDismiss(banner.id) }
-                }
-            )
-            .frame(maxWidth: GianTheme.Metrics.readableWidth)
-            .padding(.top, GianTheme.Metrics.paddingSmall)
-        }
         .safeAreaBar(edge: .bottom) {
             PresentationSurface { composerArea }
         }

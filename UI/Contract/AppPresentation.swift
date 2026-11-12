@@ -41,6 +41,8 @@ final class AppPresentation {
     /// from inside message views, which would make each of them re-render on
     /// every store change (each streamed chunk).
     private(set) var attachments: [AttachmentID: AttachmentFacts] = [:]
+    /// The in-app notification shown over every screen.
+    private(set) var banner: BannerPresentation?
 
     struct AttachmentFacts: Equatable {
         var presentation: AttachmentFilePresentation
@@ -211,6 +213,7 @@ final class AppPresentation {
         assign(\.logoTrigger, AgentLogoTrigger(store))
         assign(\.optionsTrigger, AgentOptionsTrigger(store))
         assign(\.restorationHint, RestorationHintSelection(state))
+        assign(\.banner, StoreProjection.banner(state))
     }
 
     /// Reveals the next step of the transcript after the pacing interval. Steps

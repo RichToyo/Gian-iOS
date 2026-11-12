@@ -347,6 +347,7 @@ extension GianClientStore {
             }
             cursor.eventSequence = sequence
             state.sync.cursor = cursor
+            announceStateChanges()
             reproject()
             schedulePersistence()
             return .applied
@@ -463,6 +464,7 @@ extension GianClientStore {
         }
         cursor.eventSequence = sequence; cursor.revision = revision
         state.sync.cursor = cursor
+        announceStateChanges()
         reproject()
         if negotiatedDirectory && !patch.removedSessions.isEmpty { return persistenceResult() }
         schedulePersistence()
@@ -521,20 +523,8 @@ extension GianClientStore {
             if state.conversation?.session.id == sessionID { state.conversation?.session = active }
             reproject()
         }
-        let summary: String
-        switch item.body {
-        case .user(let text, _, _, _): summary = text
-        case .assistant(let text, _): summary = text
-        default: summary = "Activity"
-        }
-        state.banners = BannerReducer.reduce(
-            existing: state.banners,
-            signal: BannerReducer.Signal(sessionID: sessionID, title: session.title, summary: summary),
-            currentSessionID: currentSessionID,
-            foreground: state.foreground == .foreground,
-            now: clock.now(),
-            mint: { self.mint() }
-        )
+        // Transcript activity never notifies: a conversation's state changes do
+        // (see `announceStateChanges`).
         schedulePersistence()
         return .applied
     }

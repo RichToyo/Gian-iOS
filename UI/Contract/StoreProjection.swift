@@ -245,23 +245,18 @@ enum StoreProjection {
 
     // MARK: - Banner
 
-    /// Latest transient cross-conversation banner. Same-conversation and
-    /// background events never banner — the store's BannerReducer owns that.
+    /// The in-app notification to show: the oldest still queued (they show
+    /// one at a time, in the order they arrived). The store owns which
+    /// changes notify (see `ConversationAlerts`).
     static func banner(_ state: GianClientState) -> BannerPresentation? {
-        guard let latest = state.banners.max(by: { $0.latestAt < $1.latestAt }) else { return nil }
+        guard let next = state.banners.first else { return nil }
         let summaries = state.directory.tasks.flatMap(\.conversations)
             + state.directory.repos
             + state.directory.searchResults
-        let match = summaries.first { $0.id == latest.sessionID }
+        let match = summaries.first { $0.id == next.sessionID }
         let agent = match.map { AgentLogo(pluginID: $0.pluginID, agentName: $0.agentName) } ?? .other
-        return BannerPresentation(
-            id: latest.id,
-            sessionID: latest.sessionID,
-            agent: agent,
-            title: latest.title,
-            summary: latest.eventCount > 1 ? "\(latest.summary) · \(latest.eventCount) events" : latest.summary,
-            eventCount: latest.eventCount
-        )
+        return BannerPresentation(id: next.id, sessionID: next.sessionID, agent: agent,
+                                  title: next.title, kind: next.kind, summary: next.summary)
     }
 
     // MARK: - Translation (session level)
@@ -757,7 +752,6 @@ enum StoreProjection {
             rows: transcriptRows,
             hasOlderPages: conversation.hasOlder,
             connectivity: ConnectivityPresentation(state.connection),
-            banner: banner(state),
             translation: translationPresentation,
             isTurnActive: isTurnActive,
             transcriptSync: conversation.transcriptSync,

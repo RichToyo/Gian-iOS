@@ -754,26 +754,29 @@ final class StoreProjectionTests: XCTestCase {
 
     // MARK: - Banner
 
-    func testBannerPicksLatestAndShowsCoalescedCount() {
+    func testBannerShowsTheOldestQueuedWithItsAgentAndEvent() {
         var state = GianClientState.signedOut()
         let sessionID = id("session-1", SessionID.self)
         state.directory.repos = [summary("session-1", repo: "gian-dev", activity: now)]
         state.banners = [
             BannerItem(
                 id: id("b1", BannerID.self), sessionID: sessionID,
-                title: "Fix login redirect", summary: "Task completed",
-                eventCount: 3, latestAt: now
+                title: "Fix login redirect", kind: .waiting, summary: "Approval needed",
+                latestAt: now.addingTimeInterval(-2)
             ),
             BannerItem(
                 id: id("b2", BannerID.self), sessionID: id("session-2", SessionID.self),
-                title: "Older", summary: "Older event",
-                eventCount: 1, latestAt: now.addingTimeInterval(-60)
+                title: "Newer", kind: .completed, summary: "Turn complete",
+                latestAt: now
             ),
         ]
         let banner = StoreProjection.banner(state)
-        XCTAssertEqual(banner?.id, id("b1", BannerID.self))
+        XCTAssertEqual(banner?.id, id("b1", BannerID.self), "one at a time, in the order they arrived")
         XCTAssertEqual(banner?.agent.bundled, .claude)
-        XCTAssertEqual(banner?.summary, "Task completed · 3 events")
+        XCTAssertEqual(banner?.kind, .waiting)
+        XCTAssertEqual(banner?.summary, "Approval needed")
+        state.banners.removeFirst()
+        XCTAssertEqual(StoreProjection.banner(state)?.id, id("b2", BannerID.self))
     }
 
     // MARK: - Notices

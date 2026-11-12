@@ -174,7 +174,9 @@ final class GianUITests: XCTestCase {
 
         let banner = app.buttons["transient-banner"]
         XCTAssertTrue(banner.waitForExistence(timeout: 30))
-        XCTAssertTrue(banner.isHittable)
+        // Once it has slid in.
+        let settled = expectation(for: NSPredicate(format: "isHittable == true"), evaluatedWith: banner)
+        wait(for: [settled], timeout: 3)
         banner.coordinate(withNormalizedOffset: CGVector(dx: 0.55, dy: 0.5)).tap()
         let target = app.descendants(matching: .any).matching(identifier: "conversation-title").matching(
             NSPredicate(format: "label == %@", "Night watch")
@@ -182,7 +184,7 @@ final class GianUITests: XCTestCase {
         XCTAssertTrue(target.waitForExistence(timeout: 10), "The banner should open its own conversation. \(app.debugDescription)")
     }
 
-    func testDismissingBannerStaysInCurrentConversation() throws {
+    func testSwipingTheBannerUpDismissesItInPlace() throws {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         app.launchArguments += ["-previewScript", "fullDirectory", "-previewReady",
@@ -190,8 +192,10 @@ final class GianUITests: XCTestCase {
         app.launch()
         let banner = app.buttons["transient-banner"]
         XCTAssertTrue(banner.waitForExistence(timeout: 30))
-        app.buttons["Dismiss notification"].tap()
-        XCTAssertTrue(banner.waitForNonExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Dismiss notification"].exists, "no close button: a swipe up dismisses")
+        XCTAssertTrue(banner.label.contains("Turn complete"))
+        banner.swipeUp()
+        XCTAssertTrue(banner.waitForNonExistence(timeout: 3))
         let title = app.descendants(matching: .any).matching(identifier: "conversation-title").matching(
             NSPredicate(format: "label == %@", "Mooring notes")
         ).firstMatch

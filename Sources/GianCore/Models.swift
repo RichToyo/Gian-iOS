@@ -796,20 +796,27 @@ public enum SendPhase: Sendable, Equatable {
     }
 }
 
+/// What an in-app notification announces about a conversation (as Gian's
+/// attention events: a turn completed, the Agent waits on the user, a turn
+/// failed).
+public enum BannerEvent: String, Sendable, Equatable {
+    case completed, waiting, failed
+}
+
 public struct BannerItem: Sendable, Equatable, Identifiable {
     public var id: BannerID
     public var sessionID: SessionID
     public var title: String
+    public var kind: BannerEvent
     public var summary: String
-    public var eventCount: Int
     public var latestAt: Date
 
-    public init(id: BannerID, sessionID: SessionID, title: String, summary: String, eventCount: Int, latestAt: Date) {
+    public init(id: BannerID, sessionID: SessionID, title: String, kind: BannerEvent, summary: String, latestAt: Date) {
         self.id = id
         self.sessionID = sessionID
         self.title = title
+        self.kind = kind
         self.summary = summary
-        self.eventCount = eventCount
         self.latestAt = latestAt
     }
 }

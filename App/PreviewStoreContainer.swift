@@ -97,16 +97,19 @@ struct PreviewStoreContainer<Content: View>: View {
                     _ = store.ingest(InboundEnvelope(scope: scope, event: .transcript(sessionID: PreviewFixtures.sessionID, item: item)))
                 }
             }
-        case "chatWithBanner":
-            _ = await store.dispatch(.selectConversation(PreviewFixtures.sessionID))
+        case "chatWithBanner", "homeWithBanner":
+            // Another conversation ("Night watch", running) finishes its turn.
+            if GianAppComposition.previewDestination == "chatWithBanner" {
+                _ = await store.dispatch(.selectConversation(PreviewFixtures.sessionID))
+            }
+            try? await Task.sleep(for: .seconds(1))
             if let server = ServerAddress(parsing: PreviewFixtures.server),
-               let session = SessionID(rawValue: "session-night"),
-               let itemID = TranscriptItemID(rawValue: "preview-banner-message"),
-               let turnID = TurnID(rawValue: "preview-banner-turn") {
+               var night = PreviewScript.fullDirectory.directory.sessions.first(where: { $0.id.rawValue == "session-night" }),
+               let cursor = store.state.sync.cursor {
                 let scope = ClientScope(server: server, account: PreviewFixtures.account, host: PreviewFixtures.hostID)
-                let item = TranscriptItem(id: itemID, turnID: turnID, turn: 1, timestamp: PreviewFixtures.instant,
-                                          body: .assistant(text: "Fictional notification", delta: false))
-                _ = store.ingest(InboundEnvelope(scope: scope, event: .transcript(sessionID: session, item: item)))
+                night.status = .done
+                _ = store.ingest(InboundEnvelope(scope: scope, event: .canonical(
+                    sequence: cursor.eventSequence + 1, generation: cursor.hostGeneration, body: .session(night))))
             }
         case "chatAgent":
             _ = await store.dispatch(.selectConversation(PreviewFixtures.sessionID))
