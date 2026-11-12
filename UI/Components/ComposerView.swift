@@ -171,7 +171,7 @@ struct ComposerView: View {
                 Image(systemName: "stop.fill")
                     .font(.footnote.weight(.bold))
             }
-            .buttonStyle(GianCircularButtonStyle(tint: GianTheme.Colors.label))
+            .buttonStyle(GianCircularButtonStyle(tint: GianTheme.Colors.failure))
             .disabled(!remoteReady)
             .accessibilityLabel("Stop")
         } else {
