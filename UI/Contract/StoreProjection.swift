@@ -311,6 +311,9 @@ enum StoreProjection {
         /// can correct the card phase (Failed/Stopped) after flush.
         var workCardIndexByTurn: [TurnID: Int] = [:]
         var finalAssistantByNumber: [Int: TranscriptItemID] = [:]
+        // Each message looks up its own translation records, once grouped.
+        let recordsBySource: [String?: [ReadingTranslation]] = Dictionary(
+            grouping: translation?.records ?? [], by: { (record: ReadingTranslation) in record.sourceID })
         var terminalOutcomes: [Int: TurnOutcome] = [:]
         var failedTurns = Set<Int>()
         for item in items {
@@ -366,8 +369,11 @@ enum StoreProjection {
             case .assistant(let text, _):
                 flushWork(); pendingWorkTurn = nil
                 let canonicalID = finalAssistantByNumber[item.turn] == item.id ? "turn:\(item.turn)" : item.id.rawValue
-                let canonical = readingPresentation(sourceID: canonicalID, translation: translation, sourceText: text)
-                let legacy: ReadingTranslationPresentation = canonicalID == item.id.rawValue ? .none : readingPresentation(sourceID: item.id.rawValue, translation: translation, sourceText: text)
+                let canonical = readingPresentation(sourceID: canonicalID, translation: translation, sourceText: text,
+                                                    recordsBySource: recordsBySource)
+                let legacy: ReadingTranslationPresentation = canonicalID == item.id.rawValue ? .none
+                    : readingPresentation(sourceID: item.id.rawValue, translation: translation, sourceText: text,
+                                          recordsBySource: recordsBySource)
                 let canonicalUnavailable: Bool = if case .unavailable = canonical { true } else { false }
                 let usesLegacy = (canonical == .none || canonicalUnavailable) && legacy != .none
                 let sourceID = usesLegacy ? item.id.rawValue : canonicalID
@@ -626,11 +632,13 @@ enum StoreProjection {
     static func readingPresentation(
         sourceID: String,
         translation: TranslationSessionState?,
-        sourceText: String? = nil
+        sourceText: String? = nil,
+        recordsBySource: [String?: [ReadingTranslation]]? = nil
     ) -> ReadingTranslationPresentation {
         guard let translation else { return .none }
-        let needsHash = translation.reading[sourceID] != nil || translation.records.contains { $0.sourceID == sourceID }
-        let sourceHash = needsHash ? sourceText.map { SHA256.hash(data: Data($0.utf8)).map { String(format: "%02x", $0) }.joined() } : nil
+        let records = recordsBySource.map { $0[.some(sourceID)] ?? [] } ?? translation.records.filter { $0.sourceID == sourceID }
+        let needsHash = translation.reading[sourceID] != nil || !records.isEmpty
+        let sourceHash = needsHash ? sourceText.map(sha256Hex) : nil
         if let reading = translation.reading[sourceID] {
             let matches = sourceText == nil || (sourceHash != nil && reading.sourceSHA256?.lowercased() == sourceHash
                 && !translation.readingLanguage.isEmpty && reading.targetLanguage?.caseInsensitiveCompare(translation.readingLanguage) == .orderedSame)
@@ -638,7 +646,7 @@ enum StoreProjection {
             if matches && reading.pending { return .translating }
             if matches, let error = reading.error { return .failed(error) }
         }
-        let candidates = translation.records.reversed().filter { record in
+        let candidates = records.reversed().filter { record in
             record.sourceID == sourceID
                 && ((sourceText == nil && translation.readingLanguage.isEmpty) ||
                     (!translation.readingLanguage.isEmpty && record.targetLanguage.caseInsensitiveCompare(translation.readingLanguage) == .orderedSame))
@@ -663,6 +671,29 @@ enum StoreProjection {
         }
         return .none
     }
+
+    /// A text's SHA-256 in lowercase hex. Every reveal step re-projects the
+    /// transcript, so each translated message's hash is kept, not recomputed.
+    static func sha256Hex(_ text: String) -> String {
+        let key = text as NSString
+        if let cached = hashes.object(forKey: key) { return cached as String }
+        var hex = [UInt8]()
+        hex.reserveCapacity(64)
+        for byte in SHA256.hash(data: Data(text.utf8)) {
+            hex.append(hexDigits[Int(byte >> 4)])
+            hex.append(hexDigits[Int(byte & 0x0F)])
+        }
+        let digest = String(decoding: hex, as: UTF8.self)
+        hashes.setObject(digest as NSString, forKey: key)
+        return digest
+    }
+
+    private static let hexDigits = Array("0123456789abcdef".utf8)
+    private nonisolated(unsafe) static let hashes: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
+        cache.countLimit = 1_024
+        return cache
+    }()
 
     // MARK: - Active conversation
 

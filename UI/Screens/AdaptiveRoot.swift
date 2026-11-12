@@ -85,6 +85,8 @@ struct AdaptiveRoot: View {
     @State private var showsAddHost = false
     /// The window's size, from `WindowSizeProbe`.
     @State private var keyboardIndependentSize: CGSize = .zero
+    /// This view's size from its first layout, until the probe reports.
+    @State private var firstSize: CGSize = .zero
     @State private var appearance: SettingsScreen.Appearance = .system
     @AppStorage("gian.appearance") private var storedAppearance: String = SettingsScreen.Appearance.system.rawValue
     @AppStorage(GianAccent.storageKey) private var storedAccent: String = GianAccent.default.rawValue
@@ -124,17 +126,24 @@ struct AdaptiveRoot: View {
     }
 
     var body: some View {
-        GeometryReader { geometry in
-            let measured = keyboardIndependentSize == .zero ? geometry.size : keyboardIndependentSize
-            let split = WideLayoutOrientation.usesSplitView(size: measured, isRegularWidth: isWide)
-            let _ = GianLog.layout.debug("layout \(split ? "split" : "stack", privacy: .public) for \(measured.width)x\(measured.height), regular \(isWide)")
-            Group {
-                if split {
-                    wideLayout
-                } else {
-                    narrowLayout(isExpandedPortrait: isWide)
-                }
+        let measured = keyboardIndependentSize == .zero ? firstSize : keyboardIndependentSize
+        Group {
+            if measured == .zero {
+                // The first layout pass, before any size is known.
+                GianTheme.Colors.background.ignoresSafeArea()
+            } else if WideLayoutOrientation.usesSplitView(size: measured, isRegularWidth: isWide) {
+                wideLayout
+            } else {
+                narrowLayout(isExpandedPortrait: isWide)
             }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Not a GeometryReader: its content re-runs on every size or safe-area
+        // change, so the keyboard (each frame of an interactive dismissal)
+        // re-ran this whole body, every screen with it. This keeps a size only
+        // until the window probe reports; after that only the window decides.
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+            if keyboardIndependentSize == .zero, firstSize != size { firstSize = size }
         }
         // The layout follows the window, never the keyboard: re-deciding
         // split vs stack while it is up rebuilds the tree under the focused
@@ -147,7 +156,8 @@ struct AdaptiveRoot: View {
         // portrait stack, without the list).
         .background {
             WindowSizeProbe { size in
-                GianLog.layout.debug("window \(size.width)x\(size.height), regular \(isWide)")
+                let split = WideLayoutOrientation.usesSplitView(size: size, isRegularWidth: isWide)
+                GianLog.layout.debug("window \(size.width)x\(size.height), regular \(isWide): \(split ? "split" : "stack", privacy: .public)")
                 keyboardIndependentSize = size
             }
             .allowsHitTesting(false)

@@ -145,6 +145,7 @@ final class StatusGlyphView: UIView {
                 spin.duration = 1.2
                 spin.repeatCount = .infinity
                 spin.isRemovedOnCompletion = false
+                spin.preferredFrameRateRange = Self.iconFrameRate
                 ring.add(spin, forKey: "spin")
             }
             return
@@ -184,6 +185,7 @@ final class StatusGlyphView: UIView {
         slide.repeatCount = .infinity
         slide.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
         slide.isRemovedOnCompletion = false
+        slide.preferredFrameRateRange = Self.iconFrameRate
         flow.add(slide, forKey: "flow")
         let breathe = CABasicAnimation(keyPath: "transform.scale")
         breathe.fromValue = 0.875
@@ -193,8 +195,14 @@ final class StatusGlyphView: UIView {
         breathe.repeatCount = .infinity
         breathe.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
         breathe.isRemovedOnCompletion = false
+        breathe.preferredFrameRateRange = Self.iconFrameRate
         host.add(breathe, forKey: "breathe")
     }
+
+    /// The icons' endless loops are small and slow: 30 fps is smooth for them
+    /// and spares the render server a masked, glowing redraw at 60-120 fps
+    /// for every animated row while a list scrolls.
+    private static let iconFrameRate = CAFrameRateRange(minimum: 15, maximum: 30, preferred: 30)
 
     /// A soft glow along `path` (a fixed path, so no offscreen pass).
     private func glow(_ style: Style, path: CGPath) {

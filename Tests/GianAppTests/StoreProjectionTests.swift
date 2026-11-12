@@ -637,6 +637,12 @@ final class StoreProjectionTests: XCTestCase {
         XCTAssertEqual(legacy.translationSourceID, "answer")
     }
 
+    func testMessageHashIsLowercaseSHA256Hex() {
+        XCTAssertEqual(StoreProjection.sha256Hex("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        XCTAssertEqual(StoreProjection.sha256Hex("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        XCTAssertEqual(StoreProjection.sha256Hex(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+    }
+
     func testTranscriptFollowIgnoresPrependsAndNonTextPresentationChanges() {
         let idA = id("assistant-a", TranscriptItemID.self)
         let initial = AssistantRow(id: idA, agent: .claude, agentName: "Claude", markdown: "Hello", reading: .none)

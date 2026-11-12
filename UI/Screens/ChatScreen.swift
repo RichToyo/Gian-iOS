@@ -305,8 +305,11 @@ private struct TranscriptScroller: View {
                 scroll.nearBottom = value.nearBottom
                 if scroll.userScrolling, followsLatest != value.nearBottom { followsLatest = value.nearBottom }
                 // Size changes (streaming text, keyboard, composer) keep the
-                // latest line in place.
-                if previous.viewportHeight != value.viewportHeight || previous.contentHeight != value.contentHeight {
+                // latest line in place: the scroll view's anchor does while
+                // pinned (a scroll here would cut a step's glide short), this
+                // only when that fell short.
+                if previous.viewportHeight != value.viewportHeight || previous.contentHeight != value.contentHeight,
+                   !pinsLatest || !value.nearBottom {
                     followLatest(proxy, animated: false)
                 }
             }
@@ -328,12 +331,14 @@ private struct TranscriptScroller: View {
             }
             .onChange(of: TranscriptFollowSignal(rows: conversation.rows)) { old, new in
                 if awaitingOlderPage && new.isPrepend(after: old) {
-                    if let anchor = olderPageAnchor, new.ids.contains(anchor) { proxy.scrollTo(anchor, anchor: .top) }
+                    if let anchor = olderPageAnchor, conversation.rows.contains(where: { $0.id == anchor }) {
+                        proxy.scrollTo(anchor, anchor: .top)
+                    }
                     awaitingOlderPage = false
                     olderPageAnchor = nil
                     return
                 }
-                if new.shouldFollow(after: old) {
+                if new.shouldFollow(after: old), !pinsLatest || !scroll.nearBottom {
                     followLatest(proxy, animated: false)
                 }
             }
@@ -562,30 +567,35 @@ private struct PersistentChatToolbar: ViewModifier {
     }
 }
 
+/// What decides whether the transcript follows a change: built on every
+/// scroller update (each row crossing the top while scrolling), so it reads
+/// only the ends of the rows, never all of them.
 struct TranscriptFollowSignal: Equatable {
-    let ids: [String]
+    let count: Int
+    let firstID: String?
+    let lastID: String?
     let lastAssistantID: String?
-    let lastAssistantText: String?
+    let lastAssistantLength: Int
 
     init(rows: [TranscriptRow]) {
-        ids = rows.map(\.id)
-        let assistant = rows.reversed().compactMap { row -> AssistantRow? in
-            if case .assistant(let item) = row { return item }
-            return nil
-        }.first
+        count = rows.count
+        firstID = rows.first?.id
+        lastID = rows.last?.id
+        var assistant: AssistantRow?
+        for row in rows.reversed() {
+            if case .assistant(let item) = row { assistant = item; break }
+        }
         lastAssistantID = assistant?.id.rawValue
-        lastAssistantText = assistant?.markdown
+        lastAssistantLength = assistant?.markdown.utf8.count ?? 0
     }
 
     func shouldFollow(after old: TranscriptFollowSignal) -> Bool {
         if isPrepend(after: old) { return false }
-        return ids.last != old.ids.last || lastAssistantID != old.lastAssistantID || lastAssistantText != old.lastAssistantText
+        return lastID != old.lastID || lastAssistantID != old.lastAssistantID || lastAssistantLength != old.lastAssistantLength
     }
 
+    /// An older page: rows above, the same latest row.
     func isPrepend(after old: TranscriptFollowSignal) -> Bool {
-        let current = Set(ids)
-        guard let shared = old.ids.first(where: { current.contains($0) }),
-              let oldIndex = old.ids.firstIndex(of: shared), let newIndex = ids.firstIndex(of: shared) else { return false }
-        return newIndex > oldIndex
+        count > old.count && lastID == old.lastID && firstID != old.firstID
     }
 }

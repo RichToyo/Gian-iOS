@@ -37,6 +37,15 @@ final class AppPresentation {
     private(set) var logoTrigger: AgentLogoTrigger
     private(set) var optionsTrigger: AgentOptionsTrigger
     private(set) var restorationHint: RestorationHintSelection
+    /// The transcript's attachments as shown. Read here, not through the store
+    /// from inside message views, which would make each of them re-render on
+    /// every store change (each streamed chunk).
+    private(set) var attachments: [AttachmentID: AttachmentFacts] = [:]
+
+    struct AttachmentFacts: Equatable {
+        var presentation: AttachmentFilePresentation
+        var isImage: Bool
+    }
 
     struct PairingState: Equatable {
         var isWaiting = false
@@ -46,6 +55,7 @@ final class AppPresentation {
 
     @ObservationIgnored private var rowsInput: StoreProjection.TranscriptRowsInput?
     @ObservationIgnored private var rows: [TranscriptRow] = []
+    @ObservationIgnored private var rowAttachmentIDs: [AttachmentID] = []
     /// New transcript content is revealed a step at a time (see TranscriptPacing).
     @ObservationIgnored private var pacing = TranscriptPacing()
     @ObservationIgnored private var pacingStep: Task<Void, Never>?
@@ -113,6 +123,7 @@ final class AppPresentation {
                 _ = store.serviceDiagnostic
                 _ = store.serverOutcomeUnconfirmed
                 _ = store.authorizationInvalidationUnconfirmed
+                _ = store.transcriptFileStates
             } onChange: {
                 changed.yield()
             }
@@ -124,7 +135,9 @@ final class AppPresentation {
         }
     }
 
-    private func sync(_ store: GianClientStore) {
+    /// `transcriptAnimation` animates the conversation (a reveal step), and
+    /// nothing else this sync happens to change.
+    private func sync(_ store: GianClientStore, transcriptAnimation: Animation? = nil) {
         let state = store.state
         let ready = store.mutationsReady
         assign(\.phase, state.phase)
@@ -142,6 +155,9 @@ final class AppPresentation {
             if shown != rowsInput {
                 rows = StoreProjection.transcriptRows(shown)
                 rowsInput = shown
+                rowAttachmentIDs = rows.flatMap { row -> [AttachmentID] in
+                    if case .user(let user) = row { user.attachmentIDs } else { [] }
+                }
             }
             return rows
         }
@@ -157,7 +173,18 @@ final class AppPresentation {
         }
         conversation?.connectivity = shownStatus.connectivity
         conversation?.transcriptSync = shownStatus.transcriptSync
-        assign(\.conversation, conversation)
+        if let transcriptAnimation {
+            withAnimation(transcriptAnimation) { assign(\.conversation, conversation) }
+        } else {
+            assign(\.conversation, conversation)
+        }
+        assign(\.attachments, conversation == nil ? [:] : Dictionary(rowAttachmentIDs.map { id in
+            let descriptor = store.transcriptFileDescriptor(for: id)
+            return (id, AttachmentFacts(
+                presentation: StoreProjection.attachmentPresentation(descriptor: descriptor, state: store.transcriptFileStates[id]),
+                isImage: descriptor?.mime.lowercased().hasPrefix("image/") == true
+            ))
+        }, uniquingKeysWith: { first, _ in first }))
         assign(\.composer, state.composer)
         assign(\.workspaces, state.workspaces)
         assign(\.agents, state.agents)
@@ -197,10 +224,10 @@ final class AppPresentation {
             let step = store.state.conversation.map { self.pacing.advance($0.items) } ?? .none
             switch step {
             // A new row settles in.
-            case .newRow: withAnimation(.easeOut(duration: 0.25)) { self.sync(store) }
+            case .newRow: self.sync(store, transcriptAnimation: .easeOut(duration: 0.25))
             // A growing message glides through the step's interval, so its
             // steps read as one movement rather than a staircase.
-            case .grew: withAnimation(.linear(duration: TranscriptPacing.interval / .seconds(1))) { self.sync(store) }
+            case .grew: self.sync(store, transcriptAnimation: .linear(duration: TranscriptPacing.interval / .seconds(1)))
             // Everything at once (a burst) and nothing new apply as they are.
             case .all, .none: self.sync(store)
             }

@@ -190,13 +190,11 @@ struct AppRootView: View {
                     }
                 },
                 onEvictAttachmentCache: { dispatch(.clearAttachmentCache) },
-                attachmentPresentation: { attachmentID in
-                    StoreProjection.attachmentPresentation(
-                        descriptor: store.transcriptFileDescriptor(for: attachmentID),
-                        state: store.transcriptFileStates[attachmentID]
-                    )
-                },
-                attachmentIsImage: { store.transcriptFileDescriptor(for: $0)?.mime.lowercased().hasPrefix("image/") == true },
+                // From the presentation: message views call these while
+                // rendering, and reading the store there would re-render them
+                // on every store change.
+                attachmentPresentation: { presentation.attachments[$0]?.presentation ?? .unknown },
+                attachmentIsImage: { presentation.attachments[$0]?.isImage ?? false },
                 onDownloadAttachment: { dispatch(.downloadAttachment($0)) },
                 attachmentData: { store.attachmentData(for: $0) },
                 attachmentDescriptorName: {
