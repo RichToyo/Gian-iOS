@@ -40,6 +40,7 @@ struct UserMessageView: View {
                     presentation: attachmentPresentation(attachmentID),
                     isImage: attachmentIsImage(attachmentID),
                     imageData: { attachmentData(attachmentID) },
+                    thumbnailKey: attachmentID.rawValue,
                     autoLoadEnabled: autoLoadImages,
                     attachmentNumber: index + 1,
                     onDownload: { onDownloadAttachment(attachmentID) },

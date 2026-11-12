@@ -20,39 +20,77 @@ struct MarkdownView: View {
 /// streaming message only parses its newest form.
 @MainActor
 enum MarkdownCache {
-    private static var blockCache: [String: [MarkdownBlock]] = [:]
-    private static var inlineCache: [String: AttributedString] = [:]
-    private static var cachedCharacters = 0
+    private static var blockCache = RecentCache<[MarkdownBlock]>(entries: 1_024, bytes: 4 * 1024 * 1024)
+    private static var inlineCache = RecentCache<AttributedString>(entries: 4_096, bytes: 4 * 1024 * 1024)
+    /// The last text parsed of each kind. A streaming message's next form
+    /// extends it, and replaces it: keeping every form would fill the cache
+    /// within one long reply.
+    private static var lastBlocks: String?
+    private static var lastInline: String?
 
     static func blocks(_ source: String) -> [MarkdownBlock] {
         if let cached = blockCache[source] { return cached }
         let parsed = MarkdownBlockParser.parse(source)
-        reserve(source.utf8.count)
-        blockCache[source] = parsed
+        if let last = lastBlocks, source.hasPrefix(last) { blockCache.remove(last) }
+        lastBlocks = source
+        blockCache.insert(parsed, for: source)
         return parsed
     }
 
     static func inline(_ text: String) -> AttributedString? {
         if let cached = inlineCache[text] { return cached }
         guard let attributed = InlineMarkdown.attributed(text) else { return nil }
-        reserve(text.utf8.count)
-        inlineCache[text] = attributed
+        if let last = lastInline, text.hasPrefix(last) { inlineCache.remove(last) }
+        lastInline = text
+        inlineCache.insert(attributed, for: text)
         return attributed
-    }
-
-    /// Bounded by entries and text size; a full cache starts over.
-    private static func reserve(_ characters: Int) {
-        if blockCache.count + inlineCache.count >= 1_024 || cachedCharacters + characters > 4 * 1024 * 1024 {
-            blockCache.removeAll(keepingCapacity: true)
-            inlineCache.removeAll(keepingCapacity: true)
-            cachedCharacters = 0
-        }
-        cachedCharacters += characters
     }
 
     /// Text with its inline Markdown rendered, or as written if it can't be parsed.
     static func text(_ source: String) -> Text {
         inline(source).map(Text.init) ?? Text(source)
+    }
+}
+
+/// A bounded cache that forgets what hasn't been used lately, never what is on
+/// screen. Two generations: when the current one fills, it becomes the old one
+/// and the previous old one is dropped; a hit in the old one moves back. So a
+/// full cache never empties at once, which made everything shown re-parse in
+/// one frame (an occasional hard stutter while scrolling a long chat).
+struct RecentCache<Value> {
+    let entries: Int
+    let bytes: Int
+    private var current: [String: Value] = [:]
+    private var old: [String: Value] = [:]
+    private var currentBytes = 0
+
+    init(entries: Int, bytes: Int) {
+        self.entries = entries
+        self.bytes = bytes
+    }
+
+    subscript(key: String) -> Value? {
+        mutating get {
+            if let value = current[key] { return value }
+            guard let value = old.removeValue(forKey: key) else { return nil }
+            insert(value, for: key)
+            return value
+        }
+    }
+
+    mutating func insert(_ value: Value, for key: String) {
+        let size = key.utf8.count
+        if current[key] == nil, current.count >= entries || currentBytes + size > bytes {
+            old = current
+            current = [:]
+            currentBytes = 0
+        }
+        if current.updateValue(value, forKey: key) == nil { currentBytes += size }
+    }
+
+    mutating func remove(_ key: String) {
+        if current.removeValue(forKey: key) != nil { currentBytes -= key.utf8.count }
+        old.removeValue(forKey: key)
     }
 }
 

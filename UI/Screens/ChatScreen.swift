@@ -379,7 +379,9 @@ private struct TranscriptScroller: View {
         // streamed chunk doesn't queue several that could land as a swipe starts.
         let automatic = !force && !animated
         if automatic {
-            guard !scroll.followPending else { return }
+            // Not one queued during a swipe or fling: it would run as the
+            // scroll comes to rest and snap the view after the user let go.
+            guard !scroll.followPending, !scroll.userScrolling else { return }
             scroll.followPending = true
         }
         func following() -> Bool { force || (followsLatest && !scroll.userScrolling && !awaitingOlderPage) }

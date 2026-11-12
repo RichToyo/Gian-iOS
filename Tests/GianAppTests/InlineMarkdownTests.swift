@@ -53,6 +53,23 @@ final class InlineMarkdownTests: XCTestCase {
         XCTAssertEqual(render("**注意：**值"), "[B:注意：]值")
     }
 
+    /// A full cache forgets what wasn't used lately, never everything at once
+    /// (which re-parsed everything on screen in one frame).
+    func testRecentCacheForgetsOnlyWhatWasNotUsedLately() {
+        var cache = RecentCache<Int>(entries: 3, bytes: 1_000)
+        cache.insert(1, for: "a"); cache.insert(2, for: "b"); cache.insert(3, for: "c")
+        cache.insert(4, for: "d")
+        XCTAssertEqual(cache["a"], 1, "still there after the cache filled")
+        cache.insert(5, for: "e"); cache.insert(6, for: "f")
+        XCTAssertNil(cache["b"])
+        XCTAssertNil(cache["c"])
+        XCTAssertEqual(cache["a"], 1)
+        XCTAssertEqual(cache["d"], 4)
+        XCTAssertEqual(cache["f"], 6)
+        cache.remove("f")
+        XCTAssertNil(cache["f"])
+    }
+
     /// Runs as `[B,I,C,S,L=url:text]`, plain text as is.
     private func render(_ source: String) -> String {
         guard let attributed = InlineMarkdown.attributed(source) else { return "<unparsed>" }

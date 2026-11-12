@@ -21,6 +21,9 @@ struct TranscriptAttachmentView: View {
     /// Verified bytes, read only when a cached image needs decoding: reading
     /// re-verifies the bytes, too costly to repeat on every render.
     var imageData: () -> Data? = { nil }
+    /// Keeps the thumbnail when the transcript rebuilds this row (scrolling
+    /// past and back), instead of reading and decoding the image again.
+    var thumbnailKey: String? = nil
     var autoLoadEnabled: Bool = false
     var attachmentNumber: Int? = nil
     var onDownload: () -> Void = {}
@@ -48,7 +51,24 @@ struct TranscriptAttachmentView: View {
                     thumbnail = nil; imageDecodeFinished = false
                     return
                 }
-                thumbnail = imageData().flatMap(Self.makeThumbnail)
+                if let thumbnailKey, let cached = Self.thumbnails.object(forKey: thumbnailKey as NSString) {
+                    thumbnail = cached
+                    imageDecodeFinished = true
+                    return
+                }
+                // Reading verifies the bytes here; decoding a full-size image
+                // (tens to hundreds of milliseconds on a phone) happens off the
+                // main thread, so a row coming into view never stalls scrolling.
+                let data = imageData()
+                let decoded = await Task.detached(priority: .userInitiated) {
+                    data.flatMap(Self.makeThumbnail)
+                }.value
+                guard !Task.isCancelled else { return }
+                if let thumbnailKey, let decoded {
+                    let cost = Int(decoded.size.width * decoded.scale * decoded.size.height * decoded.scale * 4)
+                    Self.thumbnails.setObject(decoded, forKey: thumbnailKey as NSString, cost: cost)
+                }
+                thumbnail = decoded
                 imageDecodeFinished = true
             }
     }
@@ -150,11 +170,19 @@ struct TranscriptAttachmentView: View {
         }
     }
 
-    private static func makeThumbnail(_ data: Data) -> UIImage? {
+    private static let thumbnails: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.totalCostLimit = 48 * 1024 * 1024
+        return cache
+    }()
+
+    /// Decoded now (not when first drawn, on the main thread).
+    nonisolated private static func makeThumbnail(_ data: Data) -> UIImage? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
             kCGImageSourceThumbnailMaxPixelSize: 1024,
         ]
         guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
