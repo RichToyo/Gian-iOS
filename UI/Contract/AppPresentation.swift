@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SwiftUI
 import GianCore
 
 /// Store state projected into separately observed presentation values. The
@@ -193,8 +194,16 @@ final class AppPresentation {
             try? await Task.sleep(for: TranscriptPacing.interval)
             guard let self, let store, !Task.isCancelled else { return }
             self.pacingStep = nil
-            if let items = store.state.conversation?.items { self.pacing.advance(items) }
-            self.sync(store)
+            let step = store.state.conversation.map { self.pacing.advance($0.items) } ?? .none
+            switch step {
+            // A new row settles in.
+            case .newRow: withAnimation(.easeOut(duration: 0.25)) { self.sync(store) }
+            // A growing message glides through the step's interval, so its
+            // steps read as one movement rather than a staircase.
+            case .grew: withAnimation(.linear(duration: TranscriptPacing.interval / .seconds(1))) { self.sync(store) }
+            // Everything at once (a burst) and nothing new apply as they are.
+            case .all, .none: self.sync(store)
+            }
         }
     }
 

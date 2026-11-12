@@ -18,6 +18,16 @@ enum PreviewAgentTurn {
         }
     }
 
+    /// A catch-up: after a moment, many turns' items land at once, as a
+    /// transcript page read after a reconnect delivers them, item by item.
+    static func catchUp(_ store: GianClientStore, turns: Int = 8) async {
+        guard let server = ServerAddress(parsing: PreviewFixtures.server) else { return }
+        let scope = ClientScope(server: server, account: PreviewFixtures.account, host: PreviewFixtures.hostID)
+        var player = Player(store: store, scope: scope, session: PreviewFixtures.sessionID)
+        do { try await Task.sleep(for: .seconds(3)) } catch { return }
+        for number in 0..<turns { await player.landTurn(number: 60 + number) }
+    }
+
     @MainActor
     private struct Player {
         let store: GianClientStore
@@ -63,6 +73,31 @@ enum PreviewAgentTurn {
             emit(turn: number, turnID: turnID, id: "end-\(number)", body: .turnEnd(outcome: .worked))
             setStatus(.done)
             return true
+        }
+
+        /// A finished turn, item by item as fast as a page arrives: each in
+        /// its own main-actor turn, as the live connection delivers them.
+        mutating func landTurn(number: Int) async {
+            let turnID = TurnID(rawValue: "preview-agent-turn-\(number)")!
+            var bodies: [(String, TranscriptBody)] = [
+                ("user-\(number)", .user(text: "整理一下系泊日志，检查缆绳告警，然后给我一个结论。",
+                                         deliveryID: nil, attachmentIDs: [], translation: nil)),
+                ("text-a-\(number)", .assistant(text: Self.opening, delta: false)),
+            ]
+            for index in 0..<6 {
+                bodies.append(("tool-\(index)-\(number)",
+                               index.isMultiple(of: 2) ? .fileRead : .command(status: .success, exitCode: 0)))
+            }
+            bodies += [
+                ("text-b-\(number)", .assistant(text: Self.finding, delta: false)),
+                ("text-c-\(number)", .assistant(text: Self.progress, delta: false)),
+                ("text-d-\(number)", .assistant(text: Self.answer, delta: false)),
+                ("end-\(number)", .turnEnd(outcome: .worked)),
+            ]
+            for (id, body) in bodies {
+                emit(turn: number, turnID: turnID, id: id, body: body)
+                try? await Task.sleep(for: .milliseconds(4))
+            }
         }
 
         private mutating func stream(_ text: String, turn: Int, turnID: TurnID, id: String) async throws {

@@ -32,6 +32,7 @@ struct TranscriptView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
+        VStack(spacing: 0) {
         LazyVStack(spacing: GianTheme.Metrics.paddingMedium) {
             ForEach(rows) { row in
                 Group {
@@ -108,6 +109,14 @@ struct TranscriptView: View {
                 }
                 .transition(arrival)
             }
+        }
+        // New rows settle in with the pacing step that shows them (an explicit
+        // animation); nothing here animates the stack as a whole, so a sync
+        // that brings many rows, or text growing, never moves the rest.
+        .scrollTargetLayout()
+        // Its own container, animated on its own: the pending message fades in
+        // and out without moving the rows above, and takes no room otherwise.
+        VStack(spacing: 0) {
             if let pendingSend {
                 PendingSendView(
                     row: pendingSend,
@@ -116,15 +125,13 @@ struct TranscriptView: View {
                     onRetryTranslation: onRetryTranslationSend,
                     onTakeTextBack: onTakeTextBack
                 )
-                .id("pending-send")
+                .padding(.top, GianTheme.Metrics.paddingMedium)
                 .transition(arrival)
             }
         }
-        // New messages, cards and the pending message settle in instead of
-        // popping; only the tail animates, so streaming text and older pages
-        // loaded above stay put.
-        .animation(.easeOut(duration: 0.25), value: tail)
-        .scrollTargetLayout()
+        .id("pending-send")
+        .animation(.easeOut(duration: 0.2), value: pendingSend == nil)
+        }
         .padding(.horizontal, GianTheme.Metrics.paddingMedium)
         .padding(.vertical, GianTheme.Metrics.paddingSmall)
     }
@@ -138,11 +145,6 @@ struct TranscriptView: View {
         insertion: .opacity.combined(with: .offset(y: 10)),
         removal: .opacity
     )
-
-    /// The end of the transcript: what arriving or leaving rows change.
-    private var tail: TranscriptTail {
-        TranscriptTail(ids: rows.suffix(3).map(\.id), pending: pendingSend)
-    }
 
     private func noticeRow(severity: NoticeSeverity, code: String) -> some View {
         HStack(spacing: GianTheme.Metrics.paddingSmall) {
@@ -159,11 +161,6 @@ struct TranscriptView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
     }
-}
-
-private struct TranscriptTail: Equatable {
-    let ids: [String]
-    let pending: PendingSendRow?
 }
 
 extension TranscriptView: Equatable {

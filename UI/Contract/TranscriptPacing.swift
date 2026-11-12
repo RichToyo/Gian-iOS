@@ -10,8 +10,10 @@ import GianCore
 /// as it comes. A step takes more when more is waiting, so the transcript is
 /// never more than about a second behind. History shows at once — the items
 /// there when the chat opens, older pages, anything arriving above what is
-/// shown — and so does everything when a question or approval arrives or the
-/// user's own message lands.
+/// shown — and so does everything waiting when a question or approval arrives,
+/// the user's own message lands, or a burst (a catch-up after a reconnect)
+/// brings many items: once the burst stops arriving, in one frame, rather than
+/// as a run of jumps while it lands.
 struct TranscriptPacing {
     static let interval: Duration = .milliseconds(120)
     /// Steps a backlog of text takes to clear, however large.
@@ -20,12 +22,21 @@ struct TranscriptPacing {
     static let minimumStep = 24
     /// Steps to wait for the end of a sentence still being written.
     static let patience = 2
+    /// Items waiting at once that make a burst, shown together.
+    static let burst = 8
+    /// Steps a burst may keep arriving before it is shown anyway.
+    static let burstPatience = 8
 
     private var session: SessionID?
     /// Shown items: for text, how much of it (UTF-8 length); `Int.max` otherwise.
     private var shown: [TranscriptItemID: Int] = [:]
     private var pendingInteractions: Set<InteractionID> = []
     private var waited = 0
+    /// Everything waiting shows at the next step (a question, the user's own message).
+    private var showsAllNext = false
+    /// Steps a burst has been held while it kept arriving.
+    private var held = 0
+    private var countAtLastStep = 0
     /// Characters a step reveals: set by the largest backlog since the
     /// transcript last caught up, so a burst clears in about `catchUpSteps`.
     private var rate = minimumStep
@@ -44,9 +55,8 @@ struct TranscriptPacing {
         }
         guard let last = items.lastIndex(where: { shown[$0.id] != nil }) else { return (revealAll(items), false) }
         let hiddenTail = last + 1 < items.count
-        if newQuestion || items[(last + 1)...].contains(where: \.isUserMessage) {
-            return (revealAll(items), false)
-        }
+        // At the next step, with whatever else lands meanwhile, not one by one.
+        if newQuestion || items[(last + 1)...].contains(where: \.isUserMessage) { showsAllNext = true }
         var capped: [Int] = []
         for index in 0...last {
             let item = items[index]
@@ -57,7 +67,10 @@ struct TranscriptPacing {
             }
             if let text = item.text, text.utf8.count > limit { capped.append(index) }
         }
-        guard hiddenTail || !capped.isEmpty else { return (items, false) }
+        guard hiddenTail || !capped.isEmpty else {
+            showsAllNext = false
+            return (items, false)
+        }
         var visible = Array(items[0...last])
         for index in capped {
             guard case .assistant(let text, let delta) = visible[index].body, let limit = shown[visible[index].id] else { continue }
@@ -66,10 +79,37 @@ struct TranscriptPacing {
         return (visible, true)
     }
 
+    /// What a step showed, which decides how it animates.
+    enum Step: Equatable {
+        /// Nothing new (waiting for a sentence, or a burst still arriving).
+        case none
+        /// More of a message: glides, as the message grows.
+        case grew
+        /// A new row: settles in.
+        case newRow
+        /// Everything waiting at once (a burst, a question): as it is.
+        case all
+    }
+
     /// Reveals the next step of what is waiting: more of the text being
     /// shown, else the next text, else the work up to it.
-    mutating func advance(_ items: [TranscriptItem]) {
-        guard session != nil else { return }
+    @discardableResult
+    mutating func advance(_ items: [TranscriptItem]) -> Step {
+        guard session != nil else { return .none }
+        let arriving = items.count != countAtLastStep
+        countAtLastStep = items.count
+        let first = (items.lastIndex(where: { shown[$0.id] != nil }) ?? -1) + 1
+        let waiting = items[min(first, items.count)...]
+        if showsAllNext || waiting.count >= Self.burst || waiting.contains(where: \.isUserMessage) {
+            // Held while it keeps arriving, then shown in one frame.
+            if arriving, held < Self.burstPatience {
+                held += 1
+                return .none
+            }
+            _ = revealAll(items)
+            return .all
+        }
+        held = 0
         let backlog = items.reduce(0) { total, item in
             guard let text = item.text else { return total }
             return total + max(0, text.utf8.count - min(shown[item.id] ?? 0, text.utf8.count))
@@ -79,26 +119,29 @@ struct TranscriptPacing {
         for (index, item) in items.enumerated() {
             guard let limit = shown[item.id], let text = item.text, text.utf8.count > limit else { continue }
             reveal(text, of: item.id, from: limit, budget: budget, complete: index + 1 < items.count)
-            return
+            return shown[item.id] ?? 0 > limit ? .grew : .none
         }
-        let last = items.lastIndex(where: { shown[$0.id] != nil }) ?? -1
-        var index = last + 1
-        guard index < items.count else { return }
+        var index = first
+        guard index < items.count else { return .none }
         if let text = items[index].text {
             reveal(text, of: items[index].id, from: 0, budget: budget, complete: index + 1 < items.count)
-            return
+            return shown[items[index].id] != nil ? .newRow : .none
         }
         // Work and other items without text come together, up to the next text.
         while index < items.count, items[index].text == nil {
             shown[items[index].id] = .max
             index += 1
         }
+        return .newRow
     }
 
     private mutating func revealAll(_ items: [TranscriptItem]) -> [TranscriptItem] {
         for item in items { shown[item.id] = Self.length(of: item) }
         waited = 0
         rate = Self.minimumStep
+        showsAllNext = false
+        held = 0
+        countAtLastStep = items.count
         return items
     }
 

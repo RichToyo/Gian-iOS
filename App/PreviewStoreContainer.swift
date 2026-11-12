@@ -111,6 +111,9 @@ struct PreviewStoreContainer<Content: View>: View {
         case "chatAgent":
             _ = await store.dispatch(.selectConversation(PreviewFixtures.sessionID))
             await PreviewAgentTurn.play(store)
+        case "chatCatchUp":
+            _ = await store.dispatch(.selectConversation(PreviewFixtures.sessionID))
+            await PreviewAgentTurn.catchUp(store)
         case "newChat": _ = await store.dispatch(.openNewChat)
         case "settings": _ = await store.dispatch(.openSettings)
         default: break

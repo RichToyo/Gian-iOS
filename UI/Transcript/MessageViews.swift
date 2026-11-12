@@ -102,6 +102,11 @@ struct AssistantMessageView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             MarkdownView(source: row.markdown)
+                // While a reply streams, each step's new lines are uncovered as
+                // the message grows (the step glides), rather than cross-faded
+                // or drawn over what follows before it has made room.
+                .contentTransition(.identity)
+                .clipped()
             if row.isFinalResult { translationArea }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

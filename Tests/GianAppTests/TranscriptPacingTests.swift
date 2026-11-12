@@ -88,7 +88,7 @@ final class TranscriptPacingTests: XCTestCase {
         XCTAssertFalse(shown.waiting)
     }
 
-    func testAQuestionOrTheUsersOwnMessageShowsEverything() {
+    func testAQuestionOrTheUsersOwnMessageShowsEverythingAtTheNextStep() {
         var pacing = TranscriptPacing()
         _ = pacing.visible([user("u1")], session: session, interactions: [])
         let waiting = [user("u1"), assistant("a1", "Let me check that for you.", turn: 1)]
@@ -96,12 +96,58 @@ final class TranscriptPacingTests: XCTestCase {
         let question = InteractionRecord(
             id: InteractionID(rawValue: "q1")!, revision: "1", sessionID: session, turnID: TurnID(rawValue: "turn-1")!,
             kind: .approval, title: "Approve?", detail: "", risk: .low, actions: [], phase: .pending)
+        XCTAssertTrue(pacing.visible(waiting, session: session, interactions: [question]).waiting)
+        settle(&pacing, waiting)
         XCTAssertEqual(pacing.visible(waiting, session: session, interactions: [question]).items, waiting)
 
         let more = waiting + [assistant("a2", "Another long reply that waits.", turn: 1)]
         XCTAssertTrue(pacing.visible(more, session: session, interactions: [question]).waiting)
         let sent = more + [user("u2", turn: 2)]
+        _ = pacing.visible(sent, session: session, interactions: [question])
+        settle(&pacing, sent)
         XCTAssertEqual(pacing.visible(sent, session: session, interactions: [question]).items, sent)
+    }
+
+    func testABurstShowsInOneStepOnceItStopsArriving() {
+        var pacing = TranscriptPacing()
+        var items = [user("u1")]
+        _ = pacing.visible(items, session: session, interactions: [])
+        // A catch-up lands over several steps: nothing of it shows meanwhile.
+        for turn in 2...4 {
+            items += [user("u\(turn)", turn: turn), assistant("a\(turn)", "Done.", turn: turn), command("c\(turn)", turn: turn)]
+            XCTAssertTrue(pacing.visible(items, session: session, interactions: []).waiting)
+            XCTAssertEqual(pacing.advance(items), .none)
+            XCTAssertEqual(pacing.visible(items, session: session, interactions: []).items.count, 1)
+        }
+        // Then all of it at once, without an animated step.
+        XCTAssertEqual(pacing.advance(items), .all)
+        let shown = pacing.visible(items, session: session, interactions: [])
+        XCTAssertEqual(shown.items, items)
+        XCTAssertFalse(shown.waiting)
+    }
+
+    func testABurstThatKeepsArrivingStillShowsWithinAboutASecond() {
+        var pacing = TranscriptPacing()
+        var items = [user("u1")]
+        _ = pacing.visible(items, session: session, interactions: [])
+        var steps = 0
+        while pacing.visible(items, session: session, interactions: []).items.count == 1, steps < 30 {
+            items += [user("u\(steps + 2)", turn: steps + 2)]
+            _ = pacing.visible(items, session: session, interactions: [])
+            pacing.advance(items)
+            steps += 1
+        }
+        XCTAssertLessThanOrEqual(steps, TranscriptPacing.burstPatience + 1)
+    }
+
+    func testEachStepSaysWhatItShowed() {
+        var pacing = TranscriptPacing()
+        _ = pacing.visible([user("u1")], session: session, interactions: [])
+        let text = "First clause, second clause, third clause, fourth clause. And a second sentence follows here."
+        let items = [user("u1"), assistant("a1", text, turn: 1), turnEnd("end", turn: 1)]
+        _ = pacing.visible(items, session: session, interactions: [])
+        XCTAssertEqual(pacing.advance(items), .newRow, "the reply's first words are a new row")
+        XCTAssertEqual(pacing.advance(items), .grew, "more of it grows the row")
     }
 
     func testAnotherConversationShowsAtOnce() {
@@ -131,6 +177,11 @@ final class TranscriptPacingTests: XCTestCase {
         XCTAssertEqual(TranscriptPacing.closingOpenSpans("2 \\** 3"), "2 \\** 3")
     }
 
+    /// Steps until nothing more arrives and what waits is shown.
+    private func settle(_ pacing: inout TranscriptPacing, _ items: [TranscriptItem]) {
+        for _ in 0..<3 { pacing.advance(items) }
+    }
+
     // MARK: - Items
 
     private func next() -> Date {
@@ -148,8 +199,8 @@ final class TranscriptPacingTests: XCTestCase {
                        timestamp: next(), body: .assistant(text: text, delta: false))
     }
 
-    private func command(_ id: String) -> TranscriptItem {
-        TranscriptItem(id: TranscriptItemID(rawValue: id)!, turnID: TurnID(rawValue: "turn-1")!, turn: 1,
+    private func command(_ id: String, turn: Int = 1) -> TranscriptItem {
+        TranscriptItem(id: TranscriptItemID(rawValue: id)!, turnID: TurnID(rawValue: "turn-\(turn)")!, turn: turn,
                        timestamp: next(), body: .command(status: .success, exitCode: 0))
     }
 
