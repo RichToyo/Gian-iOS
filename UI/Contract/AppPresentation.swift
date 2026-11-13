@@ -58,6 +58,15 @@ final class AppPresentation {
     @ObservationIgnored private var rowsInput: StoreProjection.TranscriptRowsInput?
     @ObservationIgnored private var rows: [TranscriptRow] = []
     @ObservationIgnored private var rowAttachmentIDs: [AttachmentID] = []
+    /// What the attachment facts were computed from: each lookup scans the
+    /// conversation, so they are recomputed only when it or a download changes.
+    @ObservationIgnored private var attachmentsInput: AttachmentsInput?
+    @ObservationIgnored private var rowsGeneration = 0
+
+    private struct AttachmentsInput: Equatable {
+        let rowsGeneration: Int
+        let states: [AttachmentID: AttachmentBodyState]
+    }
     /// Background parsing of the open conversation's messages (see `prepareMarkdown`).
     @ObservationIgnored private var markdownPreparation: Task<Void, Never>?
     @ObservationIgnored private var preparedRows: PreparedRows?
@@ -168,6 +177,7 @@ final class AppPresentation {
                 rowAttachmentIDs = rows.flatMap { row -> [AttachmentID] in
                     if case .user(let user) = row { user.attachmentIDs } else { [] }
                 }
+                rowsGeneration += 1
                 if let session = state.conversation?.session.id {
                     prepareMarkdown(session: session, streaming: shown.isTurnActive)
                 }
@@ -191,13 +201,20 @@ final class AppPresentation {
         } else {
             assign(\.conversation, conversation)
         }
-        assign(\.attachments, conversation == nil ? [:] : Dictionary(rowAttachmentIDs.map { id in
-            let descriptor = store.transcriptFileDescriptor(for: id)
-            return (id, AttachmentFacts(
-                presentation: StoreProjection.attachmentPresentation(descriptor: descriptor, state: store.transcriptFileStates[id]),
-                isImage: descriptor?.mime.lowercased().hasPrefix("image/") == true
-            ))
-        }, uniquingKeysWith: { first, _ in first }))
+        let attachmentStates = rowAttachmentIDs.reduce(into: [AttachmentID: AttachmentBodyState]()) { states, id in
+            states[id] = store.transcriptFileStates[id]
+        }
+        let attachmentsKey = AttachmentsInput(rowsGeneration: conversation == nil ? -1 : rowsGeneration, states: attachmentStates)
+        if attachmentsKey != attachmentsInput {
+            attachmentsInput = attachmentsKey
+            assign(\.attachments, conversation == nil ? [:] : Dictionary(rowAttachmentIDs.map { id in
+                let descriptor = store.transcriptFileDescriptor(for: id)
+                return (id, AttachmentFacts(
+                    presentation: StoreProjection.attachmentPresentation(descriptor: descriptor, state: store.transcriptFileStates[id]),
+                    isImage: descriptor?.mime.lowercased().hasPrefix("image/") == true
+                ))
+            }, uniquingKeysWith: { first, _ in first }))
+        }
         assign(\.composer, state.composer)
         assign(\.workspaces, state.workspaces)
         assign(\.agents, state.agents)
