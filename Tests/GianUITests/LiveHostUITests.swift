@@ -47,6 +47,12 @@ final class LiveHostUITests: XCTestCase {
         }
         dismissMenu()
 
+        // An optional title, kept by the Host instead of its automatic one.
+        let title = app.textFields["new-chat-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        title.tap()
+        title.typeText("Live title check")
+
         // Multi-line fields surface as text views.
         let field = app.textFields["Message"]
         let message = field.waitForExistence(timeout: 5) ? field : app.textViews["Message"]
@@ -65,6 +71,9 @@ final class LiveHostUITests: XCTestCase {
         // held back by the new chat's access check).
         XCTAssertTrue(app.buttons["More options"].waitForExistence(timeout: 30))
         XCTAssertTrue(app.staticTexts["ping"].waitForExistence(timeout: 30), "The first message was not delivered")
+        let named = app.descendants(matching: .any).matching(identifier: "conversation-title")
+            .matching(NSPredicate(format: "label CONTAINS %@", "Live title check")).firstMatch
+        XCTAssertTrue(named.waitForExistence(timeout: 15), "The conversation should carry the title given at creation")
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'being verified'")).firstMatch.exists,
                        "The first message was held back by the access check")
         // Change approval mid-conversation.

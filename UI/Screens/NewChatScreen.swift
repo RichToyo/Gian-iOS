@@ -41,6 +41,8 @@ struct NewChatScreen: View {
     var onSelectAgent: (AgentID) -> Void = { _ in }
     var onSelectModel: (String?) -> Void = { _ in }
     var onSelectTask: (TaskID?) -> Void = { _ in }
+    /// The conversation's title, optional (the Host titles it otherwise).
+    var onEditTitle: (String) -> Void = { _ in }
     var onEditDraft: (String) -> Void = { _ in }
     var onSend: () -> Void = {}
     var onRetryTranslationSend: () -> Void = {}
@@ -64,8 +66,14 @@ struct NewChatScreen: View {
     /// The Host the conversation will be created on, shown under the title.
     var host: HostItem? = nil
 
+    /// Edited here and passed on, so typing never waits for the store.
+    @State private var title = ""
+
     var body: some View {
-        routeSummary
+        VStack(spacing: GianTheme.Metrics.paddingLarge) {
+            routeSummary
+            titleField
+        }
             .frame(maxWidth: GianTheme.Metrics.formWidth)
             .padding(GianTheme.Metrics.paddingLarge)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -161,6 +169,24 @@ struct NewChatScreen: View {
         }
         .multilineTextAlignment(.center)
         .accessibilityElement(children: .combine)
+    }
+
+    private var titleField: some View {
+        TextField("Title (optional)", text: $title)
+            .font(GianTheme.Typography.title)
+            .multilineTextAlignment(.center)
+            .submitLabel(.done)
+            .padding(.horizontal, GianTheme.Metrics.paddingMedium)
+            .padding(.vertical, GianTheme.Metrics.paddingSmall + 2)
+            .background(GianTheme.Colors.card, in: RoundedRectangle(cornerRadius: GianTheme.Metrics.cornerRadiusMedium,
+                                                                    style: .continuous))
+            .onAppear { title = composer.selection.title ?? "" }
+            .onChange(of: composer.draft.id) { _, _ in title = composer.selection.title ?? "" }
+            .onChange(of: title) { _, value in
+                if value != (composer.selection.title ?? "") { onEditTitle(value) }
+            }
+            .accessibilityIdentifier("new-chat-title")
+            .accessibilityHint("Leave empty to let the Host title the conversation")
     }
 
     private var routeDetail: String {

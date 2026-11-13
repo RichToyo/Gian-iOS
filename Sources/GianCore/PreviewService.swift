@@ -511,7 +511,7 @@ public final class PreviewGianClientService: GianClientServicing {
         var record = SessionRecord(
             id: PreviewFixtures.id("session-created-\(serial)", SessionID.self),
             hostID: script.directory.host.id,
-            title: "New conversation",
+            title: request.name ?? "New conversation",
             revision: "rev-new",
             taskID: request.taskID,
             workspaceID: request.workspaceID,

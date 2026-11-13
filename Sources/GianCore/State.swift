@@ -233,6 +233,9 @@ public struct ComposerSelection: Sendable, Equatable {
     public var thinking: String? = nil
     public var fast: Bool? = nil
     public var approvalMode: String? = nil
+    /// The new conversation's title, as typed (sent as `name` with
+    /// `session.create`); none lets the Host title it from the conversation.
+    public var title: String? = nil
 
     public init(agentID: AgentID? = nil, model: String? = nil, workspaceID: WorkspaceID? = nil, taskID: TaskID? = nil) {
         self.agentID = agentID

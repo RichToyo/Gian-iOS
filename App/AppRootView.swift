@@ -166,6 +166,7 @@ struct AppRootView: View {
                 },
                 onSelectModel: { dispatch(.selectModel($0)) },
                 onSelectTask: { dispatch(.selectTask($0)) },
+                onEditNewChatTitle: { dispatch(.editNewChatTitle($0)) },
                 onSetConversationModel: { dispatch(.setConversationModel($0)) },
                 onSetConversationThinking: { dispatch(.setConversationThinking($0)) },
                 onSetConversationFast: { dispatch(.setConversationFast($0)) },

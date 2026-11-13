@@ -105,6 +105,21 @@ struct TasklessFirstSendTests {
         #expect(store.state.directory.temporaryCreatedResults.isEmpty)
         #expect(store.locallyCreatedWithActivity.isEmpty)
     }
+    @Test func aTypedTitleIsSentWithTheNewConversation() async throws {
+        for (typed, sent) in [("  Night shift notes \n", "Night shift notes"), ("   ", nil), (nil, nil)] as [(String?, String?)] {
+            let service = DirectoryFixtureService()
+            service.pages[.tasks] = [directoryPage(.tasks)]
+            let clock = ManualGianClock(instant: PreviewFixtures.instant)
+            let store = GianClientStore(service: service, clock: clock, ids: SequenceIDGenerator(), storage: InMemoryGianStorage())
+            _ = try await signIn(store, clock: clock)
+            await prepareComposer(store, text: "First message", task: true)
+            if let typed { _ = await store.dispatch(.editNewChatTitle(typed)) }
+            _ = await store.dispatch(.send)
+            #expect(service.createRequests.first?.name == sent)
+        }
+        #expect(SessionCreateRequest.name(from: String(repeating: "a", count: 300))?.count == SessionCreateRequest.nameLimit)
+    }
+
     @Test func tasklessFirstSendFreezesIndependentCreateAndSendBeforeEffects() async throws {
         let service = DirectoryFixtureService()
         service.pages[.tasks] = [directoryPage(.tasks)]

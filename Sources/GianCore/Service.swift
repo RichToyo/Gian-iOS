@@ -261,6 +261,19 @@ public struct SessionCreateRequest: Codable, Sendable, Equatable {
     public var thinking: String?
     /// `fast`, or nil for the standard tier (only Agents offering Fast).
     public var serviceTier: String?
+    /// The title the user gave the conversation. Without one the Host titles
+    /// it automatically; with one it keeps it.
+    public var name: String?
+
+    /// The protocol's `name` bound.
+    public static let nameLimit = 256
+
+    /// A typed title as the Host takes it: trimmed, at most `nameLimit`
+    /// characters, none when empty.
+    public static func name(from title: String?) -> String? {
+        guard let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
+        return String(trimmed.prefix(nameLimit))
+    }
 
     public init(
         commandID: CommandID,
@@ -270,7 +283,8 @@ public struct SessionCreateRequest: Codable, Sendable, Equatable {
         taskID: TaskID?,
         model: String?,
         thinking: String? = nil,
-        serviceTier: String? = nil
+        serviceTier: String? = nil,
+        name: String? = nil
     ) {
         self.commandID = commandID
         self.catalogRevision = catalogRevision
@@ -280,6 +294,7 @@ public struct SessionCreateRequest: Codable, Sendable, Equatable {
         self.model = model
         self.thinking = thinking
         self.serviceTier = serviceTier
+        self.name = name
     }
 }
 

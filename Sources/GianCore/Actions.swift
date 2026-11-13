@@ -43,6 +43,8 @@ public enum GianClientAction: Sendable {
     case selectModel(String?)
     case selectWorkspace(WorkspaceID)
     case selectTask(TaskID?)
+    /// The new conversation's title (optional; sent when it is created).
+    case editNewChatTitle(String)
     case send
     case stop
     case mutateQueue(QueueMutation)

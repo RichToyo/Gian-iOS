@@ -723,7 +723,8 @@ extension GianClientStore {
         intent.stage = .create
         let request = SessionCreateRequest(commandID: creationID, catalogRevision: state.catalogRevision,
             workspaceID: workspaceID, agentID: agentID, taskID: state.composer.selection.taskID, model: state.composer.selection.model,
-            thinking: state.composer.selection.thinking, serviceTier: newChatServiceTier(agentID: agentID))
+            thinking: state.composer.selection.thinking, serviceTier: newChatServiceTier(agentID: agentID),
+            name: SessionCreateRequest.name(from: state.composer.selection.title))
         let approvalMode = state.composer.selection.approvalMode
         intent.createRequest = request
         state.composer.send = .creating(intent)

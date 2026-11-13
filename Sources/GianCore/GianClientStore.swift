@@ -240,6 +240,10 @@ public final class GianClientStore {
         case .selectTask(let id):
             state.composer.selection.taskID = id
             return persistenceResult()
+        case .editNewChatTitle(let title):
+            state.composer.selection.title = title.isEmpty ? nil : title
+            schedulePersistence()
+            return .applied
         case .send: return await performSend(explicitOriginal: false, reusedRequestID: nil)
         case .stop: return await stop()
         case .mutateQueue(let mutation): return await mutateQueue(mutation)

@@ -60,6 +60,7 @@ struct AdaptiveRoot: View {
     var onSelectAgent: (AgentID) -> Void = { _ in }
     var onSelectModel: (String?) -> Void = { _ in }
     var onSelectTask: (TaskID?) -> Void = { _ in }
+    var onEditNewChatTitle: (String) -> Void = { _ in }
     var onSetConversationModel: (String?) -> Void = { _ in }
     var onSetConversationThinking: (String?) -> Void = { _ in }
     var onSetConversationFast: (Bool) -> Void = { _ in }
@@ -350,6 +351,7 @@ struct AdaptiveRoot: View {
             onSelectAgent: onSelectAgent,
             onSelectModel: onSelectModel,
             onSelectTask: onSelectTask,
+            onEditTitle: onEditNewChatTitle,
             onEditDraft: onEditDraft,
             onSend: onSend,
             onRetryTranslationSend: onRetryTranslationSend,
