@@ -22,6 +22,8 @@ final class AppPresentation {
     private(set) var agents: [AgentRecord] = []
     private(set) var openTasks: [TaskGroupItem] = []
     private(set) var mutationsReady = false
+    /// Whether Stop is available (lighter than `mutationsReady`; see the store).
+    private(set) var stopReady = false
     private(set) var directoryNegotiated = false
     private(set) var canRetryUncertainCreate = false
     private(set) var diagnostic: DiagnosticPresentation = .none
@@ -67,6 +69,9 @@ final class AppPresentation {
         let rowsGeneration: Int
         let states: [AttachmentID: AttachmentBodyState]
     }
+    /// A moment of not-ready isn't shown (see `displayedReady`).
+    @ObservationIgnored private var readyHold: Task<Void, Never>?
+    @ObservationIgnored private var readyHoldExpired = false
     /// Background parsing of the open conversation's messages (see `prepareMarkdown`).
     @ObservationIgnored private var markdownPreparation: Task<Void, Never>?
     @ObservationIgnored private var preparedRows: PreparedRows?
@@ -158,7 +163,7 @@ final class AppPresentation {
     /// nothing else this sync happens to change.
     private func sync(_ store: GianClientStore, transcriptAnimation: Animation? = nil) {
         let state = store.state
-        let ready = store.mutationsReady
+        let ready = displayedReady(store.mutationsReady, store: store)
         assign(\.phase, state.phase)
         assign(\.hosts, StoreProjection.hosts(state))
         assign(\.directory, projectedDirectory(state))
@@ -220,6 +225,7 @@ final class AppPresentation {
         assign(\.agents, state.agents)
         assign(\.openTasks, state.openTasks.map { TaskGroupItem(id: $0.id, title: $0.title, conversations: []) })
         assign(\.mutationsReady, ready)
+        assign(\.stopReady, store.stopReady)
         assign(\.directoryNegotiated, state.capabilities.directoryNegotiated)
         assign(\.canRetryUncertainCreate, StoreProjection.canRetryUncertainCreate(state, mutationsReady: ready))
         assign(\.diagnostic, shownStatus.diagnostic)
@@ -261,6 +267,31 @@ final class AppPresentation {
         if streaming, !sources.isEmpty { sources.removeFirst() }
         markdownPreparation?.cancel()
         markdownPreparation = Task { await MarkdownCache.prepare(sources) }
+    }
+
+    /// Whether controls show as ready. While a turn streams events, the store
+    /// is briefly not ready again and again (its event cursor a moment behind
+    /// the connection's); showing that grayed Send and the ⋯ options out in
+    /// flickers. A not-ready moment shorter than this is not shown; a longer
+    /// one is. (The store still refuses what isn't allowed.)
+    private func displayedReady(_ ready: Bool, store: GianClientStore) -> Bool {
+        if ready {
+            readyHold?.cancel()
+            readyHold = nil
+            readyHoldExpired = false
+            return true
+        }
+        guard mutationsReady, !readyHoldExpired else { return false }
+        if readyHold == nil {
+            readyHold = Task { [weak self, weak store] in
+                try? await Task.sleep(for: .milliseconds(600))
+                guard let self, let store, !Task.isCancelled else { return }
+                self.readyHold = nil
+                self.readyHoldExpired = true
+                self.sync(store)
+            }
+        }
+        return true
     }
 
     /// Reveals the next step of the transcript after the pacing interval. Steps

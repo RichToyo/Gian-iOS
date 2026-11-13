@@ -229,7 +229,7 @@ extension GianClientStore {
         else { return reject(.notFound) }
         if case .uncertain = state.pendingStop { return reject(.uncertainOutcome) }
         if state.pendingStop.isInFlight { return reject(.operationInFlight) }
-        if !mutationsAllowed() { return reject(.mutationsDisabled) }
+        if !stopAllowed(sessionID) { return reject(.mutationsDisabled) }
         if let code = requireCapability(.sessionStop) { return reject(code) }
         let commandID: CommandID = mint()
         var intent = DurableSendIntent(draftID: state.composer.draft.id, stage: .send, sendID: commandID, sessionID: sessionID)

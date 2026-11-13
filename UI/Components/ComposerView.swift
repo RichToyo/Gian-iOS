@@ -23,6 +23,8 @@ struct ComposerView: View {
     /// Declared here so the synthesized memberwise argument order matches
     /// every call site (before `thumbnail`).
     var remoteReady: Bool = true
+    /// Stop has its own, lighter readiness (it must not gray out mid-turn).
+    var stopEnabled: Bool = true
     /// UI-local thumbnails captured at pick time.
     var thumbnail: (AttachmentID) -> Image? = { _ in nil }
     /// True only for an eligible uncertain create, never for uncertain send.
@@ -173,7 +175,7 @@ struct ComposerView: View {
                     .font(.footnote.weight(.bold))
             }
             .buttonStyle(GianCircularButtonStyle(tint: GianTheme.Colors.failure))
-            .disabled(!remoteReady)
+            .disabled(!stopEnabled)
             .accessibilityLabel("Stop")
         } else {
             Button {

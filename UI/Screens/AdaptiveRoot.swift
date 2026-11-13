@@ -384,6 +384,7 @@ struct AdaptiveRoot: View {
                 // composer and not the transcript.
                 composer: { presentation.composer },
                 mutationsReady: mutationsReady,
+                stopReady: presentation.stopReady,
                 diagnostic: diagnostic,
                 thumbnail: thumbnail,
                 onRetrySynchronization: onRetrySynchronization,

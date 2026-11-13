@@ -15,6 +15,8 @@ struct ChatScreen: View {
     /// drafts, but remote actions (send/interaction/translation/download) are
     /// disabled until catch-up completes.
     var mutationsReady: Bool = true
+    /// Whether Stop can be used (lighter than `mutationsReady`).
+    var stopReady: Bool = true
     var diagnostic: DiagnosticPresentation = .none
     /// UI-local thumbnails captured at attachment pick time.
     var thumbnail: (AttachmentID) -> Image? = { _ in nil }
@@ -167,6 +169,7 @@ struct ChatScreen: View {
             notice: held ? .none : ComposerNoticePresentation(composer.notice),
             isTurnActive: conversation.isTurnActive,
             remoteReady: mutationsReady,
+            stopEnabled: stopReady,
             thumbnail: thumbnail,
             moreMenu: ComposerMoreMenu(
                 settings: settings,

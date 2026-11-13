@@ -15,6 +15,8 @@ public final class GianClientStore {
     public internal(set) var authorizationInvalidationUnconfirmed = false
 
     public var mutationsReady: Bool { mutationsAllowed() }
+    /// Whether the open conversation's running turn can be stopped (see `stopAllowed`).
+    public var stopReady: Bool { currentSessionID.map(stopAllowed) ?? false }
     public internal(set) var transcriptFileStates: [AttachmentID: AttachmentBodyState] = [:]
 
     @ObservationIgnored let service: any GianClientServicing
@@ -433,6 +435,19 @@ public final class GianClientStore {
                 && state.conversation?.transcriptSync == .idle
                 && memory.bundle(for: scope).transcriptCursors[session]?.catchUp == nil
         }
+        return true
+    }
+
+    /// Stop is the safety valve: allowed whenever the Host can be reached and
+    /// the chat is known, not held by the catch-up, sync and directory checks
+    /// that gate edits. Those flicker while a turn streams events (the store's
+    /// event cursor briefly behind the connection's), which grayed Stop out
+    /// just when it was needed. The Host still refuses a stale revision.
+    func stopAllowed(_ session: SessionID) -> Bool {
+        guard readyScope() != nil, !storageLoadFailed, !storageWritesBlocked,
+              state.localConnectivity == .available, state.connection == .online,
+              state.conversation?.session.id == session, !deniedSessionAccess.contains(session) else { return false }
+        if let source = service as? any GianClientEventSource, expectedServiceEpoch != source.eventEpoch { return false }
         return true
     }
 
