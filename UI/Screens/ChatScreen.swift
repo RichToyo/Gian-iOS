@@ -271,7 +271,6 @@ private struct TranscriptScroller: View {
                     .equatable()
                     Color.clear.frame(height: 1).id("transcript-latest")
                 }
-                .padding(.top, 144)
                 .frame(maxWidth: GianTheme.Metrics.readableWidth)
                 .frame(maxWidth: .infinity)
             }
