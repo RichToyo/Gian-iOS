@@ -50,6 +50,42 @@ enum MarkdownCache {
     static func text(_ source: String) -> Text {
         inline(source).map(Text.init) ?? Text(source)
     }
+
+    /// Parses the messages not cached yet off the main thread, so a message
+    /// coming into view (scrolling up into history) finds its blocks and text
+    /// ready instead of parsing them in that frame.
+    static func prepare(_ sources: [String]) async {
+        let missing = sources.filter { !blockCache.contains($0) }
+        guard !missing.isEmpty else { return }
+        let parsed = await Task.detached(priority: .utility) {
+            missing.map { source in
+                let blocks = MarkdownBlockParser.parse(source)
+                let texts = blocks.flatMap(\.inlineTexts).compactMap { text in
+                    InlineMarkdown.attributed(text).map { (text, $0) }
+                }
+                return (source, blocks, texts)
+            }
+        }.value
+        guard !Task.isCancelled else { return }
+        for (source, blocks, texts) in parsed {
+            if !blockCache.contains(source) { blockCache.insert(blocks, for: source) }
+            for (text, attributed) in texts where !inlineCache.contains(text) {
+                inlineCache.insert(attributed, for: text)
+            }
+        }
+    }
+}
+
+extension MarkdownBlock {
+    /// The texts its view renders as inline Markdown.
+    var inlineTexts: [String] {
+        switch self {
+        case .heading(_, let text), .paragraph(let text), .blockquote(let text): [text]
+        case .list(_, let items): items
+        case .table(let headers, let rows): headers + rows.flatMap { $0 }
+        case .code, .thematicBreak: []
+        }
+    }
 }
 
 /// A bounded cache that forgets what hasn't been used lately, never what is on
@@ -86,6 +122,11 @@ struct RecentCache<Value> {
             currentBytes = 0
         }
         if current.updateValue(value, forKey: key) == nil { currentBytes += size }
+    }
+
+    /// Whether it holds `key`, without moving it.
+    func contains(_ key: String) -> Bool {
+        current[key] != nil || old[key] != nil
     }
 
     mutating func remove(_ key: String) {

@@ -58,6 +58,14 @@ final class AppPresentation {
     @ObservationIgnored private var rowsInput: StoreProjection.TranscriptRowsInput?
     @ObservationIgnored private var rows: [TranscriptRow] = []
     @ObservationIgnored private var rowAttachmentIDs: [AttachmentID] = []
+    /// Background parsing of the open conversation's messages (see `prepareMarkdown`).
+    @ObservationIgnored private var markdownPreparation: Task<Void, Never>?
+    @ObservationIgnored private var preparedRows: PreparedRows?
+
+    private struct PreparedRows: Equatable {
+        let session: SessionID
+        let count: Int
+    }
     /// New transcript content is revealed a step at a time (see TranscriptPacing).
     @ObservationIgnored private var pacing = TranscriptPacing()
     @ObservationIgnored private var pacingStep: Task<Void, Never>?
@@ -160,6 +168,9 @@ final class AppPresentation {
                 rowAttachmentIDs = rows.flatMap { row -> [AttachmentID] in
                     if case .user(let user) = row { user.attachmentIDs } else { [] }
                 }
+                if let session = state.conversation?.session.id {
+                    prepareMarkdown(session: session, streaming: shown.isTurnActive)
+                }
             }
             return rows
         }
@@ -214,6 +225,25 @@ final class AppPresentation {
         assign(\.optionsTrigger, AgentOptionsTrigger(store))
         assign(\.restorationHint, RestorationHintSelection(state))
         assign(\.banner, StoreProjection.banner(state))
+    }
+
+    /// Parses the newest messages' Markdown in the background when a
+    /// conversation opens or gains rows, so scrolling through them doesn't
+    /// parse in the frame each comes into view. The message still streaming
+    /// renders as it grows instead.
+    private func prepareMarkdown(session: SessionID, streaming: Bool) {
+        let key = PreparedRows(session: session, count: rows.count)
+        guard key != preparedRows else { return }
+        preparedRows = key
+        var sources: [String] = []
+        for row in rows.reversed() {
+            guard case .assistant(let message) = row else { continue }
+            sources.append(message.markdown)
+            if sources.count == 80 { break }
+        }
+        if streaming, !sources.isEmpty { sources.removeFirst() }
+        markdownPreparation?.cancel()
+        markdownPreparation = Task { await MarkdownCache.prepare(sources) }
     }
 
     /// Reveals the next step of the transcript after the pacing interval. Steps
