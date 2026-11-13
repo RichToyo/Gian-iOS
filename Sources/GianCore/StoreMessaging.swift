@@ -1038,6 +1038,16 @@ extension GianClientStore {
         )
         reproject()
         rememberDraft()
+        // Read (and so subscribe to) the new conversation, as opening one
+        // does: the Host streams a chat's messages only to devices subscribed
+        // to it. Without this the first message only appeared once some later
+        // update of the chat (e.g. the Host's automatic title) prompted a read,
+        // so a conversation given its own title stayed empty.
+        let created = session.id
+        Task { @MainActor [weak self] in
+            guard let self, self.currentSessionID == created else { return }
+            _ = await self.reconcileActiveTranscript()
+        }
     }
 
     private func clearSubmittedDraft(_ intent: DurableSendIntent) {
