@@ -84,6 +84,7 @@ public final class GianClientStore {
     @ObservationIgnored var sessions: [SessionRecord] = []
     @ObservationIgnored var taskRecords: [TaskRecord] = []
     @ObservationIgnored var conversationOrder = ConversationOrder()
+    @ObservationIgnored var readMarks = ReadMarks()
     @ObservationIgnored var searchHits: [SessionRecord] = []
     @ObservationIgnored var verifiedTranscriptDownloads: [AttachmentID: VerifiedTranscriptDownload] = [:]
     @ObservationIgnored var transcriptDownloadRequests: [AttachmentID: Int] = [:]
@@ -553,6 +554,7 @@ public final class GianClientStore {
     }
 
     func reproject() {
+        noteConversationOnScreenRead()
         alertStates = alertStatesNow()
         let query = state.directory.searchQuery
         conversationOrder.note(sessions)
@@ -597,6 +599,7 @@ public final class GianClientStore {
             let names = state.workspaces.reduce(into: [WorkspaceID: String]()) { $0[$1.id] = $1.name }
             state.directory.temporarySearchResult = DirectoryFilter.summary(session, names: names)
         }
+        showReadMarks()
         projectDirectoryStatus()
         // New chat's task picker lists open tasks in Gian's order too.
         state.openTasks = taskRecords.filter { $0.status == .open }
@@ -627,6 +630,7 @@ public final class GianClientStore {
             bundle.sessions = sessions
             bundle.tasks = taskRecords
             bundle.conversationOrder = conversationOrder.persisted
+            bundle.readMarks = readMarks.persisted
             bundle.workspaces = state.workspaces
             bundle.agents = state.agents
             bundle.interactions = state.interactions
@@ -731,6 +735,7 @@ public final class GianClientStore {
         }
         taskRecords = bundle.tasks
         conversationOrder = ConversationOrder(bundle.conversationOrder ?? [])
+        readMarks = ReadMarks(bundle.readMarks ?? [:])
         state.workspaces = bundle.workspaces
         state.agents = bundle.agents
         state.interactions = bundle.interactions
@@ -908,6 +913,7 @@ public final class GianClientStore {
         sessions = []
         taskRecords = []
         conversationOrder = ConversationOrder()
+        readMarks = ReadMarks()
         searchHits = []
         directoryViews = [:]
         manualDirectoryRecoveries = [:]
@@ -982,6 +988,7 @@ public final class GianClientStore {
         sessions = []
         taskRecords = []
         conversationOrder = ConversationOrder()
+        readMarks = ReadMarks()
         searchHits = []
         directoryViews = [:]
         manualDirectoryRecoveries = [:]
@@ -1120,6 +1127,7 @@ public final class GianClientStore {
         sessions = []
         taskRecords = []
         conversationOrder = ConversationOrder()
+        readMarks = ReadMarks()
         searchHits = []
         directoryViews = [:]
         manualDirectoryRecoveries = [:]

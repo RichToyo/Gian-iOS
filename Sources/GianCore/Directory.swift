@@ -85,6 +85,56 @@ struct ConversationOrder: Equatable, Sendable {
     }
 }
 
+/// Conversations read on this device. The Host's unread flag only clears when
+/// a conversation is opened in Gian on the Mac (the Remote protocol has no
+/// "mark read"), so one read here stayed unread. Each mark is the conversation's
+/// activity time when it was last on screen here; it shows as read until
+/// later activity (another reply, a turn ending) arrives.
+struct ReadMarks: Equatable, Sendable {
+    /// The most marks kept; the oldest go first.
+    static let limit = 1_024
+    /// Activity this soon after a mark still counts as seen. The Host's
+    /// activity time also counts a turn's completion and rounds its own
+    /// timestamps, so it can land just after the last thing shown.
+    static let tolerance: TimeInterval = 5
+    private(set) var marks: [SessionID: Date] = [:]
+
+    init(_ marks: [SessionID: Date] = [:]) {
+        self.marks = marks.filter { $0.value.timeIntervalSince1970.isFinite }
+        trim()
+    }
+
+    var isEmpty: Bool { marks.isEmpty }
+    var persisted: [SessionID: Date]? { marks.isEmpty ? nil : marks }
+
+    /// Records that `session` is on screen; true when that changed a mark.
+    mutating func noteRead(_ session: SessionRecord) -> Bool {
+        let activity = Self.activity(session)
+        if let mark = marks[session.id], mark >= activity { return false }
+        marks[session.id] = activity
+        trim()
+        return true
+    }
+
+    /// Whether a conversation with this activity (as its summary shows it)
+    /// was read here.
+    func covers(_ id: SessionID, activity: Date?) -> Bool {
+        guard let mark = marks[id] else { return false }
+        return (activity ?? .distantPast) <= mark.addingTimeInterval(Self.tolerance)
+    }
+
+    /// The activity a summary shows: message or execution time only.
+    static func activity(_ session: SessionRecord) -> Date {
+        session.activityIsMessageOrExecution ? session.lastActivityAt ?? .distantPast : .distantPast
+    }
+
+    private mutating func trim() {
+        guard marks.count > Self.limit else { return }
+        let kept = marks.sorted { $0.value == $1.value ? $0.key.rawValue < $1.key.rawValue : $0.value > $1.value }.prefix(Self.limit)
+        marks = Dictionary(uniqueKeysWithValues: kept.map { ($0.key, $0.value) })
+    }
+}
+
 /// Open tasks in the order the Host lists them, which is Gian's: tasks never
 /// reordered by hand newest first, then the manual drag order.
 struct TaskOrder {

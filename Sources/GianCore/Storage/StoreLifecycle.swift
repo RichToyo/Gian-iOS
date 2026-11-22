@@ -306,6 +306,7 @@ extension GianClientStore {
         sessions = []
         taskRecords = []
         conversationOrder = ConversationOrder()
+        readMarks = ReadMarks()
         searchHits = []
         directoryViews = [:]
         manualDirectoryRecoveries = [:]

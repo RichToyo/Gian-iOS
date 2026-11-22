@@ -3,6 +3,42 @@ import Foundation
 extension GianClientStore {
     var negotiatedDirectory: Bool { state.capabilities.negotiatedFeatures.contains(.sessionDirectoryV1) }
 
+    /// The conversation on screen counts as read here (see `ReadMarks`).
+    func noteConversationOnScreenRead() {
+        guard state.foreground == .foreground, case .conversation(let id) = state.navigation.destination,
+              let session = sessions.first(where: { $0.id == id }) ?? searchHits.first(where: { $0.id == id }),
+              readMarks.noteRead(session) else { return }
+        schedulePersistence()
+    }
+
+    /// Shows conversations read here as read, whatever the Host's flag says.
+    func showReadMarks() {
+        guard !readMarks.isEmpty else { return }
+        let marks = readMarks
+        func shown(_ summary: ConversationSummary) -> ConversationSummary {
+            guard summary.unread, marks.covers(summary.id, activity: summary.lastActivityAt) else { return summary }
+            var read = summary
+            read.unread = false
+            return read
+        }
+        var directory = state.directory
+        directory.tasks = directory.tasks.map { section in
+            var section = section
+            section.conversations = section.conversations.map(shown)
+            return section
+        }
+        directory.repositories = directory.repositories.map { section in
+            var section = section
+            section.conversations = section.conversations.map(shown)
+            return section
+        }
+        directory.repos = directory.repos.map(shown)
+        directory.searchResults = directory.searchResults.map(shown)
+        directory.temporarySearchResult = directory.temporarySearchResult.map(shown)
+        directory.temporaryCreatedResults = directory.temporaryCreatedResults.map(shown)
+        state.directory = directory
+    }
+
     func resolveSessionAccess(_ result: SessionAccessResult, session: SessionID, version: Int, scope: ClientScope) {
         guard readyScope() == scope, pendingSessionAccess[session] == version else { return }
         switch result {

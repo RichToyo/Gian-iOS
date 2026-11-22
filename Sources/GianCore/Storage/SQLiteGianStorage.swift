@@ -200,6 +200,7 @@ public final class SQLiteGianStorage: GianStorage {
                   (state.retentionRenewedActivity?.count ?? 0) <= 4_096,
                   (state.retentionActivityBaseline ?? [:]).values.allSatisfy({ $0.timeIntervalSince1970.isFinite }),
                   (state.retentionRenewedActivity ?? [:]).values.allSatisfy({ $0.timeIntervalSince1970.isFinite }),
+                  (state.readMarks?.count ?? 0) <= 4_096,
                   (state.retentionProtectedDownloads?.count ?? 0) <= 131_072 else { throw GianStorageError.corruptData }
             let pending = Set(jobs)
             let paused = Set(state.retentionPausedSessions ?? [])
