@@ -84,22 +84,27 @@ struct HostScopedTitle: View {
 }
 
 /// The Hosts list: every paired Host with its status and the current one
-/// checked at the end (selection dispatches `.selectHost`; unreachable Hosts
-/// are listed but disabled), then Add Host and Settings.
+/// checked at the end. Selection dispatches `.selectHost`, including for an
+/// offline Host to retry it, then Add Host and Settings.
 struct HostList: View {
     let hosts: [HostItem]
     var onSelect: (HostID) -> Void
     var onAddHost: () -> Void
     var onManage: () -> Void
 
+    var hostRows: [ChoiceListRow] {
+        hosts.map { host in
+            // The reachability shown can be stale; selecting a paired Host
+            // always tries it again, so an offline one stays selectable.
+            ChoiceListRow(id: host.id.rawValue, title: host.name, subtitle: host.isReachable ? "Online" : "Offline",
+                          systemImage: "laptopcomputer", isSelected: host.isCurrent) { onSelect(host.id) }
+        }
+    }
+
     var body: some View {
         ChoiceList(
             header: "Hosts",
-            rows: hosts.map { host in
-                ChoiceListRow(id: host.id.rawValue, title: host.name, subtitle: host.isReachable ? "Online" : "Offline",
-                              systemImage: "laptopcomputer", isSelected: host.isCurrent,
-                              isEnabled: host.isReachable || host.isCurrent) { onSelect(host.id) }
-            },
+            rows: hostRows,
             actions: [
                 ChoiceListRow(id: "add", title: "Add Host", systemImage: "plus", action: onAddHost),
                 ChoiceListRow(id: "manage", title: "Manage in Settings", systemImage: "gearshape", action: onManage),
