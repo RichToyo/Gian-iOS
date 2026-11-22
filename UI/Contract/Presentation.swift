@@ -497,6 +497,9 @@ struct ActiveConversationPresentation: Equatable, Sendable {
     var pendingSend: PendingSendRow? = nil
     /// The composer stays empty while its draft is on its way.
     var holdsDraft = false
+    /// The rows this update adds are a paced reveal of a new row and fade in;
+    /// otherwise (a burst, a page, a reload) they appear at once.
+    var rowsArrive = false
 }
 
 /// The user's message while it is on its way (the desktop's "echo"): dimmed

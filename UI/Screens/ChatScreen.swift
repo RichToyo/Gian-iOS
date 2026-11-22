@@ -268,7 +268,8 @@ private struct TranscriptScroller: View {
                         pendingActionsEnabled: mutationsReady,
                         onSendOriginal: chat.onSendOriginal,
                         onRetryTranslationSend: chat.onRetryTranslationSend,
-                        onTakeTextBack: chat.onCancelTranslationSend
+                        onTakeTextBack: chat.onCancelTranslationSend,
+                        rowsArrive: conversation.rowsArrive
                     )
                     // Unchanged rows aren't re-rendered while scrolling moves the top row.
                     .equatable()
@@ -325,7 +326,13 @@ private struct TranscriptScroller: View {
                     olderPageAnchor = nil
                     return
                 }
-                if new.shouldFollow(after: old), !pinsLatest || !scroll.nearBottom {
+                guard new.shouldFollow(after: old) else { return }
+                // Many rows at once (a catch-up): scroll in this same update.
+                // A follow a moment later first showed them laid out from
+                // where the view was (from the top in a short chat).
+                if new.count - old.count >= 3, followsLatest, !scroll.userScrolling {
+                    proxy.scrollTo("transcript-latest", anchor: .bottom)
+                } else if !pinsLatest || !scroll.nearBottom {
                     followLatest(proxy, animated: false)
                 }
             }

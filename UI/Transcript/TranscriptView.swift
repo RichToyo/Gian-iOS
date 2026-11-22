@@ -28,6 +28,8 @@ struct TranscriptView: View {
     var onSendOriginal: () -> Void = {}
     var onRetryTranslationSend: () -> Void = {}
     var onTakeTextBack: () -> Void = {}
+    /// Rows this update adds fade in on their own (see `arrival`).
+    var rowsArrive = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -136,15 +138,25 @@ struct TranscriptView: View {
         .padding(.vertical, GianTheme.Metrics.paddingSmall)
     }
 
-    /// Rises a little as it fades in (only fades with Reduce Motion); fades out.
+    /// Rises a little as it fades in (only fades with Reduce Motion); fades
+    /// out. A row revealed on its own (`rowsArrive`) carries its own
+    /// animation: the update that adds it isn't animated, so the rows around
+    /// it and the scroll position settle in the same frame. Rows that come
+    /// together (a burst, a page) appear at once.
     private var arrival: AnyTransition {
-        reduceMotion ? .opacity : Self.rise
+        switch (rowsArrive, reduceMotion) {
+        case (true, false): Self.riseOnItsOwn
+        case (true, true): Self.fadeOnItsOwn
+        case (false, false): Self.rise
+        case (false, true): .opacity
+        }
     }
 
-    private static let rise = AnyTransition.asymmetric(
-        insertion: .opacity.combined(with: .offset(y: 10)),
-        removal: .opacity
-    )
+    private static let rise = AnyTransition.asymmetric(insertion: .opacity.combined(with: .offset(y: 10)), removal: .opacity)
+    private static let riseOnItsOwn = AnyTransition.asymmetric(
+        insertion: .opacity.combined(with: .offset(y: 10)).animation(.easeOut(duration: 0.25)), removal: .opacity)
+    private static let fadeOnItsOwn = AnyTransition.asymmetric(
+        insertion: .opacity.animation(.easeOut(duration: 0.25)), removal: .opacity)
 
     private func noticeRow(severity: NoticeSeverity, code: String) -> some View {
         HStack(spacing: GianTheme.Metrics.paddingSmall) {

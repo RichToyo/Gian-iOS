@@ -159,9 +159,10 @@ final class AppPresentation {
         }
     }
 
-    /// `transcriptAnimation` animates the conversation (a reveal step), and
-    /// nothing else this sync happens to change.
-    private func sync(_ store: GianClientStore, transcriptAnimation: Animation? = nil) {
+    /// `transcriptAnimation` animates the conversation (a growing message),
+    /// and nothing else this sync happens to change. `rowsArrive` lets the
+    /// rows it adds fade in (a new row revealed on its own).
+    private func sync(_ store: GianClientStore, transcriptAnimation: Animation? = nil, rowsArrive: Bool = false) {
         let state = store.state
         let ready = displayedReady(store.mutationsReady, store: store)
         assign(\.phase, state.phase)
@@ -200,9 +201,15 @@ final class AppPresentation {
             holdStatus()
         }
         conversation?.connectivity = shownStatus.connectivity
+        conversation?.rowsArrive = rowsArrive
         conversation?.transcriptSync = shownStatus.transcriptSync
-        if let transcriptAnimation {
-            withAnimation(transcriptAnimation) { assign(\.conversation, conversation) }
+        // When a turn ends its work card moves from the turn's end to above
+        // the final answer (as in Gian), which moves the answer down by the
+        // card's height: it glides there instead of jumping.
+        let turnEnded = conversation?.id == self.conversation?.id
+            && self.conversation?.isTurnActive == true && conversation?.isTurnActive == false
+        if let animation = transcriptAnimation ?? (turnEnded ? .easeInOut(duration: 0.3) : nil) {
+            withAnimation(animation) { assign(\.conversation, conversation) }
         } else {
             assign(\.conversation, conversation)
         }
@@ -304,8 +311,12 @@ final class AppPresentation {
             self.pacingStep = nil
             let step = store.state.conversation.map { self.pacing.advance($0.items) } ?? .none
             switch step {
-            // A new row settles in.
-            case .newRow: self.sync(store, transcriptAnimation: .easeOut(duration: 0.25))
+            // A new row fades in by its own transition (see TranscriptView);
+            // the layout around it isn't animated. Animating it animated the
+            // pin to the bottom too, and the row's measured height (smaller
+            // than the lazy stack's first estimate) then landed mid-animation:
+            // everything dropped and glided back up.
+            case .newRow: self.sync(store, rowsArrive: true)
             // A growing message glides through the step's interval, so its
             // steps read as one movement rather than a staircase.
             case .grew: self.sync(store, transcriptAnimation: .linear(duration: TranscriptPacing.interval / .seconds(1)))
