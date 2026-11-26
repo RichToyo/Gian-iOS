@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 /// Inline Markdown (emphasis, code, links, strikethrough) as Gian renders it.
 ///
@@ -18,7 +19,18 @@ enum InlineMarkdown {
         let marked = EmphasisMarkers.mark(text)
         guard var attributed = try? AttributedString(markdown: marked ?? text, options: options) else { return nil }
         if marked != nil { EmphasisMarkers.apply(to: &attributed) }
+        styleCode(&attributed)
         return attributed
+    }
+
+    /// Inline code a step smaller than the text around it, on a light tint:
+    /// at the same size, monospaced glyphs looked larger than the prose (most
+    /// of all next to CJK text) and long identifiers wrapped early.
+    static func styleCode(_ attributed: inout AttributedString) {
+        for run in attributed.runs where run.inlinePresentationIntent?.contains(.code) == true {
+            attributed[run.range].font = .system(.subheadline, design: .monospaced)
+            attributed[run.range].backgroundColor = GianTheme.Colors.codeBackground
+        }
     }
 }
 

@@ -97,11 +97,39 @@ enum StatusBadge: Equatable, Sendable {
     }
 }
 
+/// What the app knows about a Host right now. Only the current Host has a
+/// live connection; another Host's state isn't known until it is chosen.
+enum HostStatus: Equatable, Sendable {
+    case online, connecting, offline, notConnected
+
+    var label: String {
+        switch self {
+        case .online: "Online"
+        case .connecting: "Connecting…"
+        case .offline: "Offline"
+        case .notConnected: "Not connected"
+        }
+    }
+}
+
 struct HostItem: Identifiable, Equatable, Sendable {
     let id: HostID
     var name: String
-    var isReachable: Bool
+    var status: HostStatus
     var isCurrent: Bool
+
+    var isReachable: Bool { status == .online }
+
+    init(id: HostID, name: String, status: HostStatus, isCurrent: Bool) {
+        self.id = id
+        self.name = name
+        self.status = status
+        self.isCurrent = isCurrent
+    }
+
+    init(id: HostID, name: String, isReachable: Bool, isCurrent: Bool) {
+        self.init(id: id, name: name, status: isReachable ? .online : .offline, isCurrent: isCurrent)
+    }
 }
 
 /// One row in Tasks/Repos/search, projected from `ConversationSummary`.
@@ -160,6 +188,8 @@ struct UserRow: Equatable, Identifiable, Sendable {
     var text: String
     var attachmentIDs: [AttachmentID]
     var sentTranslation: SentTranslation?
+    /// When it was sent, shown under the bubble.
+    var time: Date? = nil
 }
 
 /// Reading-translation presentation for one assistant item, derived from the
@@ -188,6 +218,8 @@ struct AssistantRow: Equatable, Identifiable, Sendable {
     var translationExpandedByDefault: Bool = true
     var canCancelTranslation: Bool = false
     var isFinalResult: Bool = true
+    /// When the reply arrived; shown (with Copy) under a turn's final answer.
+    var time: Date? = nil
 }
 
 struct WorkEventItem: Equatable, Identifiable, Sendable {
@@ -337,6 +369,46 @@ enum ConnectivityPresentation: Equatable, Sendable {
         case .reconnecting: self = .reconnecting
         case .deviceRevoked: self = .deviceRevoked
         case .versionMismatch(let version): self = .versionMismatch(version)
+        }
+    }
+}
+
+/// What the conversation list says about the connection while it isn't
+/// live (it used to say nothing: a stale list looked current).
+enum ListConnectionNotice: Equatable, Sendable {
+    case noNetwork
+    case serverUnreachable
+    case hostOffline(String)
+    case reconnecting
+    case revoked
+    case incompatible(String)
+
+    var text: String {
+        switch self {
+        case .noNetwork: "No network connection. Showing saved conversations."
+        case .serverUnreachable: "Can't reach the Server. Showing saved conversations."
+        case .hostOffline(let host): "\(host) is offline. Showing saved conversations."
+        case .reconnecting: "Reconnecting…"
+        case .revoked: "This device's access was revoked. Pair the Host again."
+        case .incompatible(let version): "This Host's version (\(version)) isn't supported by this app."
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .noNetwork: "wifi.slash"
+        case .serverUnreachable: "icloud.slash"
+        case .hostOffline: "laptopcomputer.slash"
+        case .reconnecting: "arrow.triangle.2.circlepath"
+        case .revoked: "hand.raised"
+        case .incompatible: "exclamationmark.triangle"
+        }
+    }
+
+    var canRetry: Bool {
+        switch self {
+        case .serverUnreachable, .hostOffline: true
+        default: false
         }
     }
 }

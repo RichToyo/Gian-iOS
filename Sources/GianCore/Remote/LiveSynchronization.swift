@@ -4,12 +4,21 @@ extension LiveGianClientService {
     public func refreshDirectory(scope: ClientScope) async -> DirectoryRefreshResponse {
         var fence: RemoteDirectoryReadFence?
         var pendingSnapshotID: String?
-        defer { if let pendingSnapshotID { pendingReadSnapshots.remove(pendingSnapshotID) } }
+        var holding: Int?
+        defer {
+            if let pendingSnapshotID { pendingReadSnapshots.remove(pendingSnapshotID) }
+            // A read that didn't land drops what it held: the store still
+            // needs a snapshot, which will cover those changes.
+            if let holding, heldFramesRead == holding { heldFrames = nil; heldFramesRead = nil }
+        }
         do {
             try await connect(scope: scope)
             let captured = epoch
             let read = beginDirectoryRead()
             fence = read
+            if heldFrames == nil { heldFrames = [] }
+            heldFramesRead = read.read
+            holding = read.read
             var state = try await rpc(scope: scope, method: "state.refresh", params: .object([:]))
             if try state.string("type") == "state.snapshot.pending" {
                 let id = try state.identifier("snapshot_id")
@@ -26,7 +35,15 @@ extension LiveGianClientService {
             guard try state.string("type") == "state.snapshot", try state.identifier("host_generation") == relay?.generation else {
                 throw RemoteClientError.invalidPayload
             }
-            let catalog = try await rpc(scope: scope, method: "catalog.read", params: .object([:]))
+            // The catalog (Agents, repositories) is read again only when the
+            // snapshot names a different revision than the last one read.
+            let catalog: WireValue
+            if let last = lastCatalog, last.scope == scope,
+               (try? last.value.string("catalog_revision")) == (try? state.string("catalog_revision")) {
+                catalog = last.value
+            } else {
+                catalog = try await rpc(scope: scope, method: "catalog.read", params: .object([:]))
+            }
             try checkDirectoryRead(read)
             let payload = try RemoteMapping.directory(snapshot: state, catalog: catalog, scope: scope, features: relay?.features ?? [])
             var vault = try requireVault(server: scope.server, account: scope.account)
@@ -36,9 +53,12 @@ extension LiveGianClientService {
             }
             try checkDirectoryRead(read)
             self.snapshot = state; self.capabilities = state["capabilities"]; self.catalog = catalog; self.cursor = payload.cursor
+            lastCatalog = (scope, catalog)
             lastFailure = nil
             emit(.directory(payload), scope: scope)
             try checkDirectoryRead(read)
+            holding = nil
+            releaseHeldFrames(read: read.read, scope: scope)
             return .snapshot(payload)
         } catch {
             if let fence, !directoryReadIsCurrent(fence) { return .unknownOutcome }
@@ -161,8 +181,40 @@ extension LiveGianClientService {
         for record in records { emit(.translation(sessionID: sessionID, update: .upsert(record)), scope: scope) }
     }
 
+    /// Applies, in order, the canonical frames held while the snapshot read
+    /// `read` was in flight, skipping those the snapshot already covers.
+    func releaseHeldFrames(read: Int, scope: ClientScope) {
+        guard heldFramesRead == read, let frames = heldFrames else { return }
+        heldFrames = nil; heldFramesRead = nil
+        for frame in frames {
+            if let sequence = try? frame.integer("event_sequence"), let current = cursor,
+               sequence <= current.eventSequence { continue }
+            do { try receive(frame, scope: scope) } catch {
+                // As if it had just arrived: a bad frame closes the connection.
+                relay?.close((error as? RemoteClientError) ?? .invalidPayload)
+                return
+            }
+        }
+    }
+
+    /// Whether a frame moves the Host's canonical sequence (a snapshot read
+    /// holds these until it lands).
+    func isCanonicalFrame(_ message: WireValue, type: String) -> Bool {
+        if type == "state.patch" { return true }
+        guard type == "event", let kind = try? message["event"].string("kind") else { return false }
+        return kind != "transcript.item" && kind != "translation.updated"
+    }
+
     func receive(_ message: WireValue, scope: ClientScope) throws {
         let kind = try message.string("type")
+        if heldFrames != nil, isCanonicalFrame(message, type: kind) {
+            if heldFrames!.count < 1_024 {
+                heldFrames!.append(message)
+                return
+            }
+            // Too much at once: read again instead (the read is superseded below).
+            heldFrames = nil; heldFramesRead = nil
+        }
         switch kind {
         case "command.accepted", "command.result":
             let id = try message.string("command_id")

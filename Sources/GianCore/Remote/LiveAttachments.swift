@@ -99,6 +99,32 @@ extension LiveGianClientService {
         await download(scope: scope, handle: handleID, expectedHash: nil, kind: "file")
     }
 
+    /// `file.resolve` then `file.preview`, as remote-web opens a linked file.
+    /// The Host resolves the reference inside the session's repository; this
+    /// app never reads a Host path itself.
+    public func previewFileReference(scope: ClientScope, sessionID: SessionID, reference: String) async -> FileReferencePreviewResponse {
+        do {
+            try requireCapability(.fileRead, scope: scope)
+            guard !reference.isEmpty, reference.utf16.count <= 4096 else { throw RemoteClientError.invalidPayload }
+            let resolved = try await rpc(scope: scope, method: "file.resolve", params: .object([
+                "session_id": .string(sessionID.rawValue), "reference": .string(reference),
+            ]))
+            let descriptor = try RemoteFileDescriptor(resolved, session: sessionID)
+            guard descriptor.previewable, descriptor.byteCount <= 1024 * 1024 else { return .notPreviewable(name: descriptor.name) }
+            switch await previewFile(scope: scope, handleID: descriptor.id.rawValue) {
+            case .downloaded(_, let bytes): return .preview(name: descriptor.name, data: bytes)
+            case .expired: return .failed(RemoteClientError.expired.safeDescription)
+            case .unavailable(let message), .failed(let message): return .failed(message)
+            case .uploaded: return .failed(RemoteClientError.invalidPayload.safeDescription)
+            }
+        } catch {
+            let safe = note(error)
+            if case .server("RESOURCE_NOT_FOUND", _) = safe { return .failed("That file wasn't found in this conversation's repository.") }
+            if safe == .capabilityDenied { return .failed("The Host doesn't let this device read files.") }
+            return .failed(safe.safeDescription)
+        }
+    }
+
     public func previewFile(scope: ClientScope, handleID: String) async -> AttachmentTransferResponse {
         do {
             try requireCapability(.fileRead, scope: scope)

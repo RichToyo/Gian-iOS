@@ -111,22 +111,27 @@ extension LiveGianClientService: GianClientServicing {
                 knownPriorAttempt = true
                 guard previous == fingerprint else { throw RemoteClientError.server(code: "UNKNOWN_OUTCOME", retryAfter: nil) }
             }
-            // Always reconcile a durable command ID first. A restarted client has no in-memory ledger.
-            let status = try await statusData(scope: scope, command: id)
-            try checkEpoch(captured)
-            switch try status.string("state") {
-            case "succeeded": return .succeeded(try commandSuccess(status["result"], method: method, command: id, scope: scope, queueSession: queueSession))
-            case "failed": return .failed(id, message: RemoteWire.error(status["error"]).safeDescription)
-            case "expired": return .failed(id, message: RemoteClientError.expired.safeDescription)
-            case "accepted", "unknown_outcome": return .unknownOutcome(id)
-            case "not_seen": break
-            default: throw RemoteClientError.invalidPayload
+            // Reconcile a command ID that may already have been sent (this
+            // process or a previous one: the vault is saved before sending).
+            // A brand-new ID skips the extra round trip, like remote-web; the
+            // Host's ledger answers a repeated ID with its recorded outcome.
+            if knownPriorAttempt || issuedCommands[id.rawValue] != nil {
+                let status = try await statusData(scope: scope, command: id)
+                try checkEpoch(captured)
+                switch try status.string("state") {
+                case "succeeded": return .succeeded(try commandSuccess(status["result"], method: method, command: id, scope: scope, queueSession: queueSession))
+                case "failed": return .failed(id, message: RemoteWire.error(status["error"]).safeDescription)
+                case "expired": return .failed(id, message: RemoteClientError.expired.safeDescription)
+                case "accepted", "unknown_outcome": return .unknownOutcome(id)
+                case "not_seen": break
+                default: throw RemoteClientError.invalidPayload
+                }
             }
-            guard issuedCommands.count < 2048 || issuedCommands[id.rawValue] != nil else { throw RemoteClientError.bufferLimit }
+            AttemptLedger.makeRoom(&issuedCommands, for: id.rawValue)
             issuedCommands[id.rawValue] = fingerprint
             try requireCapability(capability, scope: scope)
             vault = try requireVault(server: scope.server, account: scope.account)
-            guard vault.commandAttempts.count < 2048 || vault.commandAttempts[id.rawValue] != nil else { throw RemoteClientError.bufferLimit }
+            AttemptLedger.makeRoom(&vault.commandAttempts, for: id.rawValue)
             vault.commandAttempts[id.rawValue] = fingerprint
             try saveVault(vault, server: scope.server, account: scope.account, epoch: captured)
             attempted = true

@@ -63,6 +63,9 @@ public final class GianClientStore {
     @ObservationIgnored var retentionRecoveryYield: () async -> Void = { await Task.yield() }
     /// One step of a new chat's first send waiting for sending to be allowed.
     @ObservationIgnored var firstSendSettleWait: () async throws -> Void = { try await Task.sleep(for: .milliseconds(200)) }
+    @ObservationIgnored var mutationSettleWait: () async throws -> Void = { try await Task.sleep(for: .milliseconds(120)) }
+    /// Between reads of a chat that an update of it overtook.
+    @ObservationIgnored var transcriptRereadWait: () async throws -> Void = { try await Task.sleep(for: .milliseconds(150)) }
     @ObservationIgnored var translationPageRequests: Set<TranslationRecordID> = []
     @ObservationIgnored var translationStatusRequests: Set<TranslationRequestID> = []
     @ObservationIgnored var directoryRefreshPending = false
@@ -294,7 +297,7 @@ public final class GianClientStore {
             // reconnects (the coordinator reads a fresh snapshot), as when the
             // network returns. It is not an unreachable Host.
             if readyScope() != nil, !storageLoadFailed, !storageWritesBlocked,
-               state.localConnectivity == .available, state.connection == .offline {
+               state.localConnectivity == .available, state.connection == .offline || state.connection == .hostOffline {
                 state.connection = .resyncing
             }
             return result
@@ -303,6 +306,14 @@ public final class GianClientStore {
             guard let eventCoordinator else { return reject(.capabilityUnsupported) }
             return await eventCoordinator.refreshConnection()
         case .clearAttachmentCache: return clearCache()
+        case .removeCurrentHost:
+            guard let eventCoordinator, readyScope() != nil else { return reject(.noCurrentHost) }
+            let result = await eventCoordinator.revokeCurrentHost()
+            // Not an empty list with no Host: the next paired one opens.
+            if state.currentHostID == nil, let next = state.hosts.first {
+                return await reduceAction(.selectHost(next.id))
+            }
+            return result
         }
     }
 
@@ -421,6 +432,31 @@ public final class GianClientStore {
             return false
         }
         return true
+    }
+
+    /// While a reply streams, the connection records each frame's cursor
+    /// before the store has applied the event, which closes the mutation gate
+    /// for a moment. A tap that lands then (Send, an answer, a queue edit, a
+    /// setting) waits briefly for the store to catch up instead of being
+    /// refused. False if it still isn't allowed.
+    func settleMutations() async -> Bool {
+        if mutationsAllowed() { return true }
+        let token = epoch
+        for _ in 0..<10 where eventCursorCatchingUp() {
+            try? await mutationSettleWait()
+            guard token == epoch else { return false }
+            if mutationsAllowed() { return true }
+        }
+        return mutationsAllowed()
+    }
+
+    /// The connection has accepted events the store hasn't applied yet.
+    func eventCursorCatchingUp() -> Bool {
+        guard state.connection == .online, state.localConnectivity == .available,
+              let producer = service as? any DirectoryReadinessReporting,
+              let accepted = producer.acceptedDirectory, let cursor = state.sync.cursor,
+              accepted.cursor.hostGeneration == cursor.hostGeneration else { return false }
+        return accepted.cursor.eventSequence > cursor.eventSequence
     }
 
     func mutationsAllowed() -> Bool {
@@ -1025,7 +1061,7 @@ public final class GianClientStore {
         guard let server = state.server else { return reject(.notAuthorized) }
         switch PairingQR.parse(payload: payload, server: server) {
         case .failure(let code):
-            state.pairingOutcome = .invalidCode
+            state.pairingOutcome = code == .pairingServerMismatch ? .otherServer : .invalidCode
             return reject(code)
         case .success(let invitation):
             return await claim(invitation)
@@ -1179,8 +1215,9 @@ public final class GianClientStore {
         // An update of the chat, or another read of it, overtook the read: the
         // Host is fine, so read again (bounded) rather than report a failure.
         var rereads = 0
-        while page.superseded, rereads < 2, responseIsCurrent(token), navigation == navigationEpoch, currentSessionID == id {
+        while page.superseded, rereads < 4, responseIsCurrent(token), navigation == navigationEpoch, currentSessionID == id {
             rereads += 1
+            try? await transcriptRereadWait()
             page = await service.pageTranscript(scope: scope, sessionID: id, cursor: nil)
         }
         guard responseIsCurrent(token), state.currentHostID == scope.host else {
@@ -1270,7 +1307,7 @@ public final class GianClientStore {
             requiresFreshSnapshot = true
             state.sync.needsSnapshot = true
             state.sync.reason = .cryptoResumed
-        } else if state.connection == .offline {
+        } else if state.connection == .offline || state.connection == .hostOffline {
             state.connection = .resyncing
         }
         persist()

@@ -135,7 +135,7 @@ final class RemoteRelay {
                             if !frame["device_id"].isNull, try frame.identifier("device_id") != self.crypto?.device { throw RemoteClientError.integrity }
                             let kind = try frame.string("type")
                             if kind == "device.revoked" { throw RemoteClientError.deviceRevoked }
-                            if kind == "host.offline" { throw RemoteClientError.disconnected }
+                            if kind == "host.offline" { throw RemoteClientError.server(code: "HOST_OFFLINE", retryAfter: nil) }
                             if kind == "host.online" { continue }
                             throw RemoteClientError.invalidPayload
                         }

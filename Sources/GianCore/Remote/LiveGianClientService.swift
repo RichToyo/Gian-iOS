@@ -20,8 +20,18 @@ public final class LiveGianClientService: GianClientLifecycle {
     var connecting: Task<Void, any Error>?
     var reconnect: Task<Void, Never>?
     var reconnectAttempt = 0
-    /// Reconnect attempt n waits this × 2ⁿ, at most × 32.
+    /// Reconnect attempt n waits this × 2ⁿ⁻¹ ÷ 2 (0.5 s, 1 s, 2 s…), at most
+    /// × 10 (× 5 while the Host is offline: it comes back on its own), like
+    /// remote-web. It used to wait up to 32 s.
     var reconnectBackoffUnit: Duration = .seconds(1)
+    /// Canonical frames that arrived while a snapshot read was in flight.
+    /// They are applied after the snapshot (those it doesn't already cover)
+    /// instead of cancelling it: a busy Host used to cancel every read.
+    var heldFrames: [WireValue]?
+    var heldFramesRead: Int?
+    /// The last Agent catalog read for a scope: a reconnect reuses it when the
+    /// snapshot names the same catalog revision.
+    var lastCatalog: (scope: ClientScope, value: WireValue)?
     var intentionalDisconnect = false
     var overflowed = false
     var commandWaiters: [String: RemoteCommandWaiter] = [:]

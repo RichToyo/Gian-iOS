@@ -98,20 +98,48 @@ enum StoreProjection {
         switch outcome {
         case nil, .paired: nil
         case .invalidCode: "That isn't a valid pairing code or QR code for this server."
+        case .otherServer: "That Host uses a different server. Pair it from the server this app is connected to."
         case .rejected: "The Host declined this device."
         case .expired: "That pairing link has expired. Make a new one on the Host."
         case .failed(let message): message
         }
     }
 
+    /// The current Host follows the live connection (it used to show the
+    /// last snapshot's "online" forever, so a sleeping Mac stayed green).
+    /// Other Hosts have no connection to report on.
     static func hosts(_ state: GianClientState) -> [HostItem] {
         state.hosts.map { host in
-            HostItem(
+            let isCurrent = host.id == state.currentHostID
+            return HostItem(
                 id: host.id,
                 name: host.name,
-                isReachable: host.online,
-                isCurrent: host.id == state.currentHostID
+                status: isCurrent ? currentHostStatus(state) : .notConnected,
+                isCurrent: isCurrent
             )
+        }
+    }
+
+    static func listConnectionNotice(_ state: GianClientState) -> ListConnectionNotice? {
+        guard state.phase == .ready, state.currentHostID != nil else { return nil }
+        if state.localConnectivity == .unavailable { return .noNetwork }
+        switch state.connection {
+        case .online, .resyncing, .signedOut: return nil
+        case .reconnecting: return .reconnecting
+        case .offline: return .serverUnreachable
+        case .hostOffline: return .hostOffline(state.hosts.first { $0.id == state.currentHostID }?.name ?? "The Host")
+        case .deviceRevoked: return .revoked
+        case .versionMismatch(let version): return .incompatible(version)
+        }
+    }
+
+    static func currentHostStatus(_ state: GianClientState) -> HostStatus {
+        if state.localConnectivity == .unavailable { return .offline }
+        switch state.connection {
+        case .online: return .online
+        case .resyncing, .reconnecting: return .connecting
+        case .offline, .hostOffline, .deviceRevoked, .versionMismatch: return .offline
+        case .signedOut: return .notConnected
         }
     }
 
@@ -359,7 +387,7 @@ enum StoreProjection {
             case .user(let text, _, let attachmentIDs, let sent):
                 flushWork(); pendingWorkTurn = nil
                 rows.append(.user(UserRow(
-                    id: item.id, text: text, attachmentIDs: attachmentIDs, sentTranslation: sent
+                    id: item.id, text: text, attachmentIDs: attachmentIDs, sentTranslation: sent, time: item.timestamp
                 )))
             case .assistant(let text, _):
                 flushWork(); pendingWorkTurn = nil
@@ -382,7 +410,8 @@ enum StoreProjection {
                     translationExpandedByDefault: translation?.enabled ?? false,
                     canCancelTranslation: translation?.reading[sourceID]?.pending == true && translation?.reading[sourceID]?.uncertain == false,
                     isFinalResult: terminalOutcomes[item.turn] == .worked && !failedTurns.contains(item.turn)
-                        && finalAssistantByNumber[item.turn] == item.id
+                        && finalAssistantByNumber[item.turn] == item.id,
+                    time: item.timestamp
                 )))
             case .command(let status, let exitCode):
                 pendingWorkTurn = item.turnID
@@ -554,7 +583,7 @@ enum StoreProjection {
                 resultIndex[number] = index
             case .turnOutcome:
                 outcomeIndex[number] = index
-            case .interaction(let interaction) where [.pending, .responding, .uncertain].contains(interaction.phase):
+            case .interaction(let interaction) where [.pending, .responding, .uncertain, .failed].contains(interaction.phase):
                 if pendingInteractionIndex[number] == nil { pendingInteractionIndex[number] = index }
             default: break
             }
@@ -597,7 +626,7 @@ enum StoreProjection {
         var interactionsBefore: [Int: [TranscriptRow]] = [:]
         for (index, row) in rows.enumerated() {
             guard case .interaction(let interaction) = row,
-                  [.pending, .responding, .uncertain].contains(interaction.phase),
+                  [.pending, .responding, .uncertain, .failed].contains(interaction.phase),
                   let number = turn(of: row), let ending = endings[number] else { continue }
             let anchor = ending.0 == .worked && !failedTurns.contains(number) ? resultIndex[number] : outcomeIndex[number]
             guard let anchor, index > anchor else { continue }

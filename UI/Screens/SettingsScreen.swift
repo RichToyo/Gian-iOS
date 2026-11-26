@@ -7,9 +7,10 @@ import GianCore
 /// attachment cache (`.clearAttachmentCache`). There are intentionally no
 /// OS-notification entries.
 ///
-/// CONTRACT_NEEDED (parent): no host-revoke action, no offline-history clear
-/// action and no cache-size query exist in the contract yet, so those rows are
-/// omitted rather than rendered as fake unconnected buttons.
+/// The current Host can be removed (`.removeCurrentHost`, confirmed first).
+/// No offline-history clear action and no cache-size query exist in the
+/// contract yet, so those rows are omitted rather than rendered as fake
+/// unconnected buttons.
 struct SettingsScreen: View {
     enum Appearance: String, CaseIterable, Sendable {
         case system = "System"
@@ -35,8 +36,10 @@ struct SettingsScreen: View {
     var onChangeServer: (String, String) -> Void = { _, _ in }
     var onEvictAttachmentCache: () -> Void = {}
     var addHost = AddHostPresentation()
+    var onRemoveCurrentHost: () -> Void = {}
 
     @State private var confirmsSignOut = false
+    @State private var confirmsRemoveHost = false
     @State private var changesServer = false
     @State private var addsHost = false
 
@@ -90,7 +93,7 @@ struct SettingsScreen: View {
                         .foregroundStyle(GianTheme.Colors.secondaryLabel)
                     Text(host.name)
                     Spacer()
-                    HostReachabilityDot(isReachable: host.isReachable)
+                    HostStatusDot(status: host.status)
                     if host.isCurrent {
                         Text("Current")
                             .font(GianTheme.Typography.badge)
@@ -99,6 +102,15 @@ struct SettingsScreen: View {
                 }
             }
             Button("Add Host", systemImage: "plus") { addsHost = true }
+            if let current = hosts.first(where: \.isCurrent) {
+                Button("Remove \(current.name)…", systemImage: "minus.circle", role: .destructive) { confirmsRemoveHost = true }
+                    .confirmationDialog("Remove \(current.name)?", isPresented: $confirmsRemoveHost, titleVisibility: .visible) {
+                        Button("Remove Host", role: .destructive, action: onRemoveCurrentHost)
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("This device stops being paired with it and forgets its saved conversations. To use it again, pair it again.")
+                    }
+            }
         }
     }
 

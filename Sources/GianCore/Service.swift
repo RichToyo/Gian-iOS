@@ -30,6 +30,17 @@ public protocol GianClientServicing: AnyObject {
     func updateSession(scope: ClientScope, request: SessionUpdateRequest) async -> SessionUpdateResponse
     func agentOptions(scope: ClientScope, request: AgentOptionsRequest) async -> AgentOptionsResponse
     func agentLogo(scope: ClientScope, pluginID: String, variant: AgentLogoVariant) async -> AgentLogoResponse
+    /// A file a reply links to (`[Foo](src/foo.ts)`), resolved by the Host
+    /// inside the conversation's repository and previewed read-only.
+    func previewFileReference(scope: ClientScope, sessionID: SessionID, reference: String) async -> FileReferencePreviewResponse
+}
+
+public enum FileReferencePreviewResponse: Sendable, Equatable {
+    case preview(name: String, data: Data)
+    /// The Host found it but doesn't preview it (binary, over 1 MB).
+    case notPreviewable(name: String)
+    case failed(String)
+    case unsupported
 }
 
 extension GianClientServicing {
@@ -38,6 +49,7 @@ extension GianClientServicing {
     public func updateSession(scope: ClientScope, request: SessionUpdateRequest) async -> SessionUpdateResponse { .unsupported }
     public func agentOptions(scope: ClientScope, request: AgentOptionsRequest) async -> AgentOptionsResponse { .unavailable }
     public func agentLogo(scope: ClientScope, pluginID: String, variant: AgentLogoVariant) async -> AgentLogoResponse { .unsupported }
+    public func previewFileReference(scope: ClientScope, sessionID: SessionID, reference: String) async -> FileReferencePreviewResponse { .unsupported }
     public func mutateQueue(scope: ClientScope, request: QueueMutationRequest) async -> CommandDispatchResponse {
         .failed(request.commandID, message: "Queue changes are not supported by this Host.")
     }

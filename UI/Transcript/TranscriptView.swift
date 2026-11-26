@@ -30,6 +30,9 @@ struct TranscriptView: View {
     var onTakeTextBack: () -> Void = {}
     /// Rows this update adds fade in on their own (see `arrival`).
     var rowsArrive = false
+    /// The Agent is working on a turn: until something shows it (a working
+    /// card, a card waiting on the user), a "Working…" line does.
+    var isTurnActive = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -116,6 +119,14 @@ struct TranscriptView: View {
         // animation); nothing here animates the stack as a whole, so a sync
         // that brings many rows, or text growing, never moves the rest.
         .scrollTargetLayout()
+        VStack(spacing: 0) {
+            if showsWorking {
+                WorkingRow()
+                    .padding(.top, GianTheme.Metrics.paddingMedium)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: showsWorking)
         // Its own container, animated on its own: the pending message fades in
         // and out without moving the rows above, and takes no room otherwise.
         VStack(spacing: 0) {
@@ -136,6 +147,21 @@ struct TranscriptView: View {
         }
         .padding(.horizontal, GianTheme.Metrics.paddingMedium)
         .padding(.vertical, GianTheme.Metrics.paddingSmall)
+    }
+
+    /// Something is shown working only when the turn has nothing else saying
+    /// so yet: right after Send, or while a reply's text streams.
+    private var showsWorking: Bool {
+        guard isTurnActive, pendingSend == nil else { return false }
+        let start = rows.lastIndex { if case .user = $0 { return true }; return false }.map { $0 + 1 } ?? 0
+        for row in rows[start...] {
+            switch row {
+            case .work(let card) where card.phase == .working: return false
+            case .interaction(let record) where [.pending, .responding, .uncertain, .failed].contains(record.phase): return false
+            default: continue
+            }
+        }
+        return true
     }
 
     /// Rises a little as it fades in (only fades with Reduce Motion); fades
@@ -186,5 +212,21 @@ extension TranscriptView: Equatable {
             && lhs.autoLoadImages == rhs.autoLoadImages
             && lhs.pendingSend == rhs.pendingSend
             && lhs.pendingActionsEnabled == rhs.pendingActionsEnabled
+            && lhs.isTurnActive == rhs.isTurnActive
+    }
+}
+
+/// "Working…" with a spinner, under the latest message while the Agent is on it.
+struct WorkingRow: View {
+    var body: some View {
+        HStack(spacing: GianTheme.Metrics.paddingSmall) {
+            ProgressView().controlSize(.small)
+            Text("Working…")
+                .font(GianTheme.Typography.caption)
+                .foregroundStyle(GianTheme.Colors.secondaryLabel)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("transcript-working")
     }
 }

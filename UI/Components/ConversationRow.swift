@@ -10,13 +10,20 @@ struct ConversationRow: View {
     /// False inside repository groups, where the header already names it and
     /// the row shows its time instead.
     var showsRepo: Bool = true
+    /// False while the connection is down: the status can be stale, so it
+    /// shows faded and still (a "Working" spinner kept spinning offline).
+    var isLive: Bool = true
     var onSelect: () -> Void
 
     @Environment(\.gianAccent) private var accent
 
+    /// Repository and last activity in Tasks and search (so the latest work
+    /// stands out); the time alone in Repos, whose group names the repository.
     private var detail: String? {
-        if showsRepo { return item.repoName }
-        return item.lastActivity.map { RowTimestamp.text(for: $0) }
+        let time = item.lastActivity.map { RowTimestamp.text(for: $0) }
+        guard showsRepo else { return time }
+        let repo = item.repoName.flatMap { $0.isEmpty ? nil : $0 }
+        return [repo, time].compactMap { $0 }.joined(separator: " · ").nilIfEmpty
     }
 
     var body: some View {
@@ -41,6 +48,9 @@ struct ConversationRow: View {
                 Spacer(minLength: 0)
                 if let status = SessionStatusIcon(badge: item.badge, unread: item.unread) {
                     status
+                        .opacity(isLive ? 1 : 0.35)
+                        .saturation(isLive ? 1 : 0)
+                        .transaction { if !isLive { $0.animation = nil } }
                 }
             }
             .padding(.horizontal, GianTheme.Metrics.paddingMedium)
@@ -63,7 +73,7 @@ struct ConversationRow: View {
 extension ConversationRow: Equatable {
     /// Selecting dispatches for this row; the item and display decide what renders.
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.item == rhs.item && lhs.isSelected == rhs.isSelected && lhs.showsRepo == rhs.showsRepo
+        lhs.item == rhs.item && lhs.isSelected == rhs.isSelected && lhs.showsRepo == rhs.showsRepo && lhs.isLive == rhs.isLive
     }
 }
 
@@ -159,4 +169,8 @@ struct DirectoryGroupHeader: View {
             onSelect: {}
         )
     }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }

@@ -60,15 +60,37 @@ struct ChatScreen: View {
     var onOpenSettings: () -> Void = {}
     /// The current Host, shown under the title.
     var host: HostItem? = nil
+    /// Opens a file a reply links to (read-only, through the Host).
+    var onOpenFileReference: (String) async -> FileReferencePreviewResponse = { _ in .unsupported }
 
     @Environment(\.globalActionsAtBottom) private var globalActionsAtBottom
     @Environment(\.titlesLeading) private var titlesLeading
     @State private var previewedAttachment: (id: AttachmentID, name: String, data: Data)?
+    @State private var openedFile: OpenedFile?
+
+    private struct OpenedFile: Identifiable {
+        let reference: String
+        var id: String { reference }
+    }
     /// Bumped by Send and composer focus; the transcript jumps to its latest line.
     @State private var latestScrollRequest = 0
 
     var body: some View {
         TranscriptScroller(chat: self, latestScrollRequest: latestScrollRequest)
+        // Links in replies: web links open in the browser, links to files in
+        // the repository open here, read-only; nothing else is followed.
+        .environment(\.openURL, OpenURLAction { url in
+            switch LinkDestination(url) {
+            case .web: return .systemAction
+            case .file(let reference):
+                openedFile = OpenedFile(reference: reference)
+                return .handled
+            case .blocked: return .discarded
+            }
+        })
+        .sheet(item: $openedFile) { file in
+            FileReferenceSheet(reference: file.reference, load: onOpenFileReference, onClose: { openedFile = nil })
+        }
         .safeAreaBar(edge: .bottom) {
             PresentationSurface { composerArea }
         }
@@ -235,16 +257,25 @@ private struct TranscriptScroller: View {
             ScrollView {
                 VStack(spacing: 0) {
                     if conversation.hasOlderPages {
-                        Button("Load earlier messages") {
-                            followsLatest = false
-                            awaitingOlderPage = true
-                            olderPageAnchor = stableAnchor(for: visibleRowID)
-                            chat.onPageOlder()
+                        Group {
+                            if awaitingOlderPage {
+                                HStack(spacing: 6) {
+                                    ProgressView().controlSize(.small)
+                                    Text("Loading earlier messages…")
+                                }
+                                .foregroundStyle(GianTheme.Colors.secondaryLabel)
+                                .frame(minHeight: GianTheme.Metrics.minHitTarget)
+                            } else {
+                                Button("Load earlier messages") { loadOlder() }
+                                    .foregroundStyle(GianTheme.Colors.tint)
+                                    .gianHitTarget()
+                            }
                         }
                         .font(GianTheme.Typography.caption)
-                        .foregroundStyle(GianTheme.Colors.tint)
-                        .gianHitTarget()
                         .padding(.top, GianTheme.Metrics.paddingSmall)
+                    }
+                    if conversation.rows.isEmpty, conversation.pendingSend == nil {
+                        emptyTranscript
                     }
                     TranscriptView(
                         rows: conversation.rows,
@@ -252,7 +283,9 @@ private struct TranscriptScroller: View {
                             && conversation.translation?.capability == .configured,
                         translationAvailable: conversation.translation?.capability == .configured,
                         translationRecoveryEnabled: mutationsReady,
-                        onRespondToInteraction: mutationsReady ? chat.onRespondToInteraction : { _, _, _ in },
+                        // Always live: the store waits out a brief sync, and a refusal
+                        // is explained instead of the tap doing nothing.
+                        onRespondToInteraction: chat.onRespondToInteraction,
                         onRequestTranslation: chat.onRequestTranslation,
                         onCancelTranslation: { chat.onCancelReadingTranslation($0) },
                         onRetryTranslation: chat.onRequestTranslation,
@@ -262,14 +295,15 @@ private struct TranscriptScroller: View {
                         attachmentIsImage: chat.attachmentIsImage,
                         attachmentData: chat.attachmentData,
                         autoLoadImages: mutationsReady,
-                        onDownloadAttachment: mutationsReady ? chat.onDownloadAttachment : { _ in },
+                        onDownloadAttachment: chat.onDownloadAttachment,
                         onPreviewAttachment: chat.previewAttachment,
                         pendingSend: conversation.pendingSend,
                         pendingActionsEnabled: mutationsReady,
                         onSendOriginal: chat.onSendOriginal,
                         onRetryTranslationSend: chat.onRetryTranslationSend,
                         onTakeTextBack: chat.onCancelTranslationSend,
-                        rowsArrive: conversation.rowsArrive
+                        rowsArrive: conversation.rowsArrive,
+                        isTurnActive: conversation.isTurnActive
                     )
                     // Unchanged rows aren't re-rendered while scrolling moves the top row.
                     .equatable()
@@ -300,6 +334,19 @@ private struct TranscriptScroller: View {
                    !pinsLatest || !value.nearBottom {
                     followLatest(proxy, animated: false)
                 }
+            }
+            // Older messages load on their own once the reader scrolls up to
+            // the top (the button stays for a short chat that never scrolls).
+            .onScrollGeometryChange(for: Bool.self) { geometry in
+                geometry.contentOffset.y + geometry.contentInsets.top < 160
+            } action: { _, nearTop in
+                if nearTop, scroll.userScrolling, conversation.hasOlderPages, !awaitingOlderPage { loadOlder() }
+            }
+            .task(id: awaitingOlderPage) {
+                // A page that never comes (a failed read) doesn't spin forever.
+                guard awaitingOlderPage else { return }
+                try? await Task.sleep(for: .seconds(12))
+                if !Task.isCancelled { awaitingOlderPage = false; olderPageAnchor = nil }
             }
             .onScrollPhaseChange { _, phase in
                 switch phase {
@@ -410,6 +457,41 @@ private struct TranscriptScroller: View {
         }
     }
 
+    private func loadOlder() {
+        followsLatest = false
+        awaitingOlderPage = true
+        olderPageAnchor = stableAnchor(for: visibleRowID)
+        chat.onPageOlder()
+    }
+
+    /// A chat with nothing to show yet says why: still loading, failed (with
+    /// Retry), or simply empty.
+    @ViewBuilder
+    private var emptyTranscript: some View {
+        Group {
+            switch conversation.transcriptSync {
+            case .syncing:
+                VStack(spacing: GianTheme.Metrics.paddingSmall) {
+                    ProgressView()
+                    Text("Loading messages…")
+                }
+            case .failed:
+                VStack(spacing: GianTheme.Metrics.paddingSmall) {
+                    Text("Couldn't load messages.")
+                    Button("Try Again", action: chat.onRetryTranscriptSync)
+                        .foregroundStyle(GianTheme.Colors.tint)
+                }
+            case .idle:
+                Text(conversation.isTurnActive ? "" : "No messages yet.")
+            }
+        }
+        .font(GianTheme.Typography.caption)
+        .foregroundStyle(GianTheme.Colors.secondaryLabel)
+        .frame(maxWidth: .infinity)
+        .padding(.top, 80)
+        .accessibilityIdentifier("transcript-empty")
+    }
+
     private func stableAnchor(for visible: String?) -> String? {
         guard let visible, let index = conversation.rows.firstIndex(where: { $0.id == visible }) else { return visible }
         if case .timeMarker = conversation.rows[index] {
@@ -430,9 +512,9 @@ private struct QueueList: View {
     let canSendNow: Bool
     let onMutation: (QueueMutation) -> Void
     let onRecover: () -> Void
+    /// Open, so what was just queued shows; the header collapses it.
     @State private var expanded = true
     @State private var editing: QueuedMessage?
-    @State private var showingEditor = false
     @State private var editedText = ""
     @State private var confirmingSendNow = false
     @State private var confirmingClear = false
@@ -463,9 +545,8 @@ private struct QueueList: View {
                             Spacer(minLength: 0)
                             if canUpdate {
                                 Button {
-                                    editing = entry
                                     editedText = entry.text
-                                    showingEditor = true
+                                    editing = entry
                                 } label: { Image(systemName: "pencil").frame(width: 36, height: 36).contentShape(Rectangle()) }
                                     .accessibilityLabel("Edit queued message")
                                     .disabled(!controlsEnabled)
@@ -513,13 +594,13 @@ private struct QueueList: View {
         case nil: EmptyView()
         }
         }
-        .alert("Edit queued message", isPresented: $showingEditor) {
-            TextField("Message", text: $editedText)
-            Button("Cancel", role: .cancel) { editing = nil }
-            Button("Save") {
-                if let editing { onMutation(.update(id: editing.id, text: editedText)) }
+        // A multi-line editor: queued messages are often several lines, and
+        // a one-line alert field flattened them.
+        .sheet(item: $editing) { entry in
+            QueueEditSheet(text: $editedText, onCancel: { editing = nil }, onSave: {
+                onMutation(.update(id: entry.id, text: editedText))
                 editing = nil
-            }
+            })
         }
         .confirmationDialog("Send queued messages now?",
                             isPresented: $confirmingSendNow, titleVisibility: .visible) {
@@ -534,6 +615,38 @@ private struct QueueList: View {
         }
         .padding(10)
         .background(GianTheme.Colors.card, in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+/// Edits a queued message with the keyboard already up.
+private struct QueueEditSheet: View {
+    @Binding var text: String
+    var onCancel: () -> Void
+    var onSave: () -> Void
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        NavigationStack {
+            TextEditor(text: $text)
+                .font(GianTheme.Typography.body)
+                .focused($focused)
+                .padding(.horizontal, GianTheme.Metrics.paddingMedium)
+                .navigationTitle("Edit queued message")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) { Button("Cancel", action: onCancel) }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Save", action: onSave)
+                            .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+        }
+        .presentationDetents([.medium, .large])
+        .task {
+            // After the sheet has settled, or the focus doesn't take.
+            try? await Task.sleep(for: .milliseconds(350))
+            focused = true
+        }
     }
 }
 

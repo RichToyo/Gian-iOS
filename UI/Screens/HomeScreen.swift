@@ -34,6 +34,9 @@ struct HomeScreen: View {
     var onAddHost: () -> Void = {}
     /// The Host connection is ready; an unloaded list loads then.
     var canLoad: Bool = true
+    /// The connection while it isn't live, shown above the list.
+    var connectionNotice: ListConnectionNotice? = nil
+    var onRetryConnection: () -> Void = {}
 
     @Environment(\.globalActionsAtBottom) private var globalActionsAtBottom
     @Environment(\.titlesLeading) private var titlesLeading
@@ -54,7 +57,10 @@ struct HomeScreen: View {
             onLoadMore: onLoadMoreDirectory,
             onRefresh: onRefreshDirectory,
             onPullToRefresh: onPullToRefresh,
-            canLoad: canLoad
+            canLoad: canLoad,
+            connectionNotice: connectionNotice,
+            onRetryConnection: onRetryConnection,
+            onAddHost: onAddHost
         )
         // Per Host, so a newly switched-to (or added) Host's list loads on
         // sight like the first one did.

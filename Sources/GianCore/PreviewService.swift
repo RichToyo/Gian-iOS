@@ -67,6 +67,8 @@ public struct PreviewScript: Sendable, Equatable {
     public var translationDelay: Double = 0
     /// Fails send translations with this message.
     public var translationFailure: String?
+    /// Fails the next answer to a card with this message (then answers work).
+    public var respondFailure: String?
 
     public init(
         account: AccountIdentity,
@@ -247,7 +249,8 @@ enum PreviewDirectory {
             title: "Allow the sample tool",
             detail: "Fictional approval",
             risk: .low,
-            actions: [InteractionAction(id: PreviewFixtures.actionID, label: "Allow", tone: .default)]
+            actions: [InteractionAction(id: PreviewFixtures.actionID, label: "Allow", tone: .default)],
+            subject: "swift test --filter MooringLineTests"
         )
     }
 }
@@ -392,6 +395,10 @@ public final class PreviewGianClientService: GianClientServicing {
     public func respondToInteraction(scope: ClientScope, request: InteractionRespondRequest) async -> CommandDispatchResponse {
         _ = scope
         respondCount += 1
+        if let failure = script.respondFailure {
+            script.respondFailure = nil
+            return .failed(request.commandID, message: failure)
+        }
         return .succeeded(CommandSuccess(commandID: request.commandID))
     }
 

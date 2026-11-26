@@ -22,20 +22,36 @@ struct LiveReconnectTests {
         socket.incoming.fail(.disconnected)
     }
 
-    @Test func reconnectReadsAgainWhenLiveActivitySupersedesItsSnapshot() async throws {
+    @Test func reconnectAppliesLiveActivityThatLandsDuringItsSnapshot() async throws {
         let (fixture, socket) = try await connected()
         let replacement = FixtureRelaySocket(fixture); replacement.holdCatalogReplies = true
+        // Read the catalog again, so the read can be caught halfway.
+        fixture.service.lastCatalog = nil
         drop(socket, next: replacement, fixture)
         // A busy Host: a patch lands while the reconnect reads the directory.
         _ = try await replacement.catalogHeld.next()
         try replacement.patch([:])
         try replacement.releaseCatalog()
-        _ = try await replacement.catalogHeld.next()
-        try replacement.releaseCatalog()
         #expect(await eventually { fixture.service.acceptedDirectory != nil && fixture.service.reconnect == nil })
         #expect(fixture.service.relay?.isOpen == true)
         #expect(fixture.service.reconnectAttempt == 0)
-        #expect(replacement.commands.filter { $0 == "state.refresh" }.count == 2)
+        // One read: the patch waited for it and was applied after it (it used
+        // to cancel the read, and a busy Host cancelled every one).
+        #expect(replacement.commands.filter { $0 == "state.refresh" }.count == 1)
+        #expect(fixture.service.cursor?.revision == replacement.stateRevision)
+        #expect(socketsOpened(fixture) == 2)
+        await fixture.service.disconnect()
+    }
+
+    @Test func reconnectReusesTheLoginAndAnUnchangedCatalog() async throws {
+        let (fixture, socket) = try await connected()
+        let logins = fixture.transport.requests.filter { $0.url?.path == "/api/v1/sessions/device-login" }.count
+        let replacement = FixtureRelaySocket(fixture)
+        drop(socket, next: replacement, fixture)
+        #expect(await eventually { replacement.commands.contains("state.refresh") })
+        #expect(await eventually { fixture.service.acceptedDirectory != nil && fixture.service.reconnect == nil })
+        #expect(!replacement.commands.contains("catalog.read"))
+        #expect(fixture.transport.requests.filter { $0.url?.path == "/api/v1/sessions/device-login" }.count == logins)
         #expect(socketsOpened(fixture) == 2)
         await fixture.service.disconnect()
     }
@@ -43,10 +59,11 @@ struct LiveReconnectTests {
     @Test func reconnectKeepsAWorkingConnectionWhenEveryReadIsSuperseded() async throws {
         let (fixture, socket) = try await connected()
         let replacement = FixtureRelaySocket(fixture); replacement.holdCatalogReplies = true
+        fixture.service.lastCatalog = nil
         drop(socket, next: replacement, fixture)
         for _ in 0..<4 {
             _ = try await replacement.catalogHeld.next()
-            try replacement.patch([:])
+            try replacement.push(.object(["type": .string("snapshot.required"), "reason": .string("revision_mismatch")]))
             try replacement.releaseCatalog()
         }
         #expect(await eventually { fixture.service.reconnect == nil && fixture.service.reconnectAttempt == 0 })
@@ -58,6 +75,14 @@ struct LiveReconnectTests {
         #expect(socketsOpened(fixture) == 2)
         #expect(fixture.service.acceptedDirectory == nil)
         await fixture.service.disconnect()
+    }
+
+    @Test func backoffIsShortAndCapped() {
+        let unit = Duration.seconds(1)
+        let delays = (1...8).map { LiveGianClientService.reconnectDelay(attempt: $0, unit: unit, error: .disconnected) }
+        #expect(delays == [.milliseconds(500), .seconds(1), .seconds(2), .seconds(4), .seconds(8), .seconds(10), .seconds(10), .seconds(10)])
+        #expect(LiveGianClientService.reconnectDelay(attempt: 6, unit: unit, error: .server(code: "HOST_OFFLINE", retryAfter: nil)) == .seconds(5))
+        #expect(LiveGianClientService.reconnectDelay(attempt: 1, unit: unit, error: .server(code: "RATE_LIMITED", retryAfter: 7)) == .seconds(7))
     }
 
     @Test func reconnectKeepsTryingPastFiveFailedAttempts() async throws {

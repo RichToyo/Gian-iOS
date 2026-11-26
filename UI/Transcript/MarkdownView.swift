@@ -80,9 +80,10 @@ extension MarkdownBlock {
     /// The texts its view renders as inline Markdown.
     var inlineTexts: [String] {
         switch self {
-        case .heading(_, let text), .paragraph(let text), .blockquote(let text): [text]
-        case .list(_, let items): items
-        case .table(let headers, let rows): headers + rows.flatMap { $0 }
+        case .heading(_, let text), .paragraph(let text): [text]
+        case .blockquote(let blocks): blocks.flatMap(\.inlineTexts)
+        case .list(let list): list.items.flatMap { $0.blocks.flatMap(\.inlineTexts) }
+        case .table(let headers, _, let rows): headers + rows.flatMap { $0 }
         case .code, .thematicBreak: []
         }
     }
@@ -149,29 +150,24 @@ struct MarkdownBlockView: View {
                 .font(GianTheme.Typography.body)
         case .code(let language, let code):
             CodeBlockView(language: language, code: code)
-        case .table(let headers, let rows):
-            TableBlockView(headers: headers, rows: rows)
-        case .list(let ordered, let items):
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(Array(items.enumerated()), id: \.offset) { offset, item in
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(ordered ? "\(offset + 1)." : "•")
-                            .foregroundStyle(GianTheme.Colors.secondaryLabel)
-                        inlineText(item)
-                    }
-                    .font(GianTheme.Typography.body)
-                }
-            }
-        case .blockquote(let text):
-            HStack(spacing: 0) {
+        case .table(let headers, let alignments, let rows):
+            TableBlockView(headers: headers, alignments: alignments, rows: rows)
+        case .list(let list):
+            MarkdownListView(list: list)
+        case .blockquote(let blocks):
+            HStack(alignment: .top, spacing: 0) {
                 RoundedRectangle(cornerRadius: 2)
                     .fill(GianTheme.Colors.secondaryLabel.opacity(0.5))
                     .frame(width: 3)
-                inlineText(text)
-                    .font(GianTheme.Typography.body)
-                    .foregroundStyle(GianTheme.Colors.secondaryLabel)
-                    .padding(.leading, GianTheme.Metrics.paddingSmall)
+                VStack(alignment: .leading, spacing: GianTheme.Metrics.paddingSmall) {
+                    ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                        MarkdownBlockView(block: block)
+                    }
+                }
+                .foregroundStyle(GianTheme.Colors.secondaryLabel)
+                .padding(.leading, GianTheme.Metrics.paddingSmall)
             }
+            .fixedSize(horizontal: false, vertical: true)
         case .thematicBreak:
             Divider().overlay(GianTheme.Colors.separator)
         }
@@ -190,101 +186,211 @@ struct MarkdownBlockView: View {
     }
 }
 
-/// Fenced code block with a filename/language header, copy action and
-/// horizontal scrolling for long lines.
+/// A list as written: its own start number counting up, items that hold
+/// paragraphs, code and nested lists, task checkboxes. Markers sit in one
+/// column as wide as the widest, so wrapped lines and nested lists align.
+struct MarkdownListView: View {
+    let list: MarkdownList
+    @Environment(\.markdownListDepth) private var depth
+
+    var body: some View {
+        let widest = marker(list.items.count - 1, checked: nil)
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(list.items.enumerated()), id: \.offset) { offset, item in
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    ZStack(alignment: .trailing) {
+                        Text(widest).hidden()
+                        markerView(offset, checked: item.checked)
+                    }
+                    .font(GianTheme.Typography.body.monospacedDigit())
+                    .foregroundStyle(GianTheme.Colors.secondaryLabel)
+                    .accessibilityHidden(item.checked == nil)
+                    VStack(alignment: .leading, spacing: 6) {
+                        if item.blocks.isEmpty {
+                            Text(" ").font(GianTheme.Typography.body)
+                        }
+                        ForEach(Array(item.blocks.enumerated()), id: \.offset) { _, block in
+                            MarkdownBlockView(block: block)
+                        }
+                    }
+                    .environment(\.markdownListDepth, depth + 1)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func markerView(_ offset: Int, checked: Bool?) -> some View {
+        if let checked {
+            Image(systemName: checked ? "checkmark.square.fill" : "square")
+                .foregroundStyle(checked ? GianTheme.Colors.tint : GianTheme.Colors.secondaryLabel)
+                .accessibilityLabel(checked ? "Done" : "Not done")
+        } else {
+            Text(marker(offset, checked: nil))
+        }
+    }
+
+    private func marker(_ offset: Int, checked: Bool?) -> String {
+        guard list.ordered else { return ["•", "◦", "▪"][depth % 3] }
+        return "\(list.start + max(offset, 0))."
+    }
+}
+
+extension EnvironmentValues {
+    /// How deeply the list being drawn is nested (bullets change per level).
+    @Entry var markdownListDepth = 0
+}
+
+/// Fenced code block: a slim language label and Copy (with a checkmark for a
+/// moment after), coloured code that scrolls sideways for long lines.
 struct CodeBlockView: View {
     var language: String?
     let code: String
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 0) {
                 Text(language ?? "code")
-                    .font(GianTheme.Typography.code)
+                    .font(.caption.monospaced())
                     .foregroundStyle(GianTheme.Colors.secondaryLabel)
-                Spacer()
-                Button {
-                    UIPasteboard.general.string = code
-                } label: {
-                    Image(systemName: "doc.on.doc")
-                        .foregroundStyle(GianTheme.Colors.secondaryLabel)
-                        .gianHitTarget()
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Copy code")
+                    .lineLimit(1)
+                Spacer(minLength: GianTheme.Metrics.paddingSmall)
+                CopyTextButton(text: code, label: "Copy code")
             }
-            .padding(.horizontal, GianTheme.Metrics.paddingMedium)
-            .padding(.vertical, 6)
-            .background(GianTheme.Colors.separator.opacity(0.5))
+            .padding(.leading, GianTheme.Metrics.paddingMedium)
+            .padding(.trailing, GianTheme.Metrics.paddingSmall)
+            .padding(.top, 2)
 
             ScrollView(.horizontal, showsIndicators: false) {
-                Text(code)
-                    .font(GianTheme.Typography.code)
+                Text(CodeHighlighter.highlighted(code, language: language))
+                    .font(.system(.footnote, design: .monospaced))
                     .foregroundStyle(GianTheme.Colors.label)
                     .textSelection(.enabled)
-                    .padding(GianTheme.Metrics.paddingMedium)
+                    .fixedSize(horizontal: true, vertical: true)
+                    .padding(.horizontal, GianTheme.Metrics.paddingMedium)
+                    .padding(.bottom, GianTheme.Metrics.paddingMedium - 2)
             }
+            .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
         }
         .background(
             GianTheme.Colors.codeBackground,
-            in: RoundedRectangle(
-                cornerRadius: GianTheme.Metrics.cornerRadiusMedium,
-                style: .continuous
-            )
+            in: RoundedRectangle(cornerRadius: GianTheme.Metrics.cornerRadiusMedium, style: .continuous)
         )
-        .clipShape(RoundedRectangle(
-            cornerRadius: GianTheme.Metrics.cornerRadiusMedium,
-            style: .continuous
-        ))
         .overlay(
-            RoundedRectangle(
-                cornerRadius: GianTheme.Metrics.cornerRadiusMedium,
-                style: .continuous
-            )
-            .stroke(GianTheme.Colors.separator, lineWidth: 0.5)
+            RoundedRectangle(cornerRadius: GianTheme.Metrics.cornerRadiusMedium, style: .continuous)
+                .stroke(GianTheme.Colors.separator, lineWidth: 0.5)
         )
     }
 }
 
-/// Markdown table with a styled header row and hairline separators.
+/// Markdown table: columns as wide as their content (up to a share of the
+/// width, then cells wrap), aligned as the delimiter row says; a table wider
+/// than the screen scrolls sideways instead of squeezing every column.
 struct TableBlockView: View {
     let headers: [String]
+    var alignments: [TableAlignment] = []
     let rows: [[String]]
 
+    @State private var width: CGFloat = 0
+
     var body: some View {
-        VStack(spacing: 0) {
-            row(cells: headers, isHeader: true)
-            ForEach(Array(rows.enumerated()), id: \.offset) { _, cells in
-                Divider().overlay(GianTheme.Colors.separator)
-                row(cells: cells, isHeader: false)
+        ScrollView(.horizontal, showsIndicators: false) {
+            Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
+                GridRow {
+                    ForEach(Array(headers.enumerated()), id: \.offset) { column, cell in
+                        self.cell(cell, column: column, isHeader: true)
+                    }
+                }
+                .background(GianTheme.Colors.secondaryLabel.opacity(0.08))
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, cells in
+                    Divider().overlay(GianTheme.Colors.separator)
+                    GridRow {
+                        ForEach(Array(cells.enumerated()), id: \.offset) { column, cell in
+                            self.cell(cell, column: column, isHeader: false)
+                        }
+                    }
+                }
             }
-        }
-        .background(GianTheme.Colors.card)
-        .clipShape(RoundedRectangle(
-            cornerRadius: GianTheme.Metrics.cornerRadiusSmall,
-            style: .continuous
-        ))
-        .overlay(
-            RoundedRectangle(
-                cornerRadius: GianTheme.Metrics.cornerRadiusSmall,
-                style: .continuous
+            .background(GianTheme.Colors.card)
+            .clipShape(RoundedRectangle(cornerRadius: GianTheme.Metrics.cornerRadiusSmall, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: GianTheme.Metrics.cornerRadiusSmall, style: .continuous)
+                    .stroke(GianTheme.Colors.separator, lineWidth: 0.5)
             )
-            .stroke(GianTheme.Colors.separator, lineWidth: 0.5)
-        )
+        }
+        .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
     }
 
-    private func row(cells: [String], isHeader: Bool) -> some View {
-        HStack(spacing: 0) {
-            ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in
-                // Cells carry inline Markdown (bold, code, links) like paragraphs.
-                MarkdownCache.text(cell)
-                    .font(isHeader ? GianTheme.Typography.caption.weight(.semibold) : GianTheme.Typography.caption)
-                    .foregroundStyle(isHeader ? GianTheme.Colors.secondaryLabel : GianTheme.Colors.label)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, GianTheme.Metrics.paddingSmall)
-                    .padding(.vertical, 6)
-            }
+    /// The widest a cell grows before its text wraps: an even share of the
+    /// width, but never so narrow that words break apart.
+    private var cellLimit: CGFloat {
+        guard width > 0, !headers.isEmpty else { return 220 }
+        return max(120, (width / CGFloat(headers.count)).rounded(.down))
+    }
+
+    private func cell(_ text: String, column: Int, isHeader: Bool) -> some View {
+        let alignment = column < alignments.count ? alignments[column] : .leading
+        // Cells carry inline Markdown (bold, code, links) like paragraphs.
+        // A cell is as wide as its text up to the limit, then wraps; the row
+        // takes the wrapped height (sizing the text first let a Grid column
+        // come out a hair narrower, wrap it, and keep the one-line height).
+        return CellText(text: MarkdownCache.text(text), limit: cellLimit - GianTheme.Metrics.paddingSmall * 2,
+                        alignment: alignment.text)
+            .font(isHeader ? GianTheme.Typography.caption.weight(.semibold) : GianTheme.Typography.caption)
+            .foregroundStyle(isHeader ? GianTheme.Colors.secondaryLabel : GianTheme.Colors.label)
+            .frame(maxWidth: .infinity, alignment: alignment.frame)
+            .padding(.horizontal, GianTheme.Metrics.paddingSmall)
+            .padding(.vertical, 6)
+            .gridColumnAlignment(alignment.horizontal)
+    }
+}
+
+/// Text that takes its one-line width up to `limit`, wrapping past it, and
+/// always its full height for whatever width it gets.
+private struct CellText: View {
+    let text: Text
+    let limit: CGFloat
+    let alignment: TextAlignment
+
+    init(text: Text, limit: CGFloat, alignment: TextAlignment) {
+        self.text = text; self.limit = limit; self.alignment = alignment
+    }
+
+    var body: some View {
+        CellTextLayout(limit: limit) {
+            text.multilineTextAlignment(alignment)
         }
+    }
+}
+
+private struct CellTextLayout: Layout {
+    let limit: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let text = subviews.first else { return .zero }
+        let natural = text.sizeThatFits(.unspecified)
+        // One line when that fits the limit (with a point of slack, or the
+        // exact width can wrap the last glyph); otherwise wrapped at the limit.
+        let width = natural.width + 1 <= limit ? (natural.width + 1).rounded(.up) : limit
+        let height = text.sizeThatFits(ProposedViewSize(width: width, height: nil)).height
+        return CGSize(width: width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: bounds.origin, proposal: ProposedViewSize(width: bounds.width, height: bounds.height))
+    }
+}
+
+private extension TableAlignment {
+    var text: TextAlignment {
+        switch self { case .leading: .leading; case .center: .center; case .trailing: .trailing }
+    }
+    var frame: Alignment {
+        switch self { case .leading: .leading; case .center: .center; case .trailing: .trailing }
+    }
+    var horizontal: HorizontalAlignment {
+        switch self { case .leading: .leading; case .center: .center; case .trailing: .trailing }
     }
 }
 

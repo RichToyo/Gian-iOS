@@ -47,6 +47,9 @@ struct UserMessageView: View {
                     onPreview: { onPreviewAttachment(attachmentID) }
                 )
             }
+            if let time = row.time {
+                MessageTime(date: time)
+            }
             // As on the desktop: the original stays the message; what the Agent
             // received sits beneath it, labelled, in its own box.
             if let sent = row.sentTranslation, let translated = sent.presentableText {
@@ -108,7 +111,14 @@ struct AssistantMessageView: View {
                 // or drawn over what follows before it has made room.
                 .contentTransition(.identity)
                 .clipped()
-            if row.isFinalResult { translationArea }
+                .textSelection(.enabled)
+            if row.isFinalResult {
+                HStack(spacing: GianTheme.Metrics.paddingSmall) {
+                    CopyTextButton(text: row.markdown, label: "Copy reply")
+                    if let time = row.time { MessageTime(date: time) }
+                }
+                translationArea
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
@@ -156,7 +166,7 @@ struct AssistantMessageView: View {
             if let text = record.presentableText {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 6) {
-                        LanguageTag(label: "Translation · \(record.targetLanguage)")
+                        LanguageTag(label: "Translation · \(LanguageName.display(record.targetLanguage))")
                         Button(showsTranslation ? "Hide" : "Show") {
                             translationOverride = !showsTranslation
                         }
@@ -166,6 +176,7 @@ struct AssistantMessageView: View {
                     }
                     if showsTranslation {
                         MarkdownView(source: text)
+                            .textSelection(.enabled)
                     }
                 }
                 .padding(GianTheme.Metrics.paddingMedium)
@@ -178,6 +189,56 @@ struct AssistantMessageView: View {
                 )
             }
         }
+    }
+}
+
+/// A message's time ("14:32"), small and quiet.
+struct MessageTime: View {
+    let date: Date
+
+    var body: some View {
+        Text(date, format: .dateTime.hour().minute())
+            .font(.caption2)
+            .foregroundStyle(GianTheme.Colors.secondaryLabel)
+            .monospacedDigit()
+            .accessibilityLabel(date.formatted(date: .omitted, time: .shortened))
+    }
+}
+
+/// Copies text and says so: the icon turns into a checkmark for a moment.
+struct CopyTextButton: View {
+    let text: String
+    var label: String = "Copy"
+    @State private var copied = false
+
+    var body: some View {
+        Button {
+            UIPasteboard.general.string = text
+            copied = true
+        } label: {
+            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                .font(.footnote)
+                .foregroundStyle(copied ? GianTheme.Colors.success : GianTheme.Colors.secondaryLabel)
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(copied ? "Copied" : label)
+        .task(id: copied) {
+            guard copied else { return }
+            try? await Task.sleep(for: .seconds(1.2))
+            copied = false
+        }
+    }
+}
+
+/// A language code as its name ("zh-Hans" → "Chinese, Simplified").
+enum LanguageName {
+    static func display(_ code: String) -> String {
+        Locale.current.localizedString(forIdentifier: code)
+            ?? Locale.current.localizedString(forLanguageCode: code)
+            ?? code
     }
 }
 

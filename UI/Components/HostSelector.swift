@@ -6,16 +6,14 @@ import GianCore
 struct HostTitleLabel: View {
     let name: String
     /// Nil when there is no Host to report on.
-    var isReachable: Bool?
+    var status: HostStatus?
     var showsChevron = true
     var isSubtitle = false
 
     var body: some View {
         HStack(spacing: isSubtitle ? 4 : 6) {
-            if let isReachable {
-                Circle()
-                    .fill(isReachable ? GianTheme.Colors.success : GianTheme.Colors.failure)
-                    .frame(width: isSubtitle ? 6 : 8, height: isSubtitle ? 6 : 8)
+            if let status {
+                HostStatusDot(status: status, size: isSubtitle ? 6 : 8)
             }
             Text(name)
                 .font(isSubtitle ? GianTheme.Typography.navSubtitle : GianTheme.Typography.navTitle)
@@ -31,7 +29,35 @@ struct HostTitleLabel: View {
             }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(isReachable.map { "\(name), \($0 ? "Online" : "Offline")" } ?? name)
+        .accessibilityLabel(status.map { "\(name), \($0.label)" } ?? name)
+    }
+}
+
+/// Green online, pulsing amber while connecting, red when the current Host
+/// can't be reached, gray when there is no connection to report on.
+struct HostStatusDot: View {
+    let status: HostStatus
+    var size: CGFloat = 8
+    @State private var dimmed = false
+
+    var body: some View {
+        Circle()
+            .fill(color)
+            .frame(width: size, height: size)
+            .opacity(status == .connecting && dimmed ? 0.35 : 1)
+            .animation(status == .connecting ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true) : .default, value: dimmed)
+            .onAppear { dimmed = status == .connecting }
+            .onChange(of: status) { _, value in dimmed = value == .connecting }
+            .accessibilityHidden(true)
+    }
+
+    private var color: Color {
+        switch status {
+        case .online: GianTheme.Colors.success
+        case .connecting: GianTheme.Colors.warning
+        case .offline: GianTheme.Colors.failure
+        case .notConnected: GianTheme.Colors.secondaryLabel
+        }
     }
 }
 
@@ -48,7 +74,7 @@ struct CurrentHostMenu: View {
     var body: some View {
         let current = hosts.first(where: \.isCurrent)
         Button { showsHosts = true } label: {
-            HostTitleLabel(name: current?.name ?? "Conversations", isReachable: current?.isReachable)
+            HostTitleLabel(name: current?.name ?? "Conversations", status: current?.status)
         }
         .buttonStyle(.plain)
         .accessibilityHint("Switch or add Hosts")
@@ -75,7 +101,7 @@ struct HostScopedTitle: View {
                 .lineLimit(1)
                 .fixedSize(horizontal: keepsWholeTitle, vertical: false)
             if let host {
-                HostTitleLabel(name: host.name, isReachable: host.isReachable, showsChevron: false, isSubtitle: true)
+                HostTitleLabel(name: host.name, status: host.status, showsChevron: false, isSubtitle: true)
             }
         }
         .accessibilityElement(children: .combine)
@@ -96,7 +122,7 @@ struct HostList: View {
         hosts.map { host in
             // The reachability shown can be stale; selecting a paired Host
             // always tries it again, so an offline one stays selectable.
-            ChoiceListRow(id: host.id.rawValue, title: host.name, subtitle: host.isReachable ? "Online" : "Offline",
+            ChoiceListRow(id: host.id.rawValue, title: host.name, subtitle: host.status.label,
                           systemImage: "laptopcomputer", isSelected: host.isCurrent) { onSelect(host.id) }
         }
     }
@@ -128,7 +154,7 @@ struct DirectoryListMenu: View {
         Button { showsOptions = true } label: {
             Label("List options", systemImage: selection == .tasks ? "checklist" : "folder")
         }
-        .accessibilityLabel("Directory views")
+        .accessibilityLabel("List options")
         .popover(isPresented: $showsOptions) {
             ChoiceList(
                 header: "Group by",

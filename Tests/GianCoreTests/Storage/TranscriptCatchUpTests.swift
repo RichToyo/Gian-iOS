@@ -28,6 +28,27 @@ struct TranscriptCatchUpTests {
         #expect(service.base.translationRequestCount == 0)
     }
 
+    /// A new chat's first turn updates it several times a second; a read it
+    /// overtook used to leave the chat at "Couldn't load messages".
+    @Test func overtakenReadsAreReadAgainInsteadOfFailingTheChat() async throws {
+        let service = ControlledService()
+        let clock = ManualGianClock(instant: PreviewFixtures.instant)
+        let store = GianClientStore(service: service, clock: clock, storage: InMemoryGianStorage())
+        store.transcriptRereadWait = {}
+        _ = try await signIn(store, clock: clock)
+        let message = transcriptItem(id: "first-message", turn: 1, text: "ping")
+        let overtaken = TranscriptPageResponse(items: [], cursor: nil, hasOlder: false, failed: true, superseded: true)
+        // Opening the chat.
+        service.transcriptPages = [overtaken, overtaken, TranscriptPageResponse(items: [message], cursor: nil, hasOlder: false)]
+        _ = await store.dispatch(.selectConversation(PreviewFixtures.sessionID))
+        #expect(store.state.conversation?.transcriptSync == .idle)
+        #expect(store.state.conversation?.items.map(\.id.rawValue) == ["first-message"])
+        // Catching the open chat up.
+        service.transcriptPages = [overtaken, TranscriptPageResponse(items: [message], cursor: nil, hasOlder: false)]
+        #expect((await store.reconcileActiveTranscript()).isApplied)
+        #expect(store.state.conversation?.transcriptSync == .idle)
+    }
+
     @Test func liveChunkDuringCatchUpCannotHideMissingMiddleBehindLiveWinsMerge() async throws {
         let service = ControlledService()
         let clock = ManualGianClock(instant: PreviewFixtures.instant)

@@ -7,8 +7,8 @@ import GianCore
 /// conversation exists, so they are toolbar menus (on iPhone Duo, in the
 /// vertical bar under Close), not composer options; the empty canvas
 /// summarizes the choices. The composer's ⋯ holds only options that can
-/// change while a conversation runs. A single available Agent or repository
-/// is selected automatically; changing Agent resets the model.
+/// change while a conversation runs. The last Agent and repository used on
+/// this Host (or the only one) start selected; changing Agent resets the model.
 ///
 /// Presented inside a NavigationStack (cover on compact, detail column on
 /// wide), so the title, Close and route menus live in system bars.
@@ -114,7 +114,7 @@ struct NewChatScreen: View {
                         choices: workspaces.map { (Optional($0.id), $0.name) },
                         selected: composer.selection.workspaceID,
                         searchableThreshold: 10,
-                        onSelect: { if let id = $0 { onSelectWorkspace(id) } }
+                        onSelect: { if let id = $0 { NewChatMemory.remember(workspace: id, on: host?.id); onSelectWorkspace(id) } }
                     )
                 }
                 ToolbarItem(placement: .topBarTrailing) {
@@ -123,11 +123,14 @@ struct NewChatScreen: View {
                         choices: agents.map { (Optional($0.id), $0.name) },
                         selected: composer.selection.agentID,
                         searchableThreshold: 10,
-                        onSelect: { if let id = $0 { onSelectAgent(id) } }
+                        onSelect: { if let id = $0 { NewChatMemory.remember(agent: id, on: host?.id); onSelectAgent(id) } }
                     )
                 }
             }
-            .onAppear(perform: selectSingleOptions)
+            .onAppear(perform: selectDefaults)
+            // The catalog can arrive after New chat opened.
+            .onChange(of: agents.map(\.id)) { _, _ in selectDefaults() }
+            .onChange(of: workspaces.map(\.id)) { _, _ in selectDefaults() }
             .task(id: composer.selection.agentID) { onLoadOptions() }
     }
 
@@ -237,13 +240,17 @@ struct NewChatScreen: View {
         .frame(maxWidth: .infinity)
     }
 
-    /// With exactly one choice there is nothing to decide.
-    private func selectSingleOptions() {
-        if composer.selection.agentID == nil, agents.count == 1 {
-            onSelectAgent(agents[0].id)
+    /// Starts from the Agent and repository chosen last time on this Host (or
+    /// the only one); with no history, the first ready Agent. A repository
+    /// is never guessed among several: Send asks for one.
+    private func selectDefaults() {
+        if composer.selection.agentID == nil {
+            let remembered = NewChatMemory.agent(on: host?.id).flatMap { id in agents.first { $0.id == id } }
+            if let agent = remembered ?? agents.first { onSelectAgent(agent.id) }
         }
-        if composer.selection.workspaceID == nil, workspaces.count == 1 {
-            onSelectWorkspace(workspaces[0].id)
+        if composer.selection.workspaceID == nil {
+            let remembered = NewChatMemory.workspace(on: host?.id).flatMap { id in workspaces.first { $0.id == id } }
+            if let workspace = remembered ?? (workspaces.count == 1 ? workspaces[0] : nil) { onSelectWorkspace(workspace.id) }
         }
     }
 
@@ -265,5 +272,29 @@ struct NewChatScreen: View {
     private var selectedModelLabel: String? {
         guard let model = composer.selection.model else { return nil }
         return selectedAgentModels.first { $0.id == model }?.label ?? model
+    }
+}
+
+/// The last Agent and repository picked in New chat, per Host (IDs only,
+/// nothing secret), so the next new chat starts there.
+enum NewChatMemory {
+    private static func key(_ kind: String, _ host: HostID?) -> String? {
+        host.map { "gian.newChat.\(kind).\($0.rawValue)" }
+    }
+
+    static func remember(agent: AgentID, on host: HostID?) {
+        if let key = key("agent", host) { UserDefaults.standard.set(agent.rawValue, forKey: key) }
+    }
+
+    static func remember(workspace: WorkspaceID, on host: HostID?) {
+        if let key = key("workspace", host) { UserDefaults.standard.set(workspace.rawValue, forKey: key) }
+    }
+
+    static func agent(on host: HostID?) -> AgentID? {
+        key("agent", host).flatMap { UserDefaults.standard.string(forKey: $0) }.flatMap(AgentID.init(rawValue:))
+    }
+
+    static func workspace(on host: HostID?) -> WorkspaceID? {
+        key("workspace", host).flatMap { UserDefaults.standard.string(forKey: $0) }.flatMap(WorkspaceID.init(rawValue:))
     }
 }

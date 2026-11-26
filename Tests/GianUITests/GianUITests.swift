@@ -59,7 +59,7 @@ final class GianUITests: XCTestCase {
         let host = app.buttons["Work Gian, Online"]
         XCTAssertTrue(host.waitForExistence(timeout: 30))
         let search = app.buttons["Search conversations"]
-        let options = app.buttons["Directory views"]
+        let options = app.buttons["List options"]
         let newChat = app.buttons["Start a new chat"]
         let settings = app.buttons["Settings"]
         XCTAssertTrue(search.exists && options.exists && newChat.exists && settings.exists)
@@ -149,8 +149,10 @@ final class GianUITests: XCTestCase {
         app.launchArguments += ["-previewScript", "fullDirectory", "-previewReady", "-previewDestination", "settings"]
         app.launch()
         let plum = app.buttons["Plum"]
-        XCTAssertTrue(plum.waitForExistence(timeout: 30))
-        for _ in 0..<4 where !plum.isHittable { app.collectionViews.firstMatch.swipeUp() }
+        // The list builds rows as they scroll in (Appearance sits below Hosts).
+        XCTAssertTrue(app.collectionViews.firstMatch.waitForExistence(timeout: 30))
+        for _ in 0..<6 where !(plum.exists && plum.isHittable) { app.collectionViews.firstMatch.swipeUp() }
+        XCTAssertTrue(plum.waitForExistence(timeout: 5))
         XCTAssertTrue(plum.isSelected, "Plum is the default accent")
         let shot = XCTAttachment(screenshot: app.screenshot())
         shot.name = "accent-picker"
@@ -317,6 +319,20 @@ final class GianUITests: XCTestCase {
         XCTAssertTrue((typed.value as? String ?? "").contains("Draft during updates"))
     }
 
+    /// An approval names what it approves (the command), and answering it
+    /// leaves a line saying what was answered.
+    func testApprovalShowsItsCommandAndAnswering() throws {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments += ["-previewScript", "fullDirectory", "-previewReady", "-previewDestination", "chat"]
+        app.launch()
+        let command = app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'swift test --filter MooringLineTests'")).firstMatch
+        XCTAssertTrue(command.waitForExistence(timeout: 30), "The approval should show its command. \(app.debugDescription)")
+        app.buttons["Allow"].tap()
+        let answered = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Answered'")).firstMatch
+        XCTAssertTrue(answered.waitForExistence(timeout: 10), "Answering should leave an Answered line")
+    }
+
     func testQueuedMessageCanBeEditedAndRemoved() throws {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
@@ -326,13 +342,14 @@ final class GianUITests: XCTestCase {
         let edit = app.buttons["Edit queued message"]
         XCTAssertTrue(edit.waitForExistence(timeout: 30))
         edit.tap()
-        let field = app.alerts.textFields.firstMatch
+        // A multi-line editor in a sheet, ready to type.
+        let field = app.textViews.firstMatch
         XCTAssertTrue(field.waitForExistence(timeout: 5))
-        field.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "The editor should take focus")
         field.typeText(" revised")
         let edited = try XCTUnwrap(field.value as? String)
         XCTAssertTrue(edited.contains("revised"))
-        app.alerts.buttons["Save"].tap()
+        app.navigationBars.buttons["Save"].tap()
         XCTAssertTrue(app.staticTexts[edited].waitForExistence(timeout: 10))
         app.buttons["Remove queued message"].tap()
         XCTAssertTrue(app.staticTexts[edited].waitForNonExistence(timeout: 10))

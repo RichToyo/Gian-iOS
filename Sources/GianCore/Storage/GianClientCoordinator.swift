@@ -24,6 +24,11 @@ public final class GianClientCoordinator {
     private var directoryTask: Task<Void, Never>?
     private var accessTask: Task<Void, Never>?
     private var invalidationTask: Task<Void, Never>?
+    /// The next attempt after a connect that failed (the Host asleep, no
+    /// route): it used to stay offline until the user tapped Retry.
+    private var connectRetryTask: Task<Void, Never>?
+    private var connectRetryAttempt = 0
+    var connectRetryUnit: Duration = .seconds(1)
     private var refreshID = 0
     private var reconciliationID = 0
     private var directoryID = 0
@@ -109,6 +114,7 @@ public final class GianClientCoordinator {
         guard !stopped else { return }
         stopped = true
         isRunning = false
+        cancelConnectRetry()
         cancelNetworkEffects()
         eventTask?.cancel(); eventTask = nil
         diagnosticTask?.cancel(); diagnosticTask = nil
@@ -186,6 +192,7 @@ public final class GianClientCoordinator {
             do {
                 for _ in 0..<3 {
                     try await self.runtime.connect(scope: scope)
+                    self.connectRetryAttempt = 0
                     self.store.synchronizeServiceEpoch()
                     guard request == self.refreshID, self.store.readyScope() == scope, !Task.isCancelled else {
                         return .rejected(.staleOperation)
@@ -202,7 +209,9 @@ public final class GianClientCoordinator {
                 guard request == self.refreshID, !Task.isCancelled, self.store.readyScope() == scope else {
                     return .rejected(.staleOperation)
                 }
-                self.store.markConnectionNotReady(.offline, reason: .cryptoResumed)
+                let failure = error as? RemoteClientError
+                self.store.markConnectionNotReady(failure?.isHostOffline == true ? .hostOffline : .offline, reason: .cryptoResumed)
+                if let failure { self.scheduleConnectRetry(after: failure, scope: scope) }
                 return .rejected(.mutationsDisabled)
             }
         }
@@ -256,13 +265,14 @@ public final class GianClientCoordinator {
         guard isRunning else { return }
         switch action {
         case .logout, .setForeground(.background), .noteLocalConnectivity(.unavailable):
+            cancelConnectRetry()
             cancelNetworkEffects()
         case .setServerAddress(let raw, _):
             if (store.state.phase == .signedOut || store.state.phase == .serverEntered), ServerAddress(parsing: raw) != nil {
                 cancelNetworkEffects()
             }
         case .selectHost(let host):
-            if store.state.phase == .ready, store.state.hosts.contains(where: { $0.id == host }) { cancelNetworkEffects() }
+            if store.state.phase == .ready, store.state.hosts.contains(where: { $0.id == host }) { cancelConnectRetry(); cancelNetworkEffects() }
         case .selectConversation, .retryTranscriptSync, .selectSearchResult, .openBanner, .openNewChat, .returnHome:
             reconciliationID += 1
             reconciliationTask?.cancel()
@@ -289,6 +299,30 @@ public final class GianClientCoordinator {
             await self.runtime.disconnect()
             self.store.synchronizeServiceEpoch()
         }
+    }
+
+    /// Tries the connection again on its own after a failed attempt, sooner
+    /// at first, while the app is in front, online and on the same Host.
+    private func scheduleConnectRetry(after error: RemoteClientError, scope: ClientScope) {
+        // A failed connect reports twice (its own error, the closed
+        // connection); one retry is enough.
+        guard ReconnectBackoff.retries(after: error), connectRetryTask == nil else { return }
+        connectRetryAttempt += 1
+        let delay = ReconnectBackoff.delay(attempt: connectRetryAttempt, unit: connectRetryUnit, error: error)
+        connectRetryTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: delay) } catch { return }
+            guard let self, !Task.isCancelled else { return }
+            self.connectRetryTask = nil
+            guard self.isRunning, !self.stopped, self.refreshTask == nil, self.store.readyScope() == scope,
+                  self.store.state.connection == .offline || self.store.state.connection == .hostOffline,
+                  self.store.state.localConnectivity == .available, self.store.state.foreground == .foreground else { return }
+            _ = await self.refreshConnection()
+        }
+    }
+
+    private func cancelConnectRetry() {
+        connectRetryTask?.cancel(); connectRetryTask = nil
+        connectRetryAttempt = 0
     }
 
     private func cancelNetworkEffects() {
@@ -478,7 +512,11 @@ public final class GianClientCoordinator {
                     // Not `.resyncing`, so no second connection races it.
                     store.serviceDiagnostic = nil
                     store.markConnectionNotReady(.reconnecting, reason: .cryptoResumed)
-                } else { store.markConnectionNotReady(.offline, reason: .cryptoResumed) }
+                } else {
+                    store.markConnectionNotReady(error.isHostOffline ? .hostOffline : .offline, reason: .cryptoResumed)
+                    if let scope = store.readyScope(), store.state.localConnectivity == .available,
+                       store.state.foreground == .foreground { scheduleConnectRetry(after: error, scope: scope) }
+                }
             }
         case .resyncRequired(let reason):
             if let producer = runtime as? any DirectoryReadinessReporting, producer.acceptedDirectory != nil {

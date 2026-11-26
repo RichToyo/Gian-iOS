@@ -681,10 +681,15 @@ public struct InteractionRecord: Sendable, Equatable, Identifiable {
     public var kind: InteractionKind
     public var title: String
     public var detail: String
+    /// What is being approved, verbatim (the command, the file), when the
+    /// Host says it.
+    public var subject: String?
     public var risk: InteractionRisk
     public var actions: [InteractionAction]
     public var inputs: [InteractionInput]
     public var phase: InteractionPhase
+    /// Why the last answer from here failed; the card stays answerable.
+    public var failureMessage: String?
 
     public init(
         id: InteractionID,
@@ -697,7 +702,8 @@ public struct InteractionRecord: Sendable, Equatable, Identifiable {
         risk: InteractionRisk,
         actions: [InteractionAction],
         inputs: [InteractionInput] = [],
-        phase: InteractionPhase = .pending
+        phase: InteractionPhase = .pending,
+        subject: String? = nil
     ) {
         self.id = id
         self.revision = revision
@@ -706,6 +712,7 @@ public struct InteractionRecord: Sendable, Equatable, Identifiable {
         self.kind = kind
         self.title = title
         self.detail = detail
+        self.subject = subject
         self.risk = risk
         self.actions = actions
         self.inputs = inputs

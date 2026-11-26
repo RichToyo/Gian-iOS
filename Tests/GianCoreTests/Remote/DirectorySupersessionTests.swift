@@ -22,7 +22,7 @@ struct DirectorySupersessionTests {
     }
 
     @Test func sameEpochInvalidationWhileCatalogIsDelayedCannotInstallDirectory() async throws {
-        for kind in ["state.patch", "snapshot.required", "state.snapshot"] {
+        for kind in ["snapshot.required", "state.snapshot"] {
             let (fixture, socket) = try await makeFixture()
             let refresh = Task { await fixture.service.refreshDirectory(scope: fixture.scope) }
             _ = try await socket.catalogHeld.next()
@@ -48,6 +48,23 @@ struct DirectorySupersessionTests {
             #expect(!envelopes.contains { if case .directory = $0.event { return true }; return false })
             #expect(envelopes.allSatisfy { $0.serviceEpoch == producerEpoch })
         }
+    }
+
+    /// A busy Host's patch used to cancel the read too (and the next, and the
+    /// next). It now waits for the snapshot and is applied right after it.
+    @Test func aPatchDuringTheReadIsAppliedAfterIt() async throws {
+        let (fixture, socket) = try await makeFixture()
+        let refresh = Task { await fixture.service.refreshDirectory(scope: fixture.scope) }
+        _ = try await socket.catalogHeld.next()
+        try socket.removeSessionPatch(fixture.sessionID)
+        try socket.releaseCatalog()
+        guard case .snapshot = await refresh.value else { Issue.record("the read was dropped"); return }
+        #expect(fixture.service.cursor?.revision == socket.stateRevision)
+        let envelopes = await delivered(fixture)
+        let directory = envelopes.firstIndex { if case .directory = $0.event { return true }; return false }
+        let patch = envelopes.firstIndex { if case .statePatch = $0.event { return true }; return false }
+        #expect(directory != nil && patch != nil)
+        if let directory, let patch { #expect(directory < patch) }
     }
 
     @Test func olderRefreshCannotOverwriteNewerSuccessfulRefreshInSameEpoch() async throws {

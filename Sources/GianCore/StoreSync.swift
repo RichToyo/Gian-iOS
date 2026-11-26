@@ -27,12 +27,21 @@ extension GianClientStore {
         var seen: Set<String> = []
         var latest: TranscriptPageResponse?
         var temporaryBytes = 0
+        var rereads = 0
         for _ in 0..<64 {
-            let page = await service.pageTranscript(scope: scope, sessionID: session, cursor: before)
+            var page = await service.pageTranscript(scope: scope, sessionID: session, cursor: before)
+            // An update of the chat overtook the read (a new chat's first turn
+            // updates it several times a second): the Host is fine, so read
+            // the same page again, a moment later, rather than fail the chat.
+            while page.failed, page.superseded, rereads < 4, responseIsCurrent(token), navigation == navigationEpoch,
+                  currentSessionID == session, !Task.isCancelled {
+                rereads += 1
+                try? await transcriptRereadWait()
+                page = await service.pageTranscript(scope: scope, sessionID: session, cursor: before)
+            }
             guard responseIsCurrent(token), navigation == navigationEpoch, currentSessionID == session, !Task.isCancelled else {
                 return reject(.staleOperation)
             }
-            // The coordinator reads again when an update of the chat overtook this read.
             guard !page.failed else { return reject(page.superseded ? .staleOperation : .notFound) }
             if latest == nil { latest = page }
             for item in page.items {

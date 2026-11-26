@@ -49,7 +49,7 @@ final class InlineMarkdownTests: XCTestCase {
 
     func testTableCellsRenderInlineMarkdown() {
         XCTAssertEqual(MarkdownBlockParser.parse("| A | B |\n|---|---|\n| **注意：**值 | `x` |"),
-                       [.table(headers: ["A", "B"], rows: [["**注意：**值", "`x`"]])])
+                       [.table(headers: ["A", "B"], alignments: [.leading, .leading], rows: [["**注意：**值", "`x`"]])])
         XCTAssertEqual(render("**注意：**值"), "[B:注意：]值")
     }
 

@@ -12,8 +12,11 @@ struct HostPairingPanel: View {
     var onScanPayload: (String) -> Void
     var onCode: (String) -> Void
     var onRefreshPairing: () -> Void
+    /// Stops waiting for the Host and goes back to scanning.
+    var onCancel: (() -> Void)? = nil
 
     @State private var entersCode = false
+    @State private var waitDeadline = Date.now.addingTimeInterval(300)
 
     var body: some View {
         Group {
@@ -33,12 +36,27 @@ struct HostPairingPanel: View {
     private var waiting: some View {
         VStack(spacing: GianTheme.Metrics.paddingSmall) {
             ProgressView()
-            Text("Confirm this device on your Host.")
+            Text("On your Mac, confirm this device in Gian when it asks.")
                 .font(GianTheme.Typography.caption)
                 .foregroundStyle(GianTheme.Colors.secondaryLabel)
+                .multilineTextAlignment(.center)
+            // A pairing request lasts 5 minutes on the Server.
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                let left = max(0, Int(waitDeadline.timeIntervalSince(context.date)))
+                Text(left > 0 ? "Waiting… \(left / 60):\(String(format: "%02d", left % 60)) left" : "The request may have expired. Pair again.")
+                    .font(GianTheme.Typography.caption.monospacedDigit())
+                    .foregroundStyle(GianTheme.Colors.secondaryLabel)
+            }
             Button("Check confirmation", action: onRefreshPairing)
                 .buttonStyle(GianSecondaryButtonStyle())
+            if let onCancel {
+                Button("Cancel", role: .cancel, action: onCancel)
+                    .font(GianTheme.Typography.caption.weight(.semibold))
+                    .foregroundStyle(GianTheme.Colors.tint)
+                    .frame(minHeight: GianTheme.Metrics.minHitTarget)
+            }
         }
+        .onAppear { waitDeadline = .now.addingTimeInterval(300) }
         // The Host confirms out of band; check periodically so the app moves
         // on by itself. The button stays as a manual check.
         .task {
@@ -64,7 +82,7 @@ private struct QRScanEntry: View {
 
     var body: some View {
         VStack(spacing: GianTheme.Metrics.paddingMedium) {
-            Text("Scan the QR code shown on the Host.")
+            Text("On your Mac, open Gian › Settings › Remote and scan the QR code shown there.")
                 .font(GianTheme.Typography.caption)
                 .foregroundStyle(GianTheme.Colors.secondaryLabel)
                 .multilineTextAlignment(.center)
@@ -87,7 +105,15 @@ private struct QRScanEntry: View {
     private var camera: some View {
         switch cameraReady {
         case .some(true):
-            QRScannerSheet(onPayload: onPayload, onCancel: {})
+            // One scanner delivers one code; a fresh one follows a moment
+            // later, so scanning the same wrong code again isn't ignored.
+            QRScannerSheet(onPayload: { payload in
+                onPayload(payload)
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(1.5))
+                    attempt += 1
+                }
+            }, onCancel: {})
                 .id(attempt)
                 .accessibilityLabel("QR code scanner")
         case .some(false):
@@ -130,7 +156,7 @@ struct OneTimeCodeEntry: View {
 
     var body: some View {
         VStack(spacing: GianTheme.Metrics.paddingMedium) {
-            Text("Enter the one-time code shown on the Host.")
+            Text("Enter the one-time code shown in Gian › Settings › Remote on your Mac.")
                 .font(GianTheme.Typography.caption)
                 .foregroundStyle(GianTheme.Colors.secondaryLabel)
                 .multilineTextAlignment(.center)

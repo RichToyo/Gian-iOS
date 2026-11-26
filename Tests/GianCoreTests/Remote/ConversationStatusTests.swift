@@ -177,6 +177,20 @@ struct ConversationStatusTests {
         await live.coordinator.stop()
     }
 
+    /// A connect that fails outright (the Mac asleep at launch, or on Retry)
+    /// used to stay offline until the user tapped Retry again.
+    @Test func aConnectThatFailsIsTriedAgainOnItsOwn() async throws {
+        let live = try await online()
+        live.coordinator.connectRetryUnit = .milliseconds(4)
+        await live.fixture.service.disconnect()
+        live.hostUnreachable()
+        _ = await live.coordinator.refreshConnection()
+        #expect(live.store.state.connection == .offline)
+        live.hostReachable()
+        #expect(await live.settled())
+        await live.coordinator.stop()
+    }
+
     @Test func restoringAnOpenChatShowsSyncingNotOffline() async throws {
         let live = try await online()
         try await live.open()

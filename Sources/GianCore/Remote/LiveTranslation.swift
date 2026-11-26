@@ -49,7 +49,7 @@ extension LiveGianClientService {
                     guard previous == fingerprint else { throw RemoteClientError.integrity }
                     return .unknown(request.requestID)
                 }
-                guard vault.translationAttempts.count < 2048 else { throw RemoteClientError.bufferLimit }
+                AttemptLedger.makeRoom(&vault.translationAttempts, for: identity)
                 // A lost paid-request ACK stays uncertain even across process restarts.
                 vault.translationAttempts[identity] = fingerprint
                 try saveVault(vault, server: scope.server, account: scope.account, epoch: epoch)

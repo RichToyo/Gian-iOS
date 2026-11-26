@@ -67,6 +67,9 @@ public enum GianClientAction: Sendable {
     case refreshDirectory
     case retrySynchronization
     case clearAttachmentCache
+    /// Unpairs this device from the current Host (here and, when it can be
+    /// reached, on the Server), then opens another paired Host if any.
+    case removeCurrentHost
     /// Reads an Agent's conversation options (`catalog.agent`).
     case loadAgentOptions(AgentID)
     /// Fetches each known Agent's own logo from the Host (`proxy.logo`).

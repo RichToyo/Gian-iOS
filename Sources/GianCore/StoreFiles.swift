@@ -103,3 +103,18 @@ extension GianClientStore {
         transcriptDownloadRequests.removeAll()
     }
 }
+
+extension GianClientStore {
+    /// Opens a file a reply links to, read-only, through the Host (which
+    /// resolves it in the open conversation's repository).
+    public func previewFileReference(_ reference: String) async -> FileReferencePreviewResponse {
+        guard let scope = readyScope(), let session = currentSessionID else { return .failed("Open the conversation first.") }
+        guard state.localConnectivity == .available, state.connection == .online else {
+            return .failed("Not connected to the Host. Try again once it's back.")
+        }
+        if let code = requireCapability(.fileRead) {
+            return code == .capabilityDenied ? .failed("The Host doesn't let this device read files.") : .unsupported
+        }
+        return await service.previewFileReference(scope: scope, sessionID: session, reference: reference)
+    }
+}

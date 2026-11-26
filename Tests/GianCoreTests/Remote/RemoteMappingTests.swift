@@ -118,3 +118,25 @@ struct RemoteMappingTests {
         #expect(fixture.service.lastFailure == .server(code: "HOST_OFFLINE", retryAfter: 45))
     }
 }
+
+@MainActor
+struct InteractionSubjectMappingTests {
+    private func card(subject: String?) -> WireValue {
+        var presentation: [String: WireValue] = [
+            "title": .string("Run a command"), "description": .string("The Agent wants to run a command."), "risk": .string("medium"),
+            "actions": .array([.object(["id": .string("00000000-0000-7000-8000-000000000084"), "label": .string("Allow"), "tone": .string("default")])]),
+        ]
+        if let subject { presentation["subject"] = .string(subject) }
+        return .object([
+            "id": .string("00000000-0000-7000-8000-000000000081"), "revision": .string("1"),
+            "session_id": .string("00000000-0000-7000-8000-000000000082"), "turn_id": .string("00000000-0000-7000-8000-000000000083"),
+            "kind": .string("approval"), "presentation": .object(presentation),
+        ])
+    }
+
+    @Test func anApprovalKeepsWhatItApproves() throws {
+        #expect(try RemoteMapping.interaction(card(subject: "git push origin main")).subject == "git push origin main")
+        #expect(try RemoteMapping.interaction(card(subject: nil)).subject == nil)
+        #expect(try RemoteMapping.interaction(card(subject: "")).subject == nil)
+    }
+}

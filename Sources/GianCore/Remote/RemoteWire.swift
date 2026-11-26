@@ -146,3 +146,23 @@ indirect enum WireValue: Codable, Sendable, Equatable {
 extension WireValue {
     static func strings(_ values: [String]) -> WireValue { .array(values.map { .string($0) }) }
 }
+
+/// The durable ledgers of attempted command and translation IDs (id → payload
+/// fingerprint). They only matter for an attempt whose outcome may still be
+/// unknown, so a full ledger forgets its oldest quarter (by the UUIDv7 time in
+/// the key) instead of refusing every further command.
+enum AttemptLedger {
+    static let capacity = 2048
+
+    static func makeRoom(_ ledger: inout [String: String], for key: String) {
+        guard ledger[key] == nil, ledger.count >= capacity else { return }
+        let oldest = ledger.keys.sorted { stamp($0) < stamp($1) }.prefix(ledger.count - capacity * 3 / 4)
+        for key in oldest { ledger.removeValue(forKey: key) }
+    }
+
+    /// Translation keys are "host:request"; the ID is the last component.
+    static func stamp(_ key: String) -> Int {
+        let id = key.split(separator: ":").last.map(String.init) ?? key
+        return (try? RemoteWire.commandDate(id)) ?? 0
+    }
+}

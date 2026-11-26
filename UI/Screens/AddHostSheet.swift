@@ -35,7 +35,8 @@ struct AddHostSheet: View {
                     notice: pairing.notice,
                     onScanPayload: pairing.onPairPayload,
                     onCode: pairing.onPairCode,
-                    onRefreshPairing: pairing.onRefresh
+                    onRefreshPairing: pairing.onRefresh,
+                    onCancel: pairing.onReset
                 )
                 Spacer(minLength: 0)
             }

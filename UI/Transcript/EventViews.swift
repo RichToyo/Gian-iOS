@@ -3,18 +3,22 @@ import GianCore
 
 /// Collapsed/expanded execution details for one turn. Terminal labels always
 /// match the turn: "Working" while active, then "Worked"/"Failed"/"Stopped".
-/// A failed turn keeps its failing step expanded; nothing retries implicitly.
+/// Open while the turn works (like Gian's live block) or when it failed —
+/// also a turn that fails while watched — and closed once it worked, unless
+/// the user opened or closed it themselves.
 struct WorkCardView: View {
     let card: WorkCard
-    @State private var isExpanded: Bool
+    /// The user's own choice; nil follows the phase.
+    @State private var userExpanded: Bool?
     @State private var followsLatest = true
     @State private var nearBottom = true
     @State private var userScrolling = false
 
     init(card: WorkCard) {
         self.card = card
-        _isExpanded = State(initialValue: card.phase == .failed)
     }
+
+    private var isExpanded: Bool { userExpanded ?? (card.phase == .working || card.phase == .failed) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -74,7 +78,7 @@ struct WorkCardView: View {
     private var header: some View {
         Button {
             withAnimation(.easeInOut(duration: 0.2)) {
-                isExpanded.toggle()
+                userExpanded = !isExpanded
             }
         } label: {
             HStack(spacing: GianTheme.Metrics.paddingSmall) {
@@ -121,8 +125,9 @@ struct WorkCardView: View {
         switch card.phase {
         case .working: GianTheme.Colors.tint
         case .worked: GianTheme.Colors.success
-        case .failed, .stopped: GianTheme.Colors.failure
-        case .unknown: GianTheme.Colors.secondaryLabel
+        case .failed: GianTheme.Colors.failure
+        // The user's own Stop isn't an error.
+        case .stopped, .unknown: GianTheme.Colors.secondaryLabel
         }
     }
 
@@ -158,9 +163,12 @@ struct WorkCardView: View {
         case .worked:
             Image(systemName: "checkmark.circle")
                 .foregroundStyle(GianTheme.Colors.success)
-        case .failed, .stopped:
+        case .failed:
             Image(systemName: "exclamationmark.circle.fill")
                 .foregroundStyle(GianTheme.Colors.failure)
+        case .stopped:
+            Image(systemName: "stop.circle")
+                .foregroundStyle(GianTheme.Colors.secondaryLabel)
         case .unknown:
             Image(systemName: "info.circle")
                 .foregroundStyle(GianTheme.Colors.secondaryLabel)
@@ -210,9 +218,14 @@ struct WorkEventRow: View {
         case .running:
             ProgressView().controlSize(.mini)
         case .done:
-            Text(event.statusText.isEmpty ? "Done" : event.statusText)
-                .font(GianTheme.Typography.caption)
-                .foregroundStyle(event.kind == .warning ? GianTheme.Colors.warning : GianTheme.Colors.success)
+            // A plain success says nothing (as in Gian); a result worth
+            // reading ("3 matches", "exit 0") stays, quietly.
+            if !event.statusText.isEmpty, event.statusText != "Done" {
+                Text(event.statusText)
+                    .font(GianTheme.Typography.caption)
+                    .foregroundStyle(event.kind == .warning ? GianTheme.Colors.warning : GianTheme.Colors.secondaryLabel)
+                    .lineLimit(1)
+            }
         case .failed:
             Text(event.statusText.isEmpty ? "Failed" : event.statusText)
                 .font(GianTheme.Typography.caption)
@@ -259,15 +272,16 @@ struct TurnOutcomeRow: View {
     }
 
     private var color: Color {
-        GianTheme.Colors.failure
+        // Stopping is the user's own choice, not a failure.
+        outcome == .stopped ? GianTheme.Colors.secondaryLabel : GianTheme.Colors.failure
     }
 
     private var text: String {
         switch outcome {
         case .failed:
-            "Turn ended · Failed. The failing step stays expanded above; nothing was retried automatically."
+            "Turn ended · Failed. Nothing was retried automatically."
         case .stopped:
-            "Turn ended · Stopped."
+            "Stopped."
         case .severeError:
             "A severe error occurred in this turn."
         }

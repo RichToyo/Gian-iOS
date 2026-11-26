@@ -59,7 +59,39 @@ public enum RemoteClientError: Error, Sendable, Equatable {
         case .unsupported: "This operation is not supported by the inspected Host."
         case .transport: "The remote service is temporarily unavailable."
         case .deliveryNotStarted: "The Host did not start this message."
+        case .server("HOST_OFFLINE", _): "The Host is offline."
+        case .server("RATE_LIMITED", _): "The Server is busy. Trying again shortly."
         case .server(let code, _): "Remote operation failed (\(code))."
+        }
+    }
+
+    /// The Host isn't connected to the Server (asleep, quit, no network).
+    public var isHostOffline: Bool {
+        if case .server("HOST_OFFLINE", _) = self { return true }
+        return false
+    }
+}
+
+/// How long to wait before connecting again, like remote-web: 0.5, 1, 2, 4,
+/// 8, 10, 10… × `unit` (seconds in the app); at most 5 while the Host is
+/// offline (it comes back on its own); the Server's Retry-After when it is
+/// rate limiting. It used to back off to 32 s.
+public enum ReconnectBackoff {
+    public static func delay(attempt: Int, unit: Duration, error: RemoteClientError) -> Duration {
+        if case .server("RATE_LIMITED", let retryAfter) = error, let retryAfter { return .seconds(retryAfter) }
+        let cap: Double = error.isHostOffline ? 5 : 10
+        let factor = min(cap, 0.5 * Double(1 << min(max(attempt - 1, 0), 5)))
+        return unit * factor
+    }
+
+    /// Errors another attempt can't fix: they need the user (pair again,
+    /// update, trust the Server again).
+    public static func retries(after error: RemoteClientError) -> Bool {
+        switch error {
+        case .notAuthorized, .deviceRevoked, .versionMismatch, .serverIdentityChanged, .integrity, .invalidServer, .cancelled:
+            false
+        default:
+            true
         }
     }
 }

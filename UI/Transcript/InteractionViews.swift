@@ -18,31 +18,41 @@ struct InteractionCard: View {
     var body: some View {
         switch record.phase {
         case .resolvedHere:
-            resolvedRow("You responded", icon: "checkmark", color: GianTheme.Colors.success)
+            resolvedRow("Answered", icon: "checkmark", color: GianTheme.Colors.success)
         case .resolvedElsewhere:
-            resolvedRow("Resolved on another device", icon: "checkmark", color: GianTheme.Colors.secondaryLabel)
+            resolvedRow("Answered on another device", icon: "checkmark", color: GianTheme.Colors.secondaryLabel)
         case .expired:
-            resolvedRow("This request expired", icon: "clock", color: GianTheme.Colors.secondaryLabel)
-        case .failed:
-            resolvedRow("The response failed to send", icon: "xmark.circle", color: GianTheme.Colors.failure)
+            resolvedRow("Expired", icon: "clock", color: GianTheme.Colors.secondaryLabel)
         case .uncertain:
             resolvedRow(
-                "Response outcome unknown — check the Host before retrying",
+                "Outcome unknown — check the Host before answering again",
                 icon: "exclamationmark.triangle",
                 color: GianTheme.Colors.warning
             )
-        case .pending, .responding:
+        // A failed answer keeps the card, with why, so it can be sent again.
+        case .pending, .responding, .failed:
             card
         }
     }
 
+    /// What happened, and to what: the card's title (and command) stay.
     private func resolvedRow(_ summary: String, icon: String, color: Color) -> some View {
-        HStack(spacing: GianTheme.Metrics.paddingSmall) {
+        HStack(alignment: .firstTextBaseline, spacing: GianTheme.Metrics.paddingSmall) {
             Image(systemName: icon)
                 .foregroundStyle(color)
-            Text(summary)
-                .font(GianTheme.Typography.caption)
-                .foregroundStyle(GianTheme.Colors.secondaryLabel)
+            VStack(alignment: .leading, spacing: 2) {
+                (Text(summary).foregroundStyle(GianTheme.Colors.secondaryLabel)
+                    + Text(" · \(record.title)").foregroundStyle(GianTheme.Colors.label))
+                    .font(GianTheme.Typography.caption)
+                    .lineLimit(2)
+                if let subject = record.subject {
+                    Text(subject)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(GianTheme.Colors.secondaryLabel)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
         }
         .padding(GianTheme.Metrics.paddingMedium)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -63,7 +73,10 @@ struct InteractionCard: View {
     private var card: some View {
         VStack(alignment: .leading, spacing: GianTheme.Metrics.paddingMedium) {
             header
-            if !record.detail.isEmpty {
+            if let subject = record.subject {
+                subjectView(subject)
+            }
+            if !record.detail.isEmpty, record.detail != record.subject {
                 detailView
             }
             if !record.inputs.isEmpty {
@@ -72,11 +85,18 @@ struct InteractionCard: View {
             if isResponding {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
-                    Text("Sending response…")
+                    Text("Sending answer…")
                         .font(GianTheme.Typography.caption)
                         .foregroundStyle(GianTheme.Colors.secondaryLabel)
                 }
             } else {
+                if record.phase == .failed {
+                    Label("Your answer wasn't sent\(record.failureMessage.map { ": \($0)" } ?? "."). Try again.",
+                          systemImage: "exclamationmark.circle")
+                        .font(GianTheme.Typography.caption)
+                        .foregroundStyle(GianTheme.Colors.failure)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 actionsView
             }
         }
@@ -126,6 +146,22 @@ struct InteractionCard: View {
         }
     }
 
+    /// What is being approved (the command, the file), verbatim and
+    /// selectable, like a code block.
+    private func subjectView(_ subject: String) -> some View {
+        Text(subject)
+            .font(.system(.footnote, design: .monospaced))
+            .foregroundStyle(GianTheme.Colors.label)
+            .lineLimit(12)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(GianTheme.Metrics.paddingSmall)
+            .background(GianTheme.Colors.codeBackground,
+                        in: RoundedRectangle(cornerRadius: GianTheme.Metrics.cornerRadiusSmall, style: .continuous))
+            .accessibilityLabel("Command: \(subject)")
+    }
+
     @ViewBuilder
     private var detailView: some View {
         if record.kind == .exitPlanMode {
@@ -170,25 +206,15 @@ struct InteractionCard: View {
                             Text(input.label)
                                 .font(GianTheme.Typography.caption)
                                 .foregroundStyle(GianTheme.Colors.secondaryLabel)
-                            Menu {
-                                ForEach(options) { option in
-                                    Button {
-                                        textValues[input.id] = option.value
-                                    } label: {
-                                        VStack(alignment: .leading) {
-                                            Text(option.label)
-                                            if let description = option.description {
-                                                Text(description)
-                                                    .font(.caption)
-                                            }
-                                        }
-                                    }
+                            ForEach(options) { option in
+                                let selected = textValues[input.id] == option.value
+                                Button {
+                                    textValues[input.id] = option.value
+                                } label: {
+                                    optionRow(option, selected: selected, symbol: selected ? "largecircle.fill.circle" : "circle")
                                 }
-                            } label: {
-                                pickerLabel(
-                                    text: selectedOptionLabel(for: input, options: options)
-                                        ?? "Choose…"
-                                )
+                                .buttonStyle(.plain)
+                                .accessibilityAddTraits(selected ? .isSelected : [])
                             }
                         }
                     } else {
@@ -211,25 +237,10 @@ struct InteractionCard: View {
                                     }
                                     listValues[input.id] = current
                                 } label: {
-                                    HStack(spacing: 8) {
-                                        Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                                            .foregroundStyle(selected ? GianTheme.Colors.tint : GianTheme.Colors.secondaryLabel)
-                                        VStack(alignment: .leading, spacing: 1) {
-                                            Text(option.label)
-                                                .font(GianTheme.Typography.caption)
-                                                .foregroundStyle(GianTheme.Colors.label)
-                                            if let description = option.description {
-                                                Text(description)
-                                                    .font(GianTheme.Typography.badge)
-                                                    .foregroundStyle(GianTheme.Colors.secondaryLabel)
-                                            }
-                                        }
-                                        Spacer(minLength: 0)
-                                    }
-                                    .frame(minHeight: GianTheme.Metrics.minHitTarget)
-                                    .contentShape(Rectangle())
+                                    optionRow(option, selected: selected, symbol: selected ? "checkmark.circle.fill" : "circle")
                                 }
                                 .buttonStyle(.plain)
+                                .accessibilityAddTraits(selected ? .isSelected : [])
                             }
                         }
                     } else {
@@ -272,6 +283,28 @@ struct InteractionCard: View {
         }
     }
 
+    private func optionRow(_ option: InteractionInputOption, selected: Bool, symbol: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: symbol)
+                .foregroundStyle(selected ? GianTheme.Colors.tint : GianTheme.Colors.secondaryLabel)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(option.label)
+                    .font(GianTheme.Typography.body)
+                    .foregroundStyle(GianTheme.Colors.label)
+                if let description = option.description {
+                    Text(description)
+                        .font(GianTheme.Typography.caption)
+                        .foregroundStyle(GianTheme.Colors.secondaryLabel)
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 6)
+        .frame(minHeight: GianTheme.Metrics.minHitTarget)
+        .contentShape(Rectangle())
+    }
+
     private func pickerLabel(text: String) -> some View {
         HStack {
             Text(text)
@@ -312,14 +345,27 @@ struct InteractionCard: View {
         }
     }
 
+    /// Side by side when the labels fit, otherwise stacked full width (long
+    /// Host labels used to be squeezed into one row on the folded Duo).
     private var actionsView: some View {
-        HStack(spacing: GianTheme.Metrics.paddingSmall) {
-            ForEach(record.actions) { action in
-                Button(action.label) {
-                    onRespond(action.id, collectedValues())
-                }
-                .buttonStyle(buttonStyle(for: action.tone))
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: GianTheme.Metrics.paddingSmall) { actionButtons(compact: true) }
+            VStack(spacing: GianTheme.Metrics.paddingSmall) { actionButtons(compact: false) }
+        }
+    }
+
+    @ViewBuilder
+    private func actionButtons(compact: Bool) -> some View {
+        ForEach(record.actions) { action in
+            Button {
+                onRespond(action.id, collectedValues())
+            } label: {
+                Text(action.label)
+                    .lineLimit(compact ? 1 : 3)
+                    .fixedSize(horizontal: compact, vertical: !compact)
+                    .multilineTextAlignment(.center)
             }
+            .buttonStyle(buttonStyle(for: action.tone))
         }
     }
 

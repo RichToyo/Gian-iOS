@@ -212,7 +212,7 @@ struct TranscriptPacing {
     /// it is.
     static func closingOpenSpans(_ text: String) -> String {
         let fences = text.split(separator: "\n", omittingEmptySubsequences: false)
-            .filter { $0.trimmingCharacters(in: .whitespaces).hasPrefix("```") }.count
+            .filter { MarkdownBlockParser.openingFence($0.trimmingCharacters(in: .whitespaces)) != nil }.count
         guard fences.isMultiple(of: 2) else { return text }
         let paragraph = text.range(of: "\n\n", options: .backwards)?.upperBound ?? text.startIndex
         let scalars = Array(text[paragraph...].unicodeScalars)

@@ -266,7 +266,8 @@ enum RemoteMapping {
         }
         return InteractionRecord(id: try value.scoped("id"), revision: try value.string("revision"), sessionID: try value.scoped("session_id"),
             turnID: try value.scoped("turn_id"), kind: try enumeration(value, "kind"), title: try presentation.string("title", maximum: 256),
-            detail: try presentation.string("description"), risk: try enumeration(presentation, "risk"), actions: actions, inputs: inputs)
+            detail: try presentation.string("description"), risk: try enumeration(presentation, "risk"), actions: actions, inputs: inputs,
+            subject: try presentation.optionalString("subject").flatMap { $0.isEmpty ? nil : $0 })
     }
     static func reading(_ value: WireValue, session: SessionID) throws -> ReadingTranslation {
         guard try value.identifier("session_id") == session.rawValue else { throw RemoteClientError.integrity }

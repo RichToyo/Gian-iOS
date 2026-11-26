@@ -319,6 +319,23 @@ struct ContractTests {
         #expect(service.respondCount == 0)
     }
 
+    /// A failed answer used to be final ("The response failed to send").
+    @Test func aFailedAnswerKeepsItsReasonAndCanBeSentAgain() async throws {
+        let (store, service, clock) = makeHarness()
+        _ = try await signIn(store, clock: clock)
+        #expect((await store.dispatch(.selectConversation(PreviewFixtures.sessionID))).isApplied)
+        service.script.respondFailure = "The Host refused it."
+        #expect((await store.dispatch(.respondToInteraction(PreviewFixtures.interactionID, actionID: PreviewFixtures.actionID, values: [:]))).isApplied)
+        let failed = try #require(store.state.interactions.first { $0.id == PreviewFixtures.interactionID })
+        #expect(failed.phase == .failed)
+        #expect(failed.failureMessage == "The Host refused it.")
+        #expect((await store.dispatch(.respondToInteraction(PreviewFixtures.interactionID, actionID: PreviewFixtures.actionID, values: [:]))).isApplied)
+        let answered = try #require(store.state.interactions.first { $0.id == PreviewFixtures.interactionID })
+        #expect(answered.phase == .resolvedHere)
+        #expect(answered.failureMessage == nil)
+        #expect(service.respondCount == 2)
+    }
+
     @Test func unconfiguredTranslationBlocksSend() async throws {
         let (store, service, clock) = makeHarness()
         _ = try await signIn(store, clock: clock)

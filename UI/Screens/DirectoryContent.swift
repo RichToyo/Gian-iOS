@@ -14,6 +14,9 @@ struct DirectoryContent: View {
     var onPullToRefresh: (DirectoryCollection) async -> Void = { _ in }
     /// The Host connection can serve reads; a never-loaded list waits for it.
     var canLoad: Bool = true
+    var connectionNotice: ListConnectionNotice? = nil
+    var onRetryConnection: () -> Void = {}
+    var onAddHost: () -> Void = {}
 
     @State private var collapsedGroups: Set<String> = []
 
@@ -22,16 +25,19 @@ struct DirectoryContent: View {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     Color.clear.frame(height: 0).id("directory-top")
+                    if let connectionNotice {
+                        ListConnectionNoticeView(notice: connectionNotice, onRetry: onRetryConnection, onPair: onAddHost)
+                    }
                     if let result = directory.temporarySearchResult,
                        currentPage.phase != .denied, currentPage.phase != .unsupported {
                         ConversationRow(item: result, isSelected: result.id == selectedConversationID,
-                                        showsRepo: true, onSelect: { onSelectConversation(result.id) })
+                                        showsRepo: true, isLive: connectionNotice == nil, onSelect: { onSelectConversation(result.id) })
                             .equatable()
                     }
                     if currentPage.phase != .denied && currentPage.phase != .unsupported {
                         ForEach(directory.temporaryCreatedResults) { result in
                             ConversationRow(item: result, isSelected: result.id == selectedConversationID,
-                                            showsRepo: true, onSelect: { onSelectConversation(result.id) })
+                                            showsRepo: true, isLive: connectionNotice == nil, onSelect: { onSelectConversation(result.id) })
                                 .equatable()
                         }
                     }
@@ -42,8 +48,8 @@ struct DirectoryContent: View {
                             page: directory.tasksPage,
                             groups: directory.tasks.map { ($0.id.rawValue, $0.title, $0.conversations) },
                             unsupportedMessage: "Tasks are unavailable on this Host.",
-                            emptyTitle: "No conversations in open tasks",
-                            emptyDescription: "Conversations associated with open tasks will appear here."
+                            emptyTitle: "Nothing in open tasks \(filterPhrase)",
+                            emptyDescription: "Older conversations are hidden by the time filter (List options)."
                         )
                     case .repos:
                         directoryGroups(
@@ -51,8 +57,8 @@ struct DirectoryContent: View {
                             page: directory.reposPage,
                             groups: directory.repos.map { ($0.id.rawValue, $0.repoName, $0.conversations) },
                             unsupportedMessage: unsupportedMessage(directory.reposAvailability),
-                            emptyTitle: "No recent conversations",
-                            emptyDescription: "Authorized conversations with recent activity will appear here."
+                            emptyTitle: "Nothing \(filterPhrase)",
+                            emptyDescription: "Older conversations are hidden by the time filter (List options)."
                         )
                     }
                 }
@@ -72,6 +78,14 @@ struct DirectoryContent: View {
             .onChange(of: directory.temporarySearchGeneration) { _, _ in
                 if directory.temporarySearchResult != nil { proxy.scrollTo("directory-top", anchor: .top) }
             }
+        }
+    }
+
+    private var filterPhrase: String {
+        switch directory.timeFilter {
+        case .lastHour: "in the last hour"
+        case .last24Hours: "in the last 24 hours"
+        case .last7Days: "in the last 7 days"
         }
     }
 
@@ -109,6 +123,7 @@ struct DirectoryContent: View {
                 unsupportedMessage: unsupportedMessage,
                 emptyTitle: emptyTitle,
                 emptyDescription: emptyDescription,
+                canLoad: canLoad,
                 onLoadMore: onLoadMore,
                 onRefresh: onRefresh
             )
@@ -125,6 +140,7 @@ struct DirectoryContent: View {
                             item: conversation,
                             isSelected: conversation.id == selectedConversationID,
                             showsRepo: collection != .repos,
+                            isLive: connectionNotice == nil,
                             onSelect: { onSelectConversation(conversation.id) }
                         )
                         // Unchanged rows skip re-rendering when the directory updates.
@@ -139,6 +155,7 @@ struct DirectoryContent: View {
                 unsupportedMessage: unsupportedMessage,
                 emptyTitle: emptyTitle,
                 emptyDescription: emptyDescription,
+                canLoad: canLoad,
                 onLoadMore: onLoadMore,
                 onRefresh: onRefresh
             )
@@ -160,7 +177,7 @@ struct DirectoryContent: View {
 
     private func unsupportedMessage(_ availability: SurfaceAvailability) -> String {
         if case .unsupported(let message) = availability { return message }
-        return "This directory is not supported by the connected Host."
+        return "This Host doesn't support this list."
     }
 }
 
@@ -171,6 +188,9 @@ struct DirectoryPageStatusView: View {
     let unsupportedMessage: String
     let emptyTitle: String
     let emptyDescription: String
+    /// False while the Host connection isn't ready: a never-loaded list
+    /// says it is connecting instead of offering a Load that can't work.
+    var canLoad = true
     var onLoadMore: (DirectoryCollection) -> Void
     var onRefresh: (DirectoryCollection) -> Void
 
@@ -179,12 +199,18 @@ struct DirectoryPageStatusView: View {
             switch page.phase {
             case .idle:
                 if isEmpty {
-                    message(
-                        "Not loaded yet",
-                        detail: nil,
-                        systemImage: "arrow.clockwise"
-                    )
-                    refreshButton("Load")
+                    if canLoad {
+                        message("Not loaded yet", detail: nil, systemImage: "arrow.clockwise")
+                        refreshButton("Load")
+                    } else {
+                        HStack(spacing: GianTheme.Metrics.paddingSmall) {
+                            ProgressView().controlSize(.small)
+                            Text("Connecting to the Host…")
+                                .font(GianTheme.Typography.caption)
+                                .foregroundStyle(GianTheme.Colors.secondaryLabel)
+                        }
+                        .accessibilityElement(children: .combine)
+                    }
                 }
             case .loading:
                 if isEmpty {
@@ -200,7 +226,7 @@ struct DirectoryPageStatusView: View {
                 if isEmpty {
                     message(
                         emptyIncompleteTitle,
-                        detail: "The Host reports more directory data to scan. This is not an empty result.",
+                        detail: "The Host has more to look through.",
                         systemImage: "ellipsis.circle"
                     )
                 }
@@ -208,11 +234,11 @@ struct DirectoryPageStatusView: View {
                     actionButton("Load more", systemImage: "chevron.down") {
                         onLoadMore(collection)
                     }
-                    .accessibilityHint("Loads the next bounded set of directory pages.")
+                    .accessibilityHint("Loads more conversations.")
                 } else {
                     message(
-                        "Continuation unavailable",
-                        detail: "This page is incomplete. Refresh to restart the directory read.",
+                        "Couldn't load the rest",
+                        detail: "Refresh to try again.",
                         systemImage: "exclamationmark.circle",
                         tint: GianTheme.Colors.warning
                     )
@@ -225,16 +251,16 @@ struct DirectoryPageStatusView: View {
                 }
             case .cursorInvalid:
                 message(
-                    "Directory changed",
-                    detail: page.error ?? "The continuation is no longer valid. Restart the directory read.",
+                    "The list changed",
+                    detail: "Refresh to see the latest.",
                     systemImage: "arrow.triangle.2.circlepath",
                     tint: GianTheme.Colors.warning
                 )
-                refreshButton("Restart")
+                refreshButton("Refresh")
             case .failed:
                 message(
-                    isEmpty ? "Directory couldn't load" : "Directory refresh failed",
-                    detail: page.error ?? "The Host could not provide this directory page.",
+                    isEmpty ? "Couldn't load conversations" : "Couldn't refresh conversations",
+                    detail: page.error ?? "The Host didn't answer.",
                     systemImage: "exclamationmark.circle",
                     tint: GianTheme.Colors.failure
                 )
@@ -249,7 +275,7 @@ struct DirectoryPageStatusView: View {
                 refreshButton("Check access")
             case .unsupported:
                 message(
-                    "Directory unavailable",
+                    "Conversations unavailable",
                     detail: unsupportedMessage,
                     systemImage: "exclamationmark.triangle",
                     tint: GianTheme.Colors.warning
@@ -270,7 +296,7 @@ struct DirectoryPageStatusView: View {
     }
 
     private var emptyIncompleteTitle: String {
-        collection == .search ? "No matches loaded yet" : "No rows loaded yet"
+        collection == .search ? "No matches yet" : "Nothing found yet"
     }
 
     private func message(
@@ -324,6 +350,7 @@ struct SearchScreen: View {
     var onRefresh: (DirectoryCollection) -> Void = { _ in }
     var onClose: () -> Void
     @State private var queryText = ""
+    @State private var searching = false
 
     private var normalizedQuery: String {
         queryText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -367,7 +394,7 @@ struct SearchScreen: View {
                                 isEmpty: directory.searchResults.isEmpty,
                                 unsupportedMessage: searchUnsupportedMessage,
                                 emptyTitle: "No results",
-                                emptyDescription: "The Host returned no matching conversation titles for \"\(directory.searchQuery)\".",
+                                emptyDescription: "No conversation titles match \"\(directory.searchQuery)\".",
                                 onLoadMore: onLoadMore,
                                 onRefresh: onRefresh
                             )
@@ -384,8 +411,12 @@ struct SearchScreen: View {
                 }
             }
         }
-        .searchable(text: $queryText, prompt: "Conversation title")
-        .onAppear { queryText = directory.searchQuery }
+        // Ready to type as soon as it opens (it took an extra tap).
+        .searchable(text: $queryText, isPresented: $searching, prompt: "Conversation title")
+        .onAppear {
+            queryText = directory.searchQuery
+            searching = true
+        }
         .task(id: queryText) {
             let value = queryText
             if !value.isEmpty {
@@ -401,5 +432,46 @@ struct SearchScreen: View {
     private var searchUnsupportedMessage: String {
         if case .unsupported(let message) = directory.searchAvailability { return message }
         return "Search is not supported by the connected Host."
+    }
+}
+
+/// The connection while it isn't live, above the list: what's wrong, that
+/// the list is saved history, and what to do.
+struct ListConnectionNoticeView: View {
+    let notice: ListConnectionNotice
+    var onRetry: () -> Void
+    var onPair: () -> Void
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: GianTheme.Metrics.paddingSmall) {
+            if notice == .reconnecting {
+                ProgressView().controlSize(.mini)
+            } else {
+                Image(systemName: notice.systemImage)
+                    .foregroundStyle(notice == .revoked ? GianTheme.Colors.failure : GianTheme.Colors.secondaryLabel)
+            }
+            Text(notice.text)
+                .foregroundStyle(GianTheme.Colors.secondaryLabel)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            if notice.canRetry {
+                Button("Retry", action: onRetry)
+                    .foregroundStyle(GianTheme.Colors.tint)
+                    .gianHitTarget()
+            } else if notice == .revoked {
+                Button("Pair", action: onPair)
+                    .foregroundStyle(GianTheme.Colors.tint)
+                    .gianHitTarget()
+            }
+        }
+        .font(GianTheme.Typography.caption)
+        .padding(.horizontal, GianTheme.Metrics.paddingMedium)
+        .padding(.vertical, GianTheme.Metrics.paddingSmall)
+        .background(GianTheme.Colors.secondaryLabel.opacity(0.08),
+                    in: RoundedRectangle(cornerRadius: GianTheme.Metrics.cornerRadiusMedium, style: .continuous))
+        .padding(.horizontal, GianTheme.Metrics.paddingSmall)
+        .padding(.bottom, GianTheme.Metrics.paddingSmall)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("list-connection-notice")
     }
 }

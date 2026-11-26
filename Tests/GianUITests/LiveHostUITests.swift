@@ -135,9 +135,10 @@ final class LiveHostUITests: XCTestCase {
         XCTAssertTrue(hostTwo.waitForExistence(timeout: 30), "The new Host did not become current")
         // Its list loads by itself once it connects, like the first Host's.
         let notLoaded = app.staticTexts["Not loaded yet"]
+        let connecting = app.staticTexts["Connecting to the Host…"]
         let deadline = Date().addingTimeInterval(30)
-        while notLoaded.exists, Date() < deadline { sleep(1) }
-        XCTAssertFalse(notLoaded.exists, "The new Host's list did not load")
+        while notLoaded.exists || connecting.exists, Date() < deadline { sleep(1) }
+        XCTAssertFalse(notLoaded.exists || connecting.exists, "The new Host's list did not load")
         snap("live-12-second-host")
         hostTwo.tap(); sleep(1)
         snap("live-13-hosts-menu")

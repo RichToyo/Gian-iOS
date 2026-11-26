@@ -22,6 +22,8 @@ struct SetupFlowView: View {
     var onPairPayload: (String) -> Void = { _ in }
     var onPairCode: (String) -> Void = { _ in }
     var onRefreshPairing: () -> Void = {}
+    /// Stops waiting for the Host to confirm (back to scanning).
+    var onCancelPairing: () -> Void = {}
     /// Leaves pairing for the Server step, so this step is never a dead end.
     var onStartOver: () -> Void = {}
 
@@ -134,6 +136,14 @@ struct SetupFlowView: View {
                 .font(GianTheme.Typography.caption)
                 .foregroundStyle(GianTheme.Colors.secondaryLabel)
                 .multilineTextAlignment(.center)
+            // One tap to the page that makes the token (then paste it here).
+            if let server = ServerAddress(parsing: serverAddress),
+               let page = URL(string: server.absoluteString + "/enrollment") {
+                Link("Open the enrollment page", destination: page)
+                    .font(GianTheme.Typography.caption.weight(.semibold))
+                    .foregroundStyle(GianTheme.Colors.tint)
+                    .frame(minHeight: GianTheme.Metrics.minHitTarget)
+            }
 
             connectionStatus
 
@@ -196,7 +206,8 @@ struct SetupFlowView: View {
                 notice: pairingNotice,
                 onScanPayload: onPairPayload,
                 onCode: onPairCode,
-                onRefreshPairing: onRefreshPairing
+                onRefreshPairing: onRefreshPairing,
+                onCancel: onCancelPairing
             )
 
             Button("Use a different server", action: onStartOver)

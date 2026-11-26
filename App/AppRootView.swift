@@ -66,6 +66,7 @@ struct AppRootView: View {
     @State private var thumbnails: [String: Image] = [:]
 
     @Environment(\.scenePhase) private var scenePhase
+    @State private var backgroundGrace = BackgroundGrace()
 
     init(store: GianClientStore) {
         self.store = store
@@ -94,7 +95,20 @@ struct AppRootView: View {
                 if trigger.ready, let agent = trigger.agent { _ = await store.dispatch(.loadAgentOptions(agent)) }
             }
             .onChange(of: scenePhase) { _, phase in
-                dispatch(.setForeground(phase == .active ? .foreground : .background))
+                switch phase {
+                case .active:
+                    backgroundGrace.cancel()
+                    dispatch(.setForeground(.foreground))
+                case .inactive:
+                    // Notification Center, the app switcher, a Face ID sheet:
+                    // stay connected, but save now in case the app is closed.
+                    _ = store.flushStorage()
+                case .background:
+                    _ = store.flushStorage()
+                    backgroundGrace.begin { [store] in _ = await store.dispatch(.setForeground(.background)) }
+                @unknown default:
+                    break
+                }
             }
             .onChange(of: presentation.restorationHint) { _, selection in
                 recordRestorationHint(selection)
@@ -153,6 +167,8 @@ struct AppRootView: View {
                     dispatch(.addDraftAttachment(input))
                 },
                 onPageOlder: { dispatch(.pageOlderTranscript) },
+                onOpenFileReference: { await store.previewFileReference($0) },
+                onRemoveCurrentHost: { dispatch(.removeCurrentHost) },
                 onRespondToInteraction: { dispatch(.respondToInteraction($0, actionID: $1, values: $2)) },
                 onRequestTranslation: { dispatch(.requestReadingTranslation(sourceID: $0, text: $1)) },
                 onCancelReadingTranslation: { dispatch(.cancelReadingTranslation(sourceID: $0)) },
@@ -244,6 +260,7 @@ struct AppRootView: View {
                     onPairPayload: { dispatch(.beginHostPairingFromQR($0)) },
                     onPairCode: { dispatch(.beginHostPairingWithCode($0)) },
                     onRefreshPairing: { dispatch(.refreshHostPairing) },
+                    onCancelPairing: { dispatch(.cancelHostPairing) },
                     onStartOver: { dispatch(.logout) }
                 )
             }
@@ -252,8 +269,17 @@ struct AppRootView: View {
 
     // MARK: - Dispatch
 
+    /// Refusals are explained (they used to be dropped, so a tap could just
+    /// do nothing): see `ActionRejectionNotice`.
     private func dispatch(_ action: GianClientAction) {
-        Task { await store.dispatch(action) }
+        Task {
+            let result = await store.dispatch(action)
+            guard case .rejected(let code) = result.status,
+                  let message = ActionRejectionNotice.message(for: action, code: code) else { return }
+            // The composer already explains its own notices.
+            if case .send = action, store.state.composer.notice != .none { return }
+            presentation.showNotice(message)
+        }
     }
 
     // MARK: - Restoration hint (nonsecret)

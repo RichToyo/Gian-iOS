@@ -93,7 +93,7 @@ final class ScreenshotTourUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Manage in Settings"].exists, "Host title menu missing")
         XCTAssertTrue(app.buttons["Add Host"].exists, "Add Host missing from the Hosts menu")
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.9)).tap(); sleep(1)
-        app.buttons["Directory views"].tap(); sleep(1)
+        app.buttons["List options"].tap(); sleep(1)
         snap(app, "15-list-options", "light")
         XCTAssertTrue(app.buttons["Refresh"].exists, "Refresh missing from list options")
         app.terminate()

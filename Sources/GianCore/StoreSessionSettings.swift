@@ -66,6 +66,8 @@ extension GianClientStore {
     /// while a turn runs and applies it from the next turn. The returned record
     /// replaces ours so the next update carries the current revision.
     func updateConversation(_ change: SessionSettingChange) async -> GianDispatchResult {
+        // Settle before reading the session, so a wait never sends a stale revision.
+        _ = await settleMutations()
         guard let scope = readyScope(), let sessionID = currentSessionID,
               let session = sessions.first(where: { $0.id == sessionID }) else { return reject(.notFound) }
         if !mutationsAllowed() { return reject(.mutationsDisabled) }

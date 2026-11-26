@@ -51,6 +51,8 @@ struct AdaptiveRoot: View {
     var onRetryAttachmentUpload: (AttachmentID) -> Void = { _ in }
     var onPickAttachment: (AttachmentDraftInput, Image?) -> Void = { _, _ in }
     var onPageOlder: () -> Void = {}
+    var onOpenFileReference: (String) async -> FileReferencePreviewResponse = { _ in .unsupported }
+    var onRemoveCurrentHost: () -> Void = {}
     var onRespondToInteraction: (InteractionID, ActionID, [String: InteractionValue]) -> Void = { _, _, _ in }
     var onRequestTranslation: (String, String) -> Void = { _, _ in }
     var onCancelReadingTranslation: (String) -> Void = { _ in }
@@ -143,7 +145,10 @@ struct AdaptiveRoot: View {
         // they re-render nothing else.
         .overlay(alignment: .top) {
             PresentationSurface {
-                BannerHost(banner: presentation.banner, onTap: onBannerTap, onDismiss: onBannerDismiss)
+                VStack(spacing: 0) {
+                    BannerHost(banner: presentation.banner, onTap: onBannerTap, onDismiss: onBannerDismiss)
+                    ActionNoticeHost(notice: presentation.actionNotice, onDismiss: presentation.dismissNotice)
+                }
             }
         }
         // Not a GeometryReader: its content re-runs on every size or safe-area
@@ -221,7 +226,8 @@ struct AdaptiveRoot: View {
                         onSignOut: onSignOut,
                         onChangeServer: onChangeServer,
                         onEvictAttachmentCache: onEvictAttachmentCache,
-                        addHost: addHost
+                        addHost: addHost,
+                        onRemoveCurrentHost: onRemoveCurrentHost
                     )
                 }
             }
@@ -312,7 +318,9 @@ struct AdaptiveRoot: View {
             onPullToRefresh: onPullToRefresh,
             onOpenNewChat: onOpenNewChat,
             onAddHost: { showsAddHost = true },
-            canLoad: mutationsReady
+            canLoad: mutationsReady,
+            connectionNotice: presentation.listNotice,
+            onRetryConnection: onRetrySynchronization
         )
     }
 
@@ -421,7 +429,8 @@ struct AdaptiveRoot: View {
                 onLoadOptions: onLoadConversationOptions,
                 onOpenNewChat: onOpenNewChat,
                 onOpenSettings: onOpenSettings,
-                host: currentHost
+                host: currentHost,
+                onOpenFileReference: onOpenFileReference
             )
         } else {
             ContentUnavailableView(

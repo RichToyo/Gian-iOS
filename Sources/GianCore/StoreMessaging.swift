@@ -2,6 +2,8 @@ import Foundation
 
 extension GianClientStore {
     func mutateQueue(_ mutation: QueueMutation) async -> GianDispatchResult {
+        // Settle before reading the queue, so a wait never edits a stale revision.
+        _ = await settleMutations()
         guard let scope = readyScope(), let sessionID = currentSessionID,
               let session = sessions.first(where: { $0.id == sessionID && $0.authorized && !$0.archived }),
               let queue = session.queue, !sessionAccessOverflow,
@@ -125,7 +127,8 @@ extension GianClientStore {
             persist()
             return reject(.offlineDraftRetained)
         }
-        if state.sync.needsSnapshot || !mutationsAllowed() { return reject(.mutationsDisabled) }
+        if state.sync.needsSnapshot { return reject(.mutationsDisabled) }
+        guard await settleMutations() else { return reject(.mutationsDisabled) }
         if case .uncertain = state.composer.send {
             state.composer.notice = .keptAfterUncertainOutcome
             return reject(.uncertainOutcome)
@@ -448,22 +451,27 @@ extension GianClientStore {
     }
 
     func respond(_ id: InteractionID, actionID: ActionID, values: [String: InteractionValue]) async -> GianDispatchResult {
+        // Settle before reading the card, so a wait never answers a stale revision.
+        _ = await settleMutations()
         guard let scope = readyScope(), let index = state.interactions.firstIndex(where: { $0.id == id }) else {
             return reject(.notFound)
         }
         let interaction = state.interactions[index]
         guard pendingSessionAccess[interaction.sessionID] == nil, !deniedSessionAccess.contains(interaction.sessionID) else { return reject(.mutationsDisabled) }
-        guard interaction.phase == .pending else { return reject(.interactionNotPending) }
+        // A failed answer can be sent again (it used to be final).
+        guard interaction.phase == .pending || interaction.phase == .failed else { return reject(.interactionNotPending) }
         guard interaction.actions.contains(where: { $0.id == actionID }) else { return reject(.unknownActionID) }
         let knownInputs = Set(interaction.inputs.map(\.id))
         if values.keys.contains(where: { !knownInputs.contains($0) }) { return reject(.unknownInputID) }
         if !mutationsAllowed() { return reject(.mutationsDisabled) }
         if let code = requireCapability(.interactionRespond) { return reject(code) }
         let commandID: CommandID = mint()
+        let previousPhase = state.interactions[index].phase
         state.interactions[index].phase = .responding
+        state.interactions[index].failureMessage = nil
         memory.update(scope) { $0.interactionCommands[id] = commandID }
         guard persist() else {
-            state.interactions[index].phase = .pending
+            state.interactions[index].phase = previousPhase
             return reject(.mutationsDisabled)
         }
         let token = epoch
@@ -487,8 +495,9 @@ extension GianClientStore {
         case .succeeded(let success) where success.commandID == commandID:
             state.interactions[current].phase = .resolvedHere
             memory.update(scope) { $0.interactionCommands[id] = nil }
-        case .failed(let failedID, _) where failedID == commandID:
+        case .failed(let failedID, let message) where failedID == commandID:
             state.interactions[current].phase = .failed
+            state.interactions[current].failureMessage = message
             memory.update(scope) { $0.interactionCommands[id] = nil }
         default:
             state.interactions[current].phase = .uncertain

@@ -105,7 +105,14 @@ private final class URLSessionRemoteSocket: RemoteWebSocket {
     }
     func receive() async throws -> Data {
         try Task.checkCancellation()
-        let message = try await task.receive()
+        let message: URLSessionWebSocketTask.Message
+        do { message = try await task.receive() } catch {
+            // The Server closes a device's socket with 4004 when its Host is
+            // offline (a handshake can't be queued): say so, so the app shows
+            // "Host offline" and retries sooner, instead of a lost connection.
+            if task.closeCode.rawValue == 4004 { throw RemoteClientError.server(code: "HOST_OFFLINE", retryAfter: nil) }
+            throw error
+        }
         let data: Data
         switch message {
         case .data(let value): data = value

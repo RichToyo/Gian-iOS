@@ -50,6 +50,8 @@ public enum HostPairingOutcome: Sendable, Equatable {
     case paired(HostID)
     /// Not a pairing link or QR code for this server.
     case invalidCode
+    /// A Host's QR code, but for a Host on another Server.
+    case otherServer
     case rejected
     case expired
     case failed(String)

@@ -52,20 +52,38 @@ struct ComposerView: View {
     @State private var localText: String?
     /// Edits sent but not yet reflected by the store, oldest first.
     @State private var pendingEchoes: [String] = []
+    /// What the user types while the last message is still on its way (the
+    /// draft belongs to that send until then). It becomes the next draft as
+    /// soon as the composer is free: the field used to lock and the keyboard
+    /// to drop after every Send.
+    @State private var typedAhead: String?
 
-    private var text: String { localText ?? draft }
+    /// The message is in the transcript as the pending one (a chat), so the
+    /// field is free for the next. Creating a new chat keeps its text shown.
+    private var isHeld: Bool { sendPhase == .held }
+
+    private var text: String { isHeld ? (typedAhead ?? "") : (localText ?? draft) }
 
     private var fieldText: Binding<String> {
         Binding(
             get: { text },
             set: { value in
                 guard value != text else { return }
-                localText = value
-                pendingEchoes.append(value)
-                if pendingEchoes.count > 64 { pendingEchoes.removeFirst(pendingEchoes.count - 64) }
-                draft = value
+                if isHeld {
+                    typedAhead = value
+                    return
+                }
+                guard !isBusy else { return }
+                edit(value)
             }
         )
+    }
+
+    private func edit(_ value: String) {
+        localText = value
+        pendingEchoes.append(value)
+        if pendingEchoes.count > 64 { pendingEchoes.removeFirst(pendingEchoes.count - 64) }
+        draft = value
     }
 
     private var canSend: Bool {
@@ -80,8 +98,13 @@ struct ComposerView: View {
         }
     }
 
+    /// Send waits for uploads to finish (it used to be refused silently).
+    private var uploading: Bool {
+        attachments.contains { $0.state == .uploading || $0.state == .downloading }
+    }
+
     private var sendEnabled: Bool {
-        canSend && !isBusy && remoteReady && sendPhase != .uncertain
+        canSend && !isBusy && remoteReady && sendPhase != .uncertain && !uploading
     }
 
     private var hasAccessory: Bool {
@@ -115,6 +138,15 @@ struct ComposerView: View {
             GianLog.keyboard.debug("composer focus \(focused), busy \(isBusy)")
             onFocusChange(focused)
         }
+        .onChange(of: isHeld) { _, held in
+            // Free again: what was typed meanwhile becomes the draft (after
+            // any text the send gave back).
+            guard !held, let ahead = typedAhead else { return }
+            typedAhead = nil
+            guard !ahead.isEmpty else { return }
+            let current = localText ?? draft
+            edit(current.isEmpty ? ahead : current + "\n" + ahead)
+        }
         .onChange(of: draft) { _, value in
             if let index = pendingEchoes.firstIndex(of: value) {
                 // One of our own edits arriving; later ones are still on the way.
@@ -133,15 +165,19 @@ struct ComposerView: View {
     /// Send is the button (or ⌘Return on a hardware keyboard).
     private var inputRow: some View {
         HStack(alignment: .bottom, spacing: 0) {
+            // Offline too: the draft keeps the file and uploads it later.
             attachmentPicker
-                .disabled(isBusy || !remoteReady)
+                .disabled(isBusy)
                 .padding(.bottom, 4)
 
-            TextField(placeholder, text: fieldText, axis: .vertical)
+            TextField(isTurnActive && placeholder == "Message" ? "Queue a message" : placeholder,
+                      text: fieldText, axis: .vertical)
                 .font(GianTheme.Typography.body)
                 .lineLimit(1...6)
                 .focused($isFocused)
-                .disabled(isBusy)
+                // Named the same while the placeholder says "Queue a message".
+                .accessibilityLabel("Message")
+                .disabled(isBusy && !isHeld)
                 .padding(.horizontal, 4)
                 // Centers a single line in the 52 pt row (≈ 22 pt line + 2 × 15).
                 .padding(.vertical, 15)
@@ -151,7 +187,7 @@ struct ComposerView: View {
                         .contentShape(Rectangle())
                         .onTapGesture {
                             GianLog.keyboard.debug("composer box tapped, busy \(isBusy)")
-                            if !isBusy { isFocused = true }
+                            if !isBusy || isHeld { isFocused = true }
                         }
                 }
 
@@ -178,6 +214,9 @@ struct ComposerView: View {
             .disabled(!stopEnabled)
             .accessibilityLabel("Stop")
         } else {
+            // Sending closes the keyboard, so the folded screen has room for
+            // the reply; tapping the field again types the next message even
+            // while this one is still on its way.
             Button {
                 isFocused = false
                 onSend()
@@ -189,6 +228,7 @@ struct ComposerView: View {
             .disabled(!sendEnabled)
             .keyboardShortcut(.return, modifiers: .command)
             .accessibilityLabel("Send")
+            .accessibilityHint(isTurnActive ? "Queues it until the Agent is done" : "")
         }
     }
 

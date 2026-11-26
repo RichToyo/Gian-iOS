@@ -14,6 +14,7 @@ import GianCore
 final class AppPresentation {
     private(set) var phase: ClientPhase
     private(set) var hosts: [HostItem] = []
+    private(set) var listNotice: ListConnectionNotice?
     private(set) var directory: DirectoryPresentation
     private(set) var navigation: NavigationState
     private(set) var conversation: ActiveConversationPresentation?
@@ -45,6 +46,16 @@ final class AppPresentation {
     private(set) var attachments: [AttachmentID: AttachmentFacts] = [:]
     /// The in-app notification shown over every screen.
     private(set) var banner: BannerPresentation?
+    /// Why the last tap did nothing, shown briefly over every screen.
+    private(set) var actionNotice: ActionNotice?
+
+    struct ActionNotice: Equatable, Identifiable {
+        let id = UUID()
+        var message: String
+    }
+
+    func showNotice(_ message: String) { actionNotice = ActionNotice(message: message) }
+    func dismissNotice(_ id: UUID) { if actionNotice?.id == id { actionNotice = nil } }
 
     struct AttachmentFacts: Equatable {
         var presentation: AttachmentFilePresentation
@@ -167,6 +178,7 @@ final class AppPresentation {
         let ready = displayedReady(store.mutationsReady, store: store)
         assign(\.phase, state.phase)
         assign(\.hosts, StoreProjection.hosts(state))
+        assign(\.listNotice, StoreProjection.listConnectionNotice(state))
         assign(\.directory, projectedDirectory(state))
         assign(\.navigation, state.navigation)
         var transcriptWaits = false

@@ -18,12 +18,25 @@ extension LiveGianClientService {
     }
 
     func openConnection(scope: ClientScope, epoch captured: Int) async throws {
-        // Like remote-web: the Server proves its pinned identity before each connection.
+        // The Server proves its pinned identity before each connection; a
+        // device login is reused until it nears expiry (like remote-web), so
+        // a reconnect is two requests instead of four.
         _ = try await verifyServerIdentity(server: scope.server, epoch: captured)
-        let lease = try await authenticateDevice(scope: scope, epoch: captured)
-        let ticket = try await http(server: scope.server, path: "/api/v1/ws-tickets", body: .object([
-            "protocol": .string(RemoteBaseline.authProtocol), "host_id": .string(scope.host.rawValue),
-        ]), bearer: lease.token)
+        var lease: RemoteDeviceLease
+        var reused = false
+        if let cached = try reusableDeviceLease(scope) { lease = cached; reused = true }
+        else { lease = try await authenticateDevice(scope: scope, epoch: captured) }
+        let ticketBody = WireValue.object(["protocol": .string(RemoteBaseline.authProtocol), "host_id": .string(scope.host.rawValue)])
+        var ticket: WireValue
+        do {
+            ticket = try await http(server: scope.server, path: "/api/v1/ws-tickets", body: ticketBody, bearer: lease.token)
+        } catch let error as RemoteClientError where reused && (error == .notAuthorized || error == .expired) {
+            // The Server no longer takes the cached login: log in again once.
+            try checkEpoch(captured)
+            deviceLeases.removeValue(forKey: scope)
+            lease = try await authenticateDevice(scope: scope, epoch: captured)
+            ticket = try await http(server: scope.server, path: "/api/v1/ws-tickets", body: ticketBody, bearer: lease.token)
+        }
         try checkEpoch(captured); try validateProtocol(ticket)
         try ticket.closed(["protocol", "ticket", "expires_at"])
         guard Double(try ticket.integer("expires_at")) / 1000 > clock.now().timeIntervalSince1970,
@@ -73,6 +86,7 @@ extension LiveGianClientService {
         commandWaiters.removeAll(); mailboxes.removeAll(); transfers.removeAll()
         snapshotTimeout?.cancel(); snapshotTimeout = nil
         snapshotParts = nil; snapshot = nil; capabilities = nil; stagedSnapshot = nil; catalog = nil; cursor = nil
+        heldFrames = nil; heldFramesRead = nil
         pendingReadSnapshots.removeAll()
         subscribedSession = nil; desiredSession = nil; latestTranscriptTurns.removeAll()
         fileDescriptors.removeAll()
@@ -92,6 +106,7 @@ extension LiveGianClientService {
         commandWaiters.removeAll(); mailboxes.removeAll(); transfers.removeAll()
         snapshotTimeout?.cancel(); snapshotTimeout = nil
         snapshotParts = nil; snapshot = nil; capabilities = nil; stagedSnapshot = nil; catalog = nil
+        heldFrames = nil; heldFramesRead = nil
         pendingReadSnapshots.removeAll()
         subscribedSession = nil
         // The Host keeps this device's file references across connections, and
@@ -123,9 +138,10 @@ extension LiveGianClientService {
         }
         guard retries else { return }
         reconnectAttempt += 1
-        // Back off to one try every 32 s, but keep trying: going to the
-        // background, losing the network or signing out disconnects on purpose.
-        let delay = reconnectBackoffUnit * (1 << min(reconnectAttempt, 5))
+        // Back off to one try every 10 s (5 s while the Host is offline), but
+        // keep trying: going to the background, losing the network or signing
+        // out disconnects on purpose.
+        let delay = Self.reconnectDelay(attempt: reconnectAttempt, unit: reconnectBackoffUnit, error: error)
         reconnect = Task { @MainActor [weak self] in
             do {
                 try await Task.sleep(for: delay)
@@ -168,12 +184,32 @@ extension LiveGianClientService {
         }
     }
 
+    nonisolated static func reconnectDelay(attempt: Int, unit: Duration, error: RemoteClientError) -> Duration {
+        ReconnectBackoff.delay(attempt: attempt, unit: unit, error: error)
+    }
+
+    /// The last device login for this Host, while it has a minute left and
+    /// still matches the stored pairing.
+    func reusableDeviceLease(_ scope: ClientScope) throws -> RemoteDeviceLease? {
+        guard let lease = deviceLeases[scope] else { return nil }
+        guard lease.expiresAt > clock.now().addingTimeInterval(60), try !hostIsInvalid(scope),
+              let host = try requireVault(server: scope.server, account: scope.account).hosts[scope.host.rawValue],
+              host.deviceID == lease.deviceID, host.identity.privateKey == lease.host.identity.privateKey,
+              host.hostKey != nil, host.hostKey == lease.host.hostKey,
+              host.cryptoConnection == lease.host.cryptoConnection else {
+            deviceLeases.removeValue(forKey: scope)
+            return nil
+        }
+        return lease
+    }
+
     /// Signing out is local: this app forgets its controller identity and Host
     /// keys for the Server (the pinned Server identity stays). Hosts keep the
     /// pairing until it is removed there.
     public func logout(server: ServerAddress, account: AccountID) async throws {
         disconnectNow()
         controllerLeases.removeValue(forKey: server)
+        deviceLeases = deviceLeases.filter { $0.key.server != server }
         let loaded = Result { try loadVaultForCleanup(server: server, account: account) }
         try invalidateAccount(server: server, account: account)
         try secrets.remove(activeKey(server))
