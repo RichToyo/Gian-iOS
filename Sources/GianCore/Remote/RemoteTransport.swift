@@ -35,16 +35,27 @@ private final class RemoteSessionDelegate: NSObject, URLSessionTaskDelegate, Sen
 @MainActor
 public final class URLSessionRemoteTransport: RemoteTransport {
     private let session: URLSession
+    private let webSocketSession: URLSession
     public init() {
+        let httpConfiguration = Self.makeBaseConfiguration()
+        httpConfiguration.timeoutIntervalForRequest = 20
+        httpConfiguration.timeoutIntervalForResource = 30
+        session = URLSession(configuration: httpConfiguration, delegate: RemoteSessionDelegate(), delegateQueue: nil)
+
+        // WebSocket tasks stay open indefinitely; sharing the 30 s resource
+        // timeout from HTTP kills every live socket after 30 s.
+        let wsConfiguration = Self.makeBaseConfiguration()
+        wsConfiguration.timeoutIntervalForRequest = 60
+        webSocketSession = URLSession(configuration: wsConfiguration, delegate: RemoteSessionDelegate(), delegateQueue: nil)
+    }
+    private static func makeBaseConfiguration() -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpCookieStorage = nil
         configuration.httpShouldSetCookies = false
         configuration.urlCredentialStorage = nil
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        configuration.timeoutIntervalForRequest = 20
-        configuration.timeoutIntervalForResource = 30
-        session = URLSession(configuration: configuration, delegate: RemoteSessionDelegate(), delegateQueue: nil)
+        return configuration
     }
     public func request(_ request: URLRequest, maximumResponseBytes: Int) async throws -> RemoteHTTPResponse {
         guard request.url?.scheme == "https", maximumResponseBytes > 0 else { throw RemoteClientError.invalidServer }
@@ -61,7 +72,7 @@ public final class URLSessionRemoteTransport: RemoteTransport {
     }
     public func openWebSocket(_ request: URLRequest) async throws -> any RemoteWebSocket {
         guard request.url?.scheme == "wss" else { throw RemoteClientError.invalidServer }
-        let task = session.webSocketTask(with: request)
+        let task = webSocketSession.webSocketTask(with: request)
         task.maximumMessageSize = RemoteWire.maxFrame
         task.resume()
         return URLSessionRemoteSocket(task: task)
